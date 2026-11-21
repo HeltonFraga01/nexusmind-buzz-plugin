@@ -183,10 +183,118 @@ export const CANONICAL_GROUPS = {
     defaultOut: 8192,
     accentColor: "#a855f7",
     logoKey: "grok",
-    modelsCount: 23,
+    modelsCount: 14,
     telemetrySummary: "Hoje: 1.2k tokens • 1 req",
   },
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CANONICAL MODEL GROUP ROUTER & HEURISTIC ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+export const ANTHROPIC_ONLY_CLAUDE = new Set([
+  "claude-fable-5-2",
+  "claude-haiku-4-5-20251001",
+  "claude-haiku-5-5",
+  "claude-mythos-5-2",
+  "claude-opus-4-5-20251101",
+  "claude-opus-5",
+  "claude-sonnet-4-5-20250929",
+  "claude-sonnet-5",
+]);
+
+export const ANTIGRAVITY_ONLY_CLAUDE = new Set([
+  "claude-opus-4-5-thinking",
+  "claude-opus-4-6-thinking",
+  "claude-opus-5-5-high",
+  "claude-opus-5-5-low",
+  "claude-opus-5-5-medium",
+  "claude-sonnet-4-5-thinking",
+  "claude-sonnet-5-5-high",
+  "claude-sonnet-5-5-low",
+  "claude-sonnet-5-5-medium",
+]);
+
+export function getModelGroups(m: any): string[] {
+  if (!m) return [];
+  if (Array.isArray(m.groups) && m.groups.length > 0) return m.groups;
+  const rawId = typeof m === "string" ? m : m.id || "";
+  const mid = rawId.toLowerCase();
+  if (!mid) return [];
+
+  const groups: string[] = [];
+
+  if (mid.includes("grok")) {
+    groups.push("nexusmind_grok");
+  }
+
+  if (
+    mid.includes("gemini") ||
+    mid.includes("antigravity") ||
+    mid.includes("tab_flash") ||
+    mid.includes("gpt-oss") ||
+    mid.includes("imagen")
+  ) {
+    if (!groups.includes("nexusmind_antigravity")) {
+      groups.push("nexusmind_antigravity");
+    }
+  }
+
+  if (mid.includes("claude")) {
+    if (
+      ANTIGRAVITY_ONLY_CLAUDE.has(rawId) ||
+      mid.includes("thinking") ||
+      mid.includes("-high") ||
+      mid.includes("-low") ||
+      mid.includes("-medium")
+    ) {
+      if (!groups.includes("nexusmind_antigravity")) {
+        groups.push("nexusmind_antigravity");
+      }
+    } else if (
+      ANTHROPIC_ONLY_CLAUDE.has(rawId) ||
+      mid.includes("2025") ||
+      mid.includes("mythos")
+    ) {
+      if (!groups.includes("nexusmind_anthropic")) {
+        groups.push("nexusmind_anthropic");
+      }
+    } else {
+      // Modelos Claude compartilhados operacionais em Anthropic e Antigravity
+      if (!groups.includes("nexusmind_anthropic")) {
+        groups.push("nexusmind_anthropic");
+      }
+      if (!groups.includes("nexusmind_antigravity")) {
+        groups.push("nexusmind_antigravity");
+      }
+    }
+  }
+
+  if (
+    mid.includes("mistral") ||
+    mid.includes("stepfun") ||
+    mid.includes("nvidia") ||
+    mid.includes("gemma") ||
+    mid.includes("nemotron") ||
+    mid.includes("glimmer") ||
+    mid.includes("poolside") ||
+    mid.includes("luna") ||
+    mid.includes("gpt-6") ||
+    mid.includes("ising") ||
+    mid.includes("riva") ||
+    mid.includes("muse") ||
+    mid.includes("laguna")
+  ) {
+    if (!groups.includes("nexusmind_openai")) {
+      groups.push("nexusmind_openai");
+    }
+  }
+
+  if (groups.length === 0) {
+    groups.push("nexusmind_openai");
+  }
+
+  return groups;
+}
 
 export interface OfficialEndpoint {
   id: string;
@@ -733,14 +841,14 @@ subprocess.run([sys.executable, script_path])
     const handleTestSingleModel = async (mid: string) => {
       // Determine the optimal sk-... key for this model
       let keyToUse = CANONICAL_GROUPS.nexusmind_openai.defaultKey;
-      const l = mid.toLowerCase();
+      const grps = getModelGroups(mid);
 
-      if (l.includes("grok")) {
-        keyToUse = CANONICAL_GROUPS.nexusmind_grok.defaultKey;
-      } else if (l.includes("claude")) {
-        // Modelos Claude operam com latência reduzida e alta estabilidade via Antigravity-Saldo
+      if (grps.includes("nexusmind_antigravity")) {
+        // Antigravity (Gemini e Claude via Vertex) oferece máxima estabilidade e menor latência
         keyToUse = CANONICAL_GROUPS.nexusmind_antigravity.defaultKey;
-      } else if (l.includes("gemini") || l.includes("antigravity")) {
+      } else if (grps.includes("nexusmind_grok")) {
+        keyToUse = CANONICAL_GROUPS.nexusmind_grok.defaultKey;
+      } else if (grps.includes("nexusmind_anthropic")) {
         keyToUse = CANONICAL_GROUPS.nexusmind_antigravity.defaultKey;
       } else {
         keyToUse = CANONICAL_GROUPS.nexusmind_openai.defaultKey;
@@ -876,16 +984,11 @@ subprocess.run([sys.executable, script_path])
           const mid = item.id;
           if (!mid || disabledModels.includes(mid)) continue; // STRICT PURGE OF DISABLED MODELS
 
-          const l = mid.toLowerCase();
-          if (l.includes("grok")) {
-            groupModelsMap.nexusmind_grok.push(mid);
-          } else if (l.includes("claude")) {
-            groupModelsMap.nexusmind_anthropic.push(mid);
-            groupModelsMap.nexusmind_antigravity.push(mid);
-          } else if (l.includes("gemini") || l.includes("antigravity")) {
-            groupModelsMap.nexusmind_antigravity.push(mid);
-          } else {
-            groupModelsMap.nexusmind_openai.push(mid);
+          const grps = getModelGroups(item);
+          for (const g of grps) {
+            if (groupModelsMap[g]) {
+              groupModelsMap[g].push(mid);
+            }
           }
         }
 
@@ -1122,46 +1225,75 @@ print("SYNC_SUCCESS")
     };
 
     // ─────────────────────────────────────────────────────────────────────────
-    // FILTERING & PAGINATION
+    // FILTERING & PAGINATION (CANONICAL GROUP ROUTING & DYNAMIC COUNTS)
     // ─────────────────────────────────────────────────────────────────────────
-    const filteredModels = models.filter((m: any) => {
-      const mid = m.id || "";
-      const lower = mid.toLowerCase();
+    const groupCounts = React.useMemo(() => {
+      if (models.length === 0) {
+        return {
+          all: 102,
+          nexusmind_openai: CANONICAL_GROUPS.nexusmind_openai.modelsCount,
+          nexusmind_anthropic: CANONICAL_GROUPS.nexusmind_anthropic.modelsCount,
+          nexusmind_antigravity: CANONICAL_GROUPS.nexusmind_antigravity.modelsCount,
+          nexusmind_grok: CANONICAL_GROUPS.nexusmind_grok.modelsCount,
+        };
+      }
+      const counts: Record<string, number> = {
+        all: models.length,
+        nexusmind_openai: 0,
+        nexusmind_anthropic: 0,
+        nexusmind_antigravity: 0,
+        nexusmind_grok: 0,
+      };
+      for (const m of models) {
+        const grps = getModelGroups(m);
+        for (const g of grps) {
+          if (counts[g] !== undefined) counts[g]++;
+        }
+      }
+      return counts;
+    }, [models]);
 
-      // Group tab filter
-      if (selectedGroupTab !== "all") {
-        if (selectedGroupTab === "nexusmind_grok" && !lower.includes("grok")) return false;
-        if (selectedGroupTab === "nexusmind_anthropic" && !lower.includes("claude")) return false;
-        if (selectedGroupTab === "nexusmind_antigravity" && !(lower.includes("gemini") || lower.includes("antigravity"))) return false;
+    const filteredModels = React.useMemo(() => {
+      return models.filter((m: any) => {
+        const mid = m.id || "";
+        const lower = mid.toLowerCase();
+
+        // Group tab filter via canonical model groups
+        if (selectedGroupTab !== "all") {
+          const grps = getModelGroups(m);
+          if (!grps.includes(selectedGroupTab)) return false;
+        }
+
+        // Feature filters
+        if (filterFree && !lower.includes(":free") && !lower.includes("free")) return false;
         if (
-          selectedGroupTab === "nexusmind_openai" &&
-          (lower.includes("grok") || lower.includes("claude") || lower.includes("gemini") || lower.includes("antigravity"))
+          filterReasoning &&
+          !lower.includes("reasoning") &&
+          !lower.includes("think") &&
+          !lower.includes("r1") &&
+          !lower.includes("luna")
         ) {
           return false;
         }
-      }
 
-      // Feature filters
-      if (filterFree && !lower.includes(":free") && !lower.includes("free")) return false;
-      if (
-        filterReasoning &&
-        !lower.includes("reasoning") &&
-        !lower.includes("think") &&
-        !lower.includes("r1") &&
-        !lower.includes("luna")
-      ) {
-        return false;
-      }
+        // Search query
+        if (searchQuery.trim() && !lower.includes(searchQuery.trim().toLowerCase())) {
+          return false;
+        }
 
-      // Search query
-      if (searchQuery.trim() && !lower.includes(searchQuery.trim().toLowerCase())) {
-        return false;
-      }
-
-      return true;
-    });
+        return true;
+      });
+    }, [models, selectedGroupTab, filterFree, filterReasoning, searchQuery]);
 
     const totalPages = pageSize === 0 ? 1 : Math.max(1, Math.ceil(filteredModels.length / (pageSize || 15)));
+
+    // Clamping: ensure currentPage never exceeds totalPages on filter/page size changes
+    React.useEffect(() => {
+      if (currentPage > totalPages) {
+        setCurrentPage(totalPages);
+      }
+    }, [totalPages, currentPage]);
+
     const paginatedModels =
       pageSize === 0
         ? filteredModels
@@ -2144,7 +2276,10 @@ print("SYNC_SUCCESS")
                     h(
                       "button",
                       {
-                        onClick: () => setSelectedGroupTab(isSelected ? "all" : pid),
+                        onClick: () => {
+                          setSelectedGroupTab(isSelected ? "all" : pid);
+                          setCurrentPage(1);
+                        },
                         style: {
                           borderRadius: "9999px",
                           padding: "3px 10px",
@@ -2156,7 +2291,7 @@ print("SYNC_SUCCESS")
                           cursor: "pointer",
                         },
                       },
-                      `${group.modelsCount} modelos`
+                      `${groupCounts[pid] ?? group.modelsCount} modelos`
                     )
                   )
                 );
@@ -2194,11 +2329,11 @@ print("SYNC_SUCCESS")
                   "div",
                   { style: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" } },
                   [
-                    { id: "all", label: `Todos os Grupos (${models.length})` },
-                    { id: "nexusmind_openai", label: "Saldo OpenAI (14)" },
-                    { id: "nexusmind_anthropic", label: "Saldo Claude (18)" },
-                    { id: "nexusmind_antigravity", label: "Antigravity-Saldo (66)" },
-                    { id: "nexusmind_grok", label: "Grok (23)" },
+                    { id: "all", label: `Todos os Grupos (${groupCounts.all})` },
+                    { id: "nexusmind_openai", label: `Saldo OpenAI (${groupCounts.nexusmind_openai})` },
+                    { id: "nexusmind_anthropic", label: `Saldo Claude (${groupCounts.nexusmind_anthropic})` },
+                    { id: "nexusmind_antigravity", label: `Antigravity-Saldo (${groupCounts.nexusmind_antigravity})` },
+                    { id: "nexusmind_grok", label: `Grok (${groupCounts.nexusmind_grok})` },
                   ].map((tab) =>
                     h(
                       "button",
@@ -2274,7 +2409,10 @@ print("SYNC_SUCCESS")
                   h(
                     "button",
                     {
-                      onClick: () => setFilterReasoning((v) => !v),
+                      onClick: () => {
+                        setFilterReasoning((v) => !v);
+                        setCurrentPage(1);
+                      },
                       style: {
                         borderRadius: "9999px",
                         padding: "6px 12px",
@@ -2292,7 +2430,10 @@ print("SYNC_SUCCESS")
                   h(
                     "button",
                     {
-                      onClick: () => setFilterFree((v) => !v),
+                      onClick: () => {
+                        setFilterFree((v) => !v);
+                        setCurrentPage(1);
+                      },
                       style: {
                         borderRadius: "9999px",
                         padding: "6px 12px",
