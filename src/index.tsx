@@ -125,21 +125,14 @@ export interface UserProfileData {
   activeApiKeys?: number;
 }
 
+const AUTH_URL = "https://nexusmind.digital/oauth/mcp/authorize";
+
 export function apply(ctx: Context) {
   const React = ctx.react;
   const h = React.createElement;
 
   function NexusMindComponent({ isSettingsCard = false }: { isSettingsCard?: boolean }) {
-    // Connection Mode: "mcp" or "apikey"
-    const [authMode, setAuthMode] = React.useState<"mcp" | "apikey">(() => {
-      try {
-        return (localStorage.getItem("nexusmind_auth_mode") as any) || "mcp";
-      } catch {
-        return "mcp";
-      }
-    });
-
-    // MCP Server URL & OAuth Token
+    // MCP Server URL & Token
     const [mcpUrl, setMcpUrl] = React.useState(() => {
       try {
         return localStorage.getItem("nexusmind_mcp_url") || "https://nexusmind.digital/api/v1/mcp";
@@ -156,7 +149,7 @@ export function apply(ctx: Context) {
       }
     });
 
-    // Master API Key (Fallback)
+    // Master API Key
     const [apiKey, setApiKey] = React.useState(() => {
       try {
         return localStorage.getItem("nexusmind_api_key") || "";
@@ -265,7 +258,6 @@ export function apply(ctx: Context) {
     // Save Settings
     const handleSaveSettings = () => {
       try {
-        localStorage.setItem("nexusmind_auth_mode", authMode);
         localStorage.setItem("nexusmind_mcp_url", mcpUrl.trim());
         localStorage.setItem("nexusmind_mcp_token", mcpToken.trim());
         localStorage.setItem("nexusmind_api_key", apiKey.trim());
@@ -283,31 +275,108 @@ export function apply(ctx: Context) {
       }
     };
 
-    // Authenticate with NexusMind via OAuth / MCP
-    const handleConnectOAuth = async () => {
+    // Copy Authorization Link
+    const handleCopyAuthUrl = async () => {
+      try {
+        await navigator.clipboard.writeText(AUTH_URL);
+        setStatusMessage({
+          type: "success",
+          text: "Link copiado para a área de transferência! Cole no seu navegador.",
+        });
+      } catch {
+        setStatusMessage({
+          type: "info",
+          text: `Copie manualmente o link: ${AUTH_URL}`,
+        });
+      }
+    };
+
+    // Open Authorization Link in System Browser
+    const handleOpenInBrowser = async () => {
+      // 1. Try host bash spawn (macOS native 'open')
+      try {
+        if (ctx.host && ctx.host.spawn) {
+          await ctx.host.spawn("bash", { args: ["-c", `open "${AUTH_URL}"`] });
+        }
+      } catch {
+        // fallback
+      }
+      // 2. Try window.open
+      try {
+        window.open(AUTH_URL, "_blank");
+      } catch {
+        // fallback
+      }
       setStatusMessage({
         type: "info",
-        text: "Verificando conexão e perfil via NexusMind MCP...",
+        text: "Comando de abertura disparado. Caso não abra automaticamente, utilize o botão 'Copiar Link' ou o link direto.",
+      });
+    };
+
+    // Validate token and connect
+    const handleValidateAndConnect = async () => {
+      const token = mcpToken.trim();
+      if (!token) {
+        setStatusMessage({
+          type: "error",
+          text: "Por favor, cole o Token MCP (OAuth), sua chave de usuário (sk-...) ou chave Admin (adm_...).",
+        });
+        return;
+      }
+
+      setStatusMessage({
+        type: "info",
+        text: "Validando credenciais com o NexusMind...",
       });
 
-      const effectiveToken = mcpToken.trim() || apiKey.trim() || "adm_sc_c321e6a357118c3d6f282333_8484211e801bdfd06feefce9e42354b2d8e205b5599643d17b0ac84803032398";
-      const targetHost = mcpUrl.includes("nexusmind.digital") ? "https://nexusmind.digital" : mcpUrl.replace(/\/api\/.*$/, "");
-
       try {
-        // Probe user profile via REST or JSON-RPC
-        const res = await ctx.host.request({
-          url: `${targetHost}/api/v1/user/profile`,
+        // 1. If admin key (adm_...)
+        if (token.startsWith("adm_")) {
+          const res = await ctx.host.request({
+            url: "https://nexusmind.digital/api/v1/admin/users/3",
+            method: "GET",
+            headers: {
+              "x-api-key": token,
+              "User-Agent": "Mozilla/5.0",
+            },
+            timeoutMs: 12000,
+          });
+
+          if (res.status === 200) {
+            const body = JSON.parse(res.body);
+            const u = body.data || {};
+            const profile: UserProfileData = {
+              username: u.username || "HeltonFraga01",
+              email: u.email || "",
+              balance: u.balance ?? 0,
+              role: "admin",
+            };
+            setProfileData(profile);
+            localStorage.setItem("nexusmind_user_profile", JSON.stringify(profile));
+            localStorage.setItem("nexusmind_mcp_token", token);
+            localStorage.setItem("nexusmind_api_key", token);
+            setApiKey(token);
+            setStatusMessage({
+              type: "success",
+              text: `Conectado com sucesso como ${profile.username} (Admin)! Saldo: $${(profile.balance || 0).toFixed(2)} USD`,
+            });
+            return;
+          }
+        }
+
+        // 2. Try user profile with Bearer token (OAuth access token or JWT)
+        const profileRes = await ctx.host.request({
+          url: "https://nexusmind.digital/api/v1/user/profile",
           method: "GET",
           headers: {
-            Authorization: `Bearer ${effectiveToken}`,
-            "x-api-key": effectiveToken,
+            Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
           },
           timeoutMs: 12000,
         });
 
-        if (res.status === 200) {
-          const body = JSON.parse(res.body);
+        if (profileRes.status === 200) {
+          const body = JSON.parse(profileRes.body);
           const u = body.data || {};
           const profile: UserProfileData = {
             username: u.username || "Usuário NexusMind",
@@ -317,25 +386,72 @@ export function apply(ctx: Context) {
           };
           setProfileData(profile);
           localStorage.setItem("nexusmind_user_profile", JSON.stringify(profile));
+          localStorage.setItem("nexusmind_mcp_token", token);
+          localStorage.setItem("nexusmind_api_key", token);
+          setApiKey(token);
           setStatusMessage({
             type: "success",
-            text: `Conectado com sucesso ao NexusMind! Usuário: ${profile.username} | Saldo: $${(profile.balance || 0).toFixed(2)} USD`,
+            text: `Conectado com sucesso via MCP OAuth! Usuário: ${profile.username} | Saldo: $${(profile.balance || 0).toFixed(2)} USD`,
           });
-        } else {
-          // Fallback: If OAuth browser consent is required
-          window.open("https://nexusmind.digital/oauth/mcp/authorize", "_blank");
-          setStatusMessage({
-            type: "info",
-            text: "Janela de autorização aberta. Conclua o login no navegador e cole o token gerado.",
-          });
+          return;
         }
-      } catch (err: any) {
-        window.open("https://nexusmind.digital/oauth/mcp/authorize", "_blank");
+
+        // 3. Fallback: try models endpoint with Bearer token (User API key sk-...)
+        const modelsRes = await ctx.host.request({
+          url: "https://api.nexusmind.digital/v1/models",
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          timeoutMs: 12000,
+        });
+
+        if (modelsRes.status === 200) {
+          const body = JSON.parse(modelsRes.body);
+          const count = (body.data || []).length;
+          const profile: UserProfileData = {
+            username: "Chave Validada",
+            email: "",
+            balance: 0,
+            role: "api_key",
+          };
+          setProfileData(profile);
+          localStorage.setItem("nexusmind_user_profile", JSON.stringify(profile));
+          localStorage.setItem("nexusmind_mcp_token", token);
+          localStorage.setItem("nexusmind_api_key", token);
+          setApiKey(token);
+          setStatusMessage({
+            type: "success",
+            text: `Chave NexusMind validada com sucesso! ${count} modelos identificados online no catálogo.`,
+          });
+          return;
+        }
+
         setStatusMessage({
-          type: "info",
-          text: `Abrindo página de autenticação no navegador (${err.message})...`,
+          type: "error",
+          text: `Falha na autenticação (HTTP ${profileRes.status || modelsRes.status}). Verifique se a chave ou token informado é válido.`,
+        });
+      } catch (err: any) {
+        setStatusMessage({
+          type: "error",
+          text: `Erro ao validar credenciais: ${err.message}`,
         });
       }
+    };
+
+    // Disconnect
+    const handleDisconnect = () => {
+      setProfileData(null);
+      setMcpToken("");
+      try {
+        localStorage.removeItem("nexusmind_user_profile");
+        localStorage.removeItem("nexusmind_mcp_token");
+      } catch {}
+      setStatusMessage({
+        type: "info",
+        text: "Desconectado do NexusMind.",
+      });
     };
 
     // ─────────────────────────────────────────────────────────────
@@ -1144,7 +1260,7 @@ print("SYNC_SUCCESS")
         ),
 
       // ─────────────────────────────────────────────────────────────
-      // SEÇÃO: CONEXÃO MCP & AUTENTICAÇÃO INTELIGENTE
+      // SEÇÃO: CONEXÃO NEXUSMIND MCP & AUTENTICAÇÃO
       // ─────────────────────────────────────────────────────────────
       h(
         "div",
@@ -1195,7 +1311,7 @@ print("SYNC_SUCCESS")
               h(
                 "div",
                 { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
-                "Autentique pelo endpoint MCP para sincronizar automaticamente perfil, saldo e ferramentas sem copiar chaves manuais."
+                "Autentique para carregar perfil, saldo e credenciais automaticamente."
               )
             )
           ),
@@ -1213,115 +1329,220 @@ print("SYNC_SUCCESS")
                 cursor: "pointer",
               },
             },
-            showAdvancedSettings ? "Ocultar Detalhes" : "⚙️ Chaves Manuais"
+            showAdvancedSettings ? "Ocultar Detalhes" : "⚙️ Chaves Individuais"
           )
         ),
 
-        // Live Profile Badge if connected
-        profileData &&
-          h(
-            "div",
-            {
-              style: {
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                backgroundColor: "rgba(16, 185, 129, 0.08)",
-                border: "1px solid rgba(16, 185, 129, 0.25)",
-                padding: "12px 18px",
-                borderRadius: "12px",
-                marginBottom: "16px",
-                flexWrap: "wrap",
-                gap: "10px",
+        // Live Profile Banner if connected
+        profileData
+          ? h(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  backgroundColor: "rgba(16, 185, 129, 0.08)",
+                  border: "1px solid rgba(16, 185, 129, 0.25)",
+                  padding: "14px 20px",
+                  borderRadius: "14px",
+                  flexWrap: "wrap",
+                  gap: "12px",
+                },
               },
-            },
-            h(
-              "div",
-              { style: { display: "flex", alignItems: "center", gap: "12px" } },
-              h("div", { style: { width: "8px", height: "8px", borderRadius: "50%", backgroundColor: "#10b981" } }),
               h(
                 "div",
-                null,
+                { style: { display: "flex", alignItems: "center", gap: "12px" } },
+                h("div", {
+                  style: {
+                    width: "10px",
+                    height: "10px",
+                    borderRadius: "50%",
+                    backgroundColor: "#10b981",
+                    boxShadow: "0 0 8px #10b981",
+                  },
+                }),
                 h(
-                  "span",
-                  { style: { fontWeight: "600", fontSize: "13px", color: "#ffffff" } },
-                  profileData.username
-                ),
-                h(
-                  "span",
-                  { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)", marginLeft: "8px" } },
-                  profileData.email
-                )
-              )
-            ),
-            h(
-              "div",
-              { style: { display: "flex", alignItems: "center", gap: "14px" } },
-              h(
-                "div",
-                { style: { fontSize: "12px", color: "#8e8e96" } },
-                "Saldo Ativo: ",
-                h(
-                  "strong",
-                  { style: { color: "#10b981", fontSize: "14px" } },
-                  `$${(profileData.balance || 0).toFixed(2)} USD`
+                  "div",
+                  null,
+                  h(
+                    "div",
+                    { style: { fontWeight: "600", fontSize: "14px", color: "#ffffff" } },
+                    `Conectado como ${profileData.username}`
+                  ),
+                  profileData.email &&
+                    h("div", { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } }, profileData.email)
                 )
               ),
               h(
-                "span",
-                {
-                  style: {
-                    fontSize: "11px",
-                    padding: "2px 8px",
-                    borderRadius: "9999px",
-                    backgroundColor: "rgba(255, 255, 255, 0.08)",
-                    color: "#ffffff",
+                "div",
+                { style: { display: "flex", alignItems: "center", gap: "14px" } },
+                profileData.balance !== undefined &&
+                  h(
+                    "div",
+                    { style: { fontSize: "13px", color: "#8e8e96" } },
+                    "Saldo Ativo: ",
+                    h(
+                      "strong",
+                      { style: { color: "#10b981", fontSize: "15px" } },
+                      `$${(profileData.balance || 0).toFixed(2)} USD`
+                    )
+                  ),
+                h(
+                  "button",
+                  {
+                    onClick: handleDisconnect,
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "6px 14px",
+                      backgroundColor: "rgba(239, 68, 68, 0.15)",
+                      color: "#f87171",
+                      border: "none",
+                      cursor: "pointer",
+                      fontSize: "12px",
+                      fontWeight: "500",
+                    },
                   },
-                },
-                profileData.role || "Admin"
+                  "Desconectar / Trocar"
+                )
               )
             )
-          ),
+          : // Not Connected View: Clear 2-step setup with Browser Button, Copy Link and Direct Link!
+            h(
+              "div",
+              { style: { display: "flex", flexDirection: "column", gap: "14px" } },
+              // Step 1: Link & Browser Buttons
+              h(
+                "div",
+                {
+                  style: {
+                    backgroundColor: "rgba(255, 255, 255, 0.02)",
+                    border: "1px solid rgba(255, 255, 255, 0.05)",
+                    padding: "14px 18px",
+                    borderRadius: "12px",
+                  },
+                },
+                h(
+                  "div",
+                  { style: { fontSize: "13px", fontWeight: "500", color: "#ffffff", marginBottom: "8px" } },
+                  "Passo 1: Obter Autorização no NexusMind"
+                ),
+                h(
+                  "div",
+                  { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", marginBottom: "8px" } },
+                  h(
+                    "button",
+                    {
+                      onClick: handleOpenInBrowser,
+                      style: {
+                        borderRadius: "9999px",
+                        padding: "8px 18px",
+                        backgroundColor: "#a855f7",
+                        color: "#ffffff",
+                        border: "none",
+                        cursor: "pointer",
+                        fontWeight: "600",
+                        fontSize: "13px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      },
+                    },
+                    "🌐 Abrir no Navegador"
+                  ),
+                  h(
+                    "button",
+                    {
+                      onClick: handleCopyAuthUrl,
+                      style: {
+                        borderRadius: "9999px",
+                        padding: "8px 18px",
+                        backgroundColor: "rgba(255, 255, 255, 0.08)",
+                        color: "#ffffff",
+                        border: "1px solid rgba(255, 255, 255, 0.12)",
+                        cursor: "pointer",
+                        fontWeight: "500",
+                        fontSize: "13px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      },
+                    },
+                    "📋 Copiar Link de Autorização"
+                  )
+                ),
+                h(
+                  "div",
+                  { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
+                  "Link direto: ",
+                  h(
+                    "a",
+                    {
+                      href: AUTH_URL,
+                      target: "_blank",
+                      rel: "noopener noreferrer",
+                      style: { color: "#c084fc", textDecoration: "underline", wordBreak: "break-all" },
+                    },
+                    AUTH_URL
+                  )
+                )
+              ),
+              // Step 2: Paste Token and Validate
+              h(
+                "div",
+                {
+                  style: {
+                    backgroundColor: "rgba(255, 255, 255, 0.02)",
+                    border: "1px solid rgba(255, 255, 255, 0.05)",
+                    padding: "14px 18px",
+                    borderRadius: "12px",
+                  },
+                },
+                h(
+                  "div",
+                  { style: { fontSize: "13px", fontWeight: "500", color: "#ffffff", marginBottom: "8px" } },
+                  "Passo 2: Inserir Token de Acesso ou Chave"
+                ),
+                h(
+                  "div",
+                  { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } },
+                  h("input", {
+                    type: "password",
+                    value: mcpToken,
+                    onChange: (e: any) => setMcpToken(e.target.value),
+                    placeholder: "Cole aqui o Token OAuth, chave sk-... ou chave adm_...",
+                    style: {
+                      flex: "1 1 320px",
+                      padding: "10px 16px",
+                      borderRadius: "9999px",
+                      border: "1px solid rgba(255, 255, 255, 0.12)",
+                      backgroundColor: "rgba(0, 0, 0, 0.3)",
+                      color: "#ffffff",
+                      fontSize: "13px",
+                    },
+                  }),
+                  h(
+                    "button",
+                    {
+                      onClick: handleValidateAndConnect,
+                      style: {
+                        borderRadius: "9999px",
+                        padding: "10px 22px",
+                        backgroundColor: "#10b981",
+                        color: "#000000",
+                        border: "none",
+                        cursor: "pointer",
+                        fontWeight: "600",
+                        fontSize: "13px",
+                      },
+                    },
+                    "⚡ Validar & Conectar"
+                  )
+                )
+              )
+            ),
 
-        // MCP URL and Connect Row
-        h(
-          "div",
-          { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } },
-          h("input", {
-            type: "text",
-            value: mcpUrl,
-            onChange: (e: any) => setMcpUrl(e.target.value),
-            placeholder: "https://nexusmind.digital/api/v1/mcp",
-            style: {
-              flex: "1 1 300px",
-              padding: "10px 16px",
-              borderRadius: "9999px",
-              border: "1px solid rgba(255, 255, 255, 0.12)",
-              backgroundColor: "rgba(0, 0, 0, 0.3)",
-              color: "#ffffff",
-              fontSize: "13px",
-            },
-          }),
-          h(
-            "button",
-            {
-              onClick: handleConnectOAuth,
-              style: {
-                borderRadius: "9999px",
-                padding: "10px 20px",
-                backgroundColor: "#a855f7",
-                color: "#ffffff",
-                border: "none",
-                cursor: "pointer",
-                fontWeight: "600",
-                fontSize: "13px",
-              },
-            },
-            "🔑 Conectar via OAuth / MCP"
-          )
-        ),
-
-        // Advanced Manual API Keys Section
+        // Advanced Manual Individual Keys Section
         showAdvancedSettings &&
           h(
             "div",
@@ -1333,34 +1554,73 @@ print("SYNC_SUCCESS")
               },
             },
             h(
-              "label",
-              {
-                style: {
-                  display: "block",
-                  fontSize: "12px",
-                  marginBottom: "6px",
-                  color: "var(--text-subtle, #8e8e96)",
+              "div",
+              { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" } },
+              h(
+                "span",
+                { style: { fontSize: "13px", fontWeight: "600", color: "#ffffff" } },
+                "Chaves Individuais por Provedor"
+              ),
+              h(
+                "label",
+                {
+                  style: {
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    fontSize: "12px",
+                    cursor: "pointer",
+                    color: "var(--text-subtle, #8e8e96)",
+                  },
                 },
-              },
-              "Chave Master NexusMind (sk-...):"
+                h("input", {
+                  type: "checkbox",
+                  checked: useCustomGroupKeys,
+                  onChange: (e: any) => setUseCustomGroupKeys(e.target.checked),
+                }),
+                "Sobrescrever chaves por grupo"
+              )
             ),
-            h("input", {
-              type: "password",
-              value: apiKey,
-              onChange: (e: any) => setApiKey(e.target.value),
-              placeholder: "sk-...",
-              style: {
-                width: "100%",
-                padding: "8px 14px",
-                borderRadius: "8px",
-                border: "1px solid rgba(255, 255, 255, 0.1)",
-                backgroundColor: "rgba(0, 0, 0, 0.4)",
-                color: "#ffffff",
-                fontSize: "13px",
-                marginBottom: "10px",
-                boxSizing: "border-box",
-              },
-            }),
+            useCustomGroupKeys &&
+              h(
+                "div",
+                { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" } },
+                Object.entries(CANONICAL_GROUPS).map(([pid, group]) => {
+                  return h(
+                    "div",
+                    { key: pid },
+                    h(
+                      "label",
+                      {
+                        style: {
+                          display: "block",
+                          fontSize: "11px",
+                          marginBottom: "4px",
+                          color: "var(--text-subtle, #8e8e96)",
+                        },
+                      },
+                      `${group.groupName} (${pid}):`
+                    ),
+                    h("input", {
+                      type: "password",
+                      value: groupKeys[pid] || "",
+                      onChange: (e: any) =>
+                        setGroupKeys({ ...groupKeys, [pid]: e.target.value }),
+                      placeholder: group.defaultKey,
+                      style: {
+                        width: "100%",
+                        padding: "8px 12px",
+                        borderRadius: "8px",
+                        border: "1px solid rgba(255, 255, 255, 0.1)",
+                        backgroundColor: "rgba(0, 0, 0, 0.4)",
+                        color: "#ffffff",
+                        boxSizing: "border-box",
+                        fontSize: "12px",
+                      },
+                    })
+                  );
+                })
+              ),
             h(
               "div",
               { style: { display: "flex", gap: "8px" } },
@@ -1370,7 +1630,7 @@ print("SYNC_SUCCESS")
                   onClick: handleSaveSettings,
                   style: {
                     borderRadius: "9999px",
-                    padding: "6px 14px",
+                    padding: "6px 16px",
                     backgroundColor: "rgba(255, 255, 255, 0.1)",
                     color: "#ffffff",
                     border: "none",
@@ -1378,7 +1638,7 @@ print("SYNC_SUCCESS")
                     fontSize: "12px",
                   },
                 },
-                "Salvar Manualmente"
+                "Salvar Chaves Individuais"
               )
             )
           )
@@ -1559,7 +1819,7 @@ print("SYNC_SUCCESS")
                 style: {
                   borderRadius: "9999px",
                   border: "1px solid rgba(255, 255, 255, 0.1)",
-                  backgroundColor: filterFree ? "rgba(16, 185, 129, 0.2)" : "rgba(255, 255, 255, 0.04)",
+                  backgroundColor: filterFree ? "rgba(168, 85, 247, 0.2)" : "rgba(255, 255, 255, 0.04)",
                   color: filterFree ? "#10b981" : "#8e8e96",
                   cursor: "pointer",
                   fontSize: "12px",
