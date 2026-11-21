@@ -1,16 +1,33 @@
 {
-  "id": "digital.nexusmind.gateway",
+  "id": "digital.nexusmind.buzz",
   "name": "NexusMind Gateway",
   "apiVersion": 1,
-  "description": "Conecte seus agentes do Buzz à API unificada do NexusMind com sincronização automática de modelos.",
+  "description": "Conecte seus agentes do Buzz à API unificada do NexusMind com sincronização automática de modelos para Goose e Pi.",
   "discovery": {
     "category": "developer-tools-and-integrations",
-    "tags": ["NexusMind", "LLM", "OpenAI", "Claude", "Grok", "NVIDIA", "AntiGravity"]
+    "tags": [
+      "NexusMind",
+      "LLM",
+      "OpenAI",
+      "Claude",
+      "Grok",
+      "NVIDIA",
+      "AntiGravity"
+    ]
   },
   "host": {
     "networkOrigins": [
       "https://api.nexusmind.digital",
       "https://nexusmind.digital"
+    ],
+    "commands": [
+      {
+        "id": "sync-models",
+        "program": "python3",
+        "args": ["-c"],
+        "maxInputBytes": 65536,
+        "maxOutputBytes": 65536
+      }
     ],
     "processes": [
       {
