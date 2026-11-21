@@ -1345,18 +1345,20 @@ print("SYNC_SUCCESS")
     };
 
     // ─────────────────────────────────────────────────────────────────────────
-    // RENDER: NATIVE CONNECTED COCKPIT (FULL-WIDTH 100% BALANCED DESKTOP EXPERIENCE)
+    // RENDER: NATIVE CONNECTED COCKPIT (FULL-WIDTH RESPONSIVE WORKSPACE)
     // ─────────────────────────────────────────────────────────────────────────
     return h(
       "div",
       {
         style: {
           width: "100%",
-          minHeight: "100vh",
-          backgroundColor: "var(--bg-app, #0d1117)",
+          height: "100%",
+          minHeight: "100%",
+          overflowY: "auto",
+          backgroundColor: "transparent",
           color: "var(--text-normal, #f0f6fc)",
           fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-          padding: "28px 36px",
+          padding: "24px 32px",
           boxSizing: "border-box",
         },
       },
@@ -1364,7 +1366,16 @@ print("SYNC_SUCCESS")
         ? renderDisconnectedHero()
         : h(
             "div",
-            { style: { width: "100%", display: "flex", flexDirection: "column", gap: "24px" } },
+            {
+              style: {
+                width: "100%",
+                maxWidth: "100%",
+                display: "flex",
+                flexDirection: "column",
+                gap: "24px",
+                paddingBottom: "48px",
+              },
+            },
 
             // 1. TOP HEADER & IDENTITY BAR
             h(
@@ -2404,10 +2415,11 @@ print("SYNC_SUCCESS")
     );
   }
 
-  // Register Buzz Page
+  // Register Buzz Page (Workspace Layout fills full width without document-style margins)
   ctx.pages.register({
     id: "nexusmind",
     title: "NexusMind Gateway",
+    layout: "workspace",
     primary: true,
     placement: "topbar",
     icon: ICON,

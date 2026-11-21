@@ -1207,17 +1207,28 @@ print("SYNC_SUCCESS")
       {
         style: {
           width: "100%",
-          minHeight: "100vh",
-          backgroundColor: "var(--bg-app, #0d1117)",
+          height: "100%",
+          minHeight: "100%",
+          overflowY: "auto",
+          backgroundColor: "transparent",
           color: "var(--text-normal, #f0f6fc)",
           fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-          padding: "28px 36px",
+          padding: "24px 32px",
           boxSizing: "border-box"
         }
       },
       !isConnected ? renderDisconnectedHero() : h(
         "div",
-        { style: { width: "100%", display: "flex", flexDirection: "column", gap: "24px" } },
+        {
+          style: {
+            width: "100%",
+            maxWidth: "100%",
+            display: "flex",
+            flexDirection: "column",
+            gap: "24px",
+            paddingBottom: "48px"
+          }
+        },
         // 1. TOP HEADER & IDENTITY BAR
         h(
           "div",
@@ -2195,6 +2206,7 @@ print("SYNC_SUCCESS")
   ctx.pages.register({
     id: "nexusmind",
     title: "NexusMind Gateway",
+    layout: "workspace",
     primary: true,
     placement: "topbar",
     icon: ICON,
