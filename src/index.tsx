@@ -188,6 +188,66 @@ export const CANONICAL_GROUPS = {
   },
 };
 
+export interface OfficialEndpoint {
+  id: string;
+  label: string;
+  tag: string;
+  tagColor: string;
+  url: string;
+  desc: string;
+}
+
+export const OFFICIAL_ENDPOINTS: OfficialEndpoint[] = [
+  {
+    id: "default",
+    label: "Endpoints da API",
+    tag: "Padrão",
+    tagColor: "#10b981",
+    url: "https://api.nexusmind.digital",
+    desc: "Host raiz do gateway e healthcheck",
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic API",
+    tag: "Messages",
+    tagColor: "#d97706",
+    url: "https://api.nexusmind.digital",
+    desc: "Endpoint nativo Anthropic Claude (/v1/messages)",
+  },
+  {
+    id: "openai",
+    label: "OpenAI-compatible API",
+    tag: "v1",
+    tagColor: "#3b82f6",
+    url: "https://api.nexusmind.digital/v1",
+    desc: "OpenAI, Codex, Grok, NIM (/v1/chat/completions)",
+  },
+  {
+    id: "responses",
+    label: "Responses API",
+    tag: "Streaming",
+    tagColor: "#8b5cf6",
+    url: "https://api.nexusmind.digital/responses",
+    desc: "OpenAI Responses API e WebSockets",
+  },
+  {
+    id: "gemini",
+    label: "Gemini Native API",
+    tag: "v1beta",
+    tagColor: "#0284c7",
+    url: "https://api.nexusmind.digital/antigravity/v1beta",
+    desc: "Google GenAI SDK nativo (generateContent)",
+  },
+  {
+    id: "antigravity",
+    label: "Antigravity Bridge",
+    tag: "Contingência",
+    tagColor: "#f59e0b",
+    url: "https://api.nexusmind.digital/antigravity",
+    desc: "Bridge Vertex AI de alta performance para Claude e Gemini",
+  },
+];
+
 export interface UserProfileData {
   username: string;
   email?: string;
@@ -346,6 +406,24 @@ export function apply(ctx: Context) {
         return "";
       }
     });
+
+    const [copiedEndpoint, setCopiedEndpoint] = React.useState<string | null>(null);
+
+    const handleCopyEndpoint = (url: string, label: string) => {
+      try {
+        if (navigator && navigator.clipboard) {
+          navigator.clipboard.writeText(url);
+        }
+      } catch {}
+      setCopiedEndpoint(url);
+      setStatusMessage({
+        type: "info",
+        text: `Endpoint ${label} copiado para a área de transferência: ${url}`,
+      });
+      setTimeout(() => {
+        setCopiedEndpoint((curr) => (curr === url ? null : curr));
+      }, 2500);
+    };
 
     // Telemetry Loader (Live profile / dashboard)
     const fetchTelemetry = async (tokenToUse: string) => {
@@ -845,15 +923,15 @@ CANONICAL = {
     },
     "nexusmind_anthropic": {
         "engine": "anthropic",
-        "api_key_env": "ANTIGRAVITY_API_KEY",
-        "base_url": "https://api.nexusmind.digital/antigravity",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "base_url": "https://api.nexusmind.digital",
         "display_name": "NexusMind Anthropic",
-        "description": "Modelos Anthropic Claude via NexusMind (Roteamento nativo Messages via Antigravity)",
+        "description": "Modelos Anthropic Claude nativos via NexusMind (/v1/messages)",
         "default_ctx": 1000000,
         "default_out": 8192,
         "default_model": "claude-sonnet-4-6",
         "pi_api": "anthropic-messages",
-        "pi_baseUrl": "https://api.nexusmind.digital/antigravity"
+        "pi_baseUrl": "https://api.nexusmind.digital"
     },
     "nexusmind_antigravity": {
         "engine": "openai",
@@ -878,6 +956,18 @@ CANONICAL = {
         "default_model": "grok-4.5",
         "pi_api": "openai-compatible",
         "pi_baseUrl": "https://api.nexusmind.digital/v1"
+    },
+    "nexusmind_responses": {
+        "engine": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": "https://api.nexusmind.digital/responses",
+        "display_name": "NexusMind Responses",
+        "description": "OpenAI Responses API e WebSocket streaming via NexusMind",
+        "default_ctx": 131072,
+        "default_out": 8192,
+        "default_model": "gpt-5",
+        "pi_api": "openai-compatible",
+        "pi_baseUrl": "https://api.nexusmind.digital/responses"
     }
 }
 
@@ -1639,6 +1729,89 @@ print("SYNC_SUCCESS")
                   )
                 )
               )
+            ),
+
+            // OFFICIAL NEXUSMIND GATEWAY ENDPOINTS BAR (Matching Official Dashboard)
+            h(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  overflowX: "auto",
+                  padding: "4px 2px 8px",
+                  scrollbarWidth: "none",
+                },
+              },
+              OFFICIAL_ENDPOINTS.map((ep) => {
+                const isCopied = copiedEndpoint === ep.url;
+                return h(
+                  "div",
+                  {
+                    key: ep.id,
+                    onClick: () => handleCopyEndpoint(ep.url, ep.label),
+                    title: `${ep.desc} — Clique para copiar (${ep.url})`,
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                      backgroundColor: isCopied ? "rgba(16, 185, 129, 0.15)" : "rgba(255, 255, 255, 0.04)",
+                      border: isCopied ? "1px solid rgba(16, 185, 129, 0.4)" : "1px solid rgba(255, 255, 255, 0.08)",
+                      borderRadius: "9999px",
+                      padding: "6px 14px",
+                      cursor: "pointer",
+                      fontSize: "12px",
+                      color: isCopied ? "#10b981" : "var(--text-normal, #e4e4e7)",
+                      whiteSpace: "nowrap",
+                      transition: "all 0.15s ease",
+                      flexShrink: 0,
+                    },
+                  },
+                  h("span", { style: { fontWeight: "600", fontSize: "11px", color: "#f4f4f5" } }, ep.label),
+                  h(
+                    "span",
+                    {
+                      style: {
+                        fontSize: "10px",
+                        padding: "1px 6px",
+                        borderRadius: "4px",
+                        backgroundColor: `${ep.tagColor}22`,
+                        color: ep.tagColor,
+                        fontWeight: "600",
+                        border: `1px solid ${ep.tagColor}44`,
+                      },
+                    },
+                    ep.tag
+                  ),
+                  h("span", { style: { opacity: 0.3 } }, "|"),
+                  h(
+                    "code",
+                    {
+                      style: {
+                        fontFamily: "monospace",
+                        fontSize: "11px",
+                        color: isCopied ? "#10b981" : "var(--text-subtle, #a1a1aa)",
+                      },
+                    },
+                    ep.url
+                  ),
+                  h(
+                    "span",
+                    {
+                      style: {
+                        display: "inline-flex",
+                        alignItems: "center",
+                        marginLeft: "2px",
+                        color: isCopied ? "#10b981" : "var(--text-subtle, #71717a)",
+                      },
+                    },
+                    isCopied
+                      ? SVG_ICONS.check({ h, width: 12, height: 12 })
+                      : SVG_ICONS.copy({ h, width: 12, height: 12 })
+                  )
+                );
+              })
             ),
 
             // 2. STATUS TOAST BANNER (IF ACTIVE)
