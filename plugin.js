@@ -717,7 +717,7 @@ subprocess.run([sys.executable, script_path])
           groupModels: groupModelsMap
         };
         const pythonSyncScript = `
-import os, sys, json
+import os, sys, json, subprocess
 
 payload = json.loads('''${JSON.stringify(syncPayload)}''')
 keys = payload["effectiveKeys"]
@@ -725,32 +725,52 @@ group_models = payload["groupModels"]
 
 CANONICAL = {
     "nexusmind_openai": {
+        "engine": "openai",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": "https://api.nexusmind.digital/v1",
         "display_name": "NexusMind OpenAI",
         "description": "Modelos OpenAI, Codex, NVIDIA NIM e OpenCode via NexusMind",
         "default_ctx": 131072,
         "default_out": 8192,
-        "default_model": "mistralai/mistral-large-4-1t-a52b"
+        "default_model": "mistralai/mistral-large-4-1t-a52b",
+        "pi_api": "openai-compatible",
+        "pi_baseUrl": "https://api.nexusmind.digital/v1"
     },
     "nexusmind_anthropic": {
+        "engine": "anthropic",
+        "api_key_env": "ANTIGRAVITY_API_KEY",
+        "base_url": "https://api.nexusmind.digital/antigravity",
         "display_name": "NexusMind Anthropic",
-        "description": "Modelos Anthropic Claude via NexusMind",
-        "default_ctx": 200000,
+        "description": "Modelos Anthropic Claude via NexusMind (Roteamento nativo Messages via Antigravity)",
+        "default_ctx": 1000000,
         "default_out": 8192,
-        "default_model": "claude-sonnet-4-6"
+        "default_model": "claude-sonnet-4-6",
+        "pi_api": "anthropic-messages",
+        "pi_baseUrl": "https://api.nexusmind.digital/antigravity"
     },
     "nexusmind_antigravity": {
+        "engine": "openai",
+        "api_key_env": "ANTIGRAVITY_API_KEY",
+        "base_url": "https://api.nexusmind.digital/v1",
         "display_name": "NexusMind Anti-Gravity",
         "description": "Modelos Google Gemini, Claude e Anti-Gravity Gateway",
         "default_ctx": 1048576,
         "default_out": 65536,
-        "default_model": "gemini-3.8-flash-medium"
+        "default_model": "gemini-3.8-flash-medium",
+        "pi_api": "openai-compatible",
+        "pi_baseUrl": "https://api.nexusmind.digital/v1"
     },
     "nexusmind_grok": {
+        "engine": "openai",
+        "api_key_env": "GROK_API_KEY",
+        "base_url": "https://api.nexusmind.digital/v1",
         "display_name": "NexusMind Grok",
         "description": "Modelos xAI Grok via NexusMind",
         "default_ctx": 131072,
         "default_out": 8192,
-        "default_model": "grok-4.5"
+        "default_model": "grok-4.5",
+        "pi_api": "openai-compatible",
+        "pi_baseUrl": "https://api.nexusmind.digital/v1"
     }
 }
 
@@ -769,17 +789,47 @@ for pid, cfg in CANONICAL.items():
         })
     provider_json = {
         "name": pid,
-        "engine": "openai",
+        "engine": cfg["engine"],
         "display_name": cfg["display_name"],
         "description": cfg["description"],
         "api_key": keys.get(pid, ""),
-        "base_url": "https://api.nexusmind.digital/v1",
+        "base_url": cfg["base_url"],
+        "api_key_env": cfg["api_key_env"],
         "models": models_spec
     }
     with open(os.path.join(goose_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
         json.dump(provider_json, f, indent=2)
 
-# 2. Update Pi models.json locations
+# 2. Update Goose config.yaml & secrets.yaml
+goose_conf_path = os.path.expanduser("~/.config/goose/config.yaml")
+goose_secrets_path = os.path.expanduser("~/.config/goose/secrets.yaml")
+
+secrets_map = {
+    "OPENAI_API_KEY": keys.get("nexusmind_openai", ""),
+    "ANTIGRAVITY_API_KEY": keys.get("nexusmind_antigravity", ""),
+    "ANTHROPIC_API_KEY": keys.get("nexusmind_antigravity", "") or keys.get("nexusmind_anthropic", ""),
+    "GROK_API_KEY": keys.get("nexusmind_grok", ""),
+    "XAI_API_KEY": keys.get("nexusmind_grok", ""),
+    "GOOGLE_API_KEY": keys.get("nexusmind_antigravity", "")
+}
+
+with open(goose_secrets_path, "w", encoding="utf-8") as f:
+    for k, v in secrets_map.items():
+        f.write(f"{k}: {v}\\n")
+
+# Update macOS Keychain for Goose if security tool exists
+try:
+    keyring_json = json.dumps(secrets_map)
+    subprocess.run([
+        "security", "add-generic-password", "-U",
+        "-s", "goose",
+        "-a", "secrets",
+        "-w", keyring_json
+    ], capture_output=True, timeout=5)
+except Exception:
+    pass
+
+# 3. Update Pi models.json & auth.json locations
 pi_paths = [
     os.path.expanduser("~/.buzz/.pi/models.json"),
     os.path.expanduser("~/.buzz/.pi/agent/models.json"),
@@ -809,14 +859,38 @@ for p in pi_paths:
                 "maxTokens": cfg["default_out"]
             }
         pi_data["providers"][pid] = {
-            "baseUrl": "https://api.nexusmind.digital/v1",
+            "baseUrl": cfg["pi_baseUrl"],
             "apiKey": keys.get(pid, ""),
-            "api": "openai-compatible",
+            "api": cfg["pi_api"],
             "models": pi_models
         }
 
     with open(p, "w", encoding="utf-8") as f:
         json.dump(pi_data, f, indent=2)
+
+pi_auth_paths = [
+    os.path.expanduser("~/.buzz/.pi/auth.json"),
+    os.path.expanduser("~/.buzz/.pi/agent/auth.json"),
+    os.path.expanduser("~/.pi/agent/auth.json"),
+    os.path.expanduser("~/.pi/auth.json")
+]
+
+for ap in pi_auth_paths:
+    os.makedirs(os.path.dirname(ap), exist_ok=True)
+    auth_data = {}
+    if os.path.exists(ap):
+        try:
+            with open(ap, "r", encoding="utf-8") as f:
+                auth_data = json.load(f)
+        except Exception:
+            pass
+    for pid in CANONICAL.keys():
+        auth_data[pid] = {
+            "type": "api_key",
+            "key": keys.get(pid, "")
+        }
+    with open(ap, "w", encoding="utf-8") as f:
+        json.dump(auth_data, f, indent=2)
 
 print("SYNC_SUCCESS")
 `;
