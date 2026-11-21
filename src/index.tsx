@@ -17,6 +17,7 @@ export interface CanonicalGroup {
   defaultModel: string;
   defaultCtx: number;
   defaultOut: number;
+  operationalNote?: string;
 }
 
 export const CANONICAL_GROUPS: Record<string, CanonicalGroup> = {
@@ -24,31 +25,34 @@ export const CANONICAL_GROUPS: Record<string, CanonicalGroup> = {
     id: "nexusmind_openai",
     groupName: "Saldo OpenAI",
     displayName: "NexusMind OpenAI",
-    description: "Modelos OpenAI, Codex e NVIDIA NIM via NexusMind (Grupo Saldo OpenAI)",
+    description: "Modelos OpenAI, Codex, NVIDIA NIM e OpenCode via NexusMind (Grupo Saldo OpenAI)",
     defaultKey: "sk-2ee0581e607d02f3485e0efcad2ff686e2b889720f63497813b8fb45eb9d0f08",
-    defaultModel: "google/gemma-4-31b-it",
+    defaultModel: "mistralai/mistral-large-4-1t-a52b",
     defaultCtx: 131072,
     defaultOut: 8192,
+    operationalNote: "NVIDIA NIM e contas OpenCode operam neste grupo.",
   },
   nexusmind_anthropic: {
     id: "nexusmind_anthropic",
     groupName: "Saldo Claude",
     displayName: "NexusMind Anthropic",
-    description: "Modelos Anthropic Claude 3.5 e 3.7 via NexusMind (Grupo Saldo Claude)",
+    description: "Modelos Anthropic Claude via NexusMind (Grupo Saldo Claude)",
     defaultKey: "sk-bd4137aa79f121bbf4e110d788a7f587b68b49432d333ad9abd88051ba393b1c",
     defaultModel: "claude-sonnet-4-6",
     defaultCtx: 200000,
     defaultOut: 8192,
+    operationalNote: "Contingência: Modelos Claude ativos também são roteados via Antigravity-Saldo.",
   },
   nexusmind_antigravity: {
     id: "nexusmind_antigravity",
     groupName: "Antigravity-Saldo",
     displayName: "NexusMind Anti-Gravity",
-    description: "Modelos Google Gemini e Anti-Gravity Gateway via NexusMind (Grupo Antigravity-Saldo)",
+    description: "Modelos Google Gemini, Claude e Anti-Gravity Gateway via NexusMind (Grupo Antigravity-Saldo)",
     defaultKey: "sk-cf8ffed3d96eff9ca80093aee98c589dcf67cf6932c76cd45e223429204051a0",
     defaultModel: "gemini-3.8-flash-medium",
     defaultCtx: 1048576,
     defaultOut: 65536,
+    operationalNote: "Gateway de alta taxa e suporte a raciocínio estendido.",
   },
   nexusmind_grok: {
     id: "nexusmind_grok",
@@ -78,7 +82,6 @@ function isReasoning(modelId: string): boolean {
     m.includes("ultra") ||
     m.includes("luna") ||
     m.includes("sol") ||
-    m.includes("free") ||
     m.includes("claude-3-7")
   );
 }
@@ -97,13 +100,17 @@ function getMaxTokens(pid: string, modelId: string): number {
   return 8192;
 }
 
+export interface ModelTestState {
+  status: "idle" | "testing" | "ok" | "error";
+  latencyMs?: number;
+  message?: string;
+}
+
 export function apply(ctx: Context) {
   const React = ctx.react;
   const h = React.createElement;
 
   function NexusMindComponent({ isSettingsCard = false }: { isSettingsCard?: boolean }) {
-    const ui = ctx.reflect.get("ui") as any;
-
     // Master API Key
     const [apiKey, setApiKey] = React.useState(() => {
       try {
@@ -138,10 +145,24 @@ export function apply(ctx: Context) {
       };
     });
 
+    // Disabled models list (persisted in localStorage)
+    const [disabledModels, setDisabledModels] = React.useState<string[]>(() => {
+      try {
+        const stored = localStorage.getItem("nexusmind_disabled_models");
+        return stored ? JSON.parse(stored) : [];
+      } catch {
+        return [];
+      }
+    });
+
+    // Real-time model test states (modelId -> ModelTestState)
+    const [modelTests, setModelTests] = React.useState<Record<string, ModelTestState>>({});
+
     const [selectedGroupTab, setSelectedGroupTab] = React.useState<string>("all");
     const [searchQuery, setSearchQuery] = React.useState<string>("");
     const [filterFree, setFilterFree] = React.useState<boolean>(false);
     const [filterReasoning, setFilterReasoning] = React.useState<boolean>(false);
+    const [showMcpSection, setShowMcpSection] = React.useState<boolean>(false);
 
     const [models, setModels] = React.useState<any[]>(() => {
       try {
@@ -153,6 +174,7 @@ export function apply(ctx: Context) {
     });
 
     const [loading, setLoading] = React.useState<boolean>(false);
+    const [batchTesting, setBatchTesting] = React.useState<boolean>(false);
     const [statusMessage, setStatusMessage] = React.useState<{
       type: "success" | "error" | "info";
       text: string;
@@ -165,6 +187,15 @@ export function apply(ctx: Context) {
         return "";
       }
     });
+
+    const getEffectiveKeyForModel = (mid: string): string => {
+      if (!useCustomGroupKeys && apiKey.trim()) return apiKey.trim();
+      const l = mid.toLowerCase();
+      if (l.includes("grok")) return groupKeys.nexusmind_grok || CANONICAL_GROUPS.nexusmind_grok.defaultKey;
+      if (l.includes("claude")) return groupKeys.nexusmind_anthropic || CANONICAL_GROUPS.nexusmind_anthropic.defaultKey;
+      if (l.includes("gemini") || l.includes("antigravity")) return groupKeys.nexusmind_antigravity || CANONICAL_GROUPS.nexusmind_antigravity.defaultKey;
+      return groupKeys.nexusmind_openai || CANONICAL_GROUPS.nexusmind_openai.defaultKey;
+    };
 
     const handleSaveKeys = () => {
       try {
@@ -212,7 +243,7 @@ export function apply(ctx: Context) {
           const list = body.data || [];
           setStatusMessage({
             type: "success",
-            text: `Conexão NexusMind OK! Status 200. ${list.length} modelos identificados online.`,
+            text: `Conexão NexusMind OK! Status 200. ${list.length} modelos identificados online no catálogo upstream.`,
           });
         } else {
           setStatusMessage({
@@ -230,15 +261,149 @@ export function apply(ctx: Context) {
       }
     };
 
+    // Live ping / healthcheck for an individual model
+    const handleTestModel = async (mid: string) => {
+      const key = getEffectiveKeyForModel(mid);
+      setModelTests((prev) => ({
+        ...prev,
+        [mid]: { status: "testing" },
+      }));
+
+      const t0 = Date.now();
+      try {
+        const res = await ctx.host.request({
+          url: "https://api.nexusmind.digital/v1/chat/completions",
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: mid,
+            messages: [{ role: "user", content: "Diga 1 palavra" }],
+            max_tokens: 5,
+          }),
+          timeoutMs: 14000,
+        });
+
+        const latency = Date.now() - t0;
+        if (res.status === 200) {
+          setModelTests((prev) => ({
+            ...prev,
+            [mid]: { status: "ok", latencyMs: latency },
+          }));
+        } else {
+          let msg = `HTTP ${res.status}`;
+          try {
+            const b = JSON.parse(res.body);
+            msg = b.error?.message || b.message || msg;
+          } catch {
+            // ignore
+          }
+          if (msg.length > 45) msg = msg.slice(0, 42) + "...";
+          setModelTests((prev) => ({
+            ...prev,
+            [mid]: { status: "error", latencyMs: latency, message: msg },
+          }));
+        }
+      } catch (err: any) {
+        const latency = Date.now() - t0;
+        let msg = err.message || "Timeout/Rede";
+        if (msg.length > 45) msg = msg.slice(0, 42) + "...";
+        setModelTests((prev) => ({
+          ...prev,
+          [mid]: { status: "error", latencyMs: latency, message: msg },
+        }));
+      }
+    };
+
+    // Batch test all currently visible/filtered models
+    const handleTestVisibleModels = async () => {
+      const toTest = filteredModels.map((m: any) => m.id).filter(Boolean);
+      if (toTest.length === 0) return;
+      setBatchTesting(true);
+      setStatusMessage({
+        type: "info",
+        text: `Iniciando teste live para ${toTest.length} modelos visíveis...`,
+      });
+
+      for (const mid of toTest) {
+        await handleTestModel(mid);
+      }
+
+      setBatchTesting(false);
+      setStatusMessage({
+        type: "success",
+        text: `Bateria de testes concluída para ${toTest.length} modelos!`,
+      });
+    };
+
+    // Toggle individual model enable/disable state
+    const handleToggleModel = (mid: string) => {
+      let updated: string[];
+      if (disabledModels.includes(mid)) {
+        updated = disabledModels.filter((id) => id !== mid);
+      } else {
+        updated = [...disabledModels, mid];
+      }
+      setDisabledModels(updated);
+      try {
+        localStorage.setItem("nexusmind_disabled_models", JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+    };
+
+    // Disable all models that failed the test
+    const handleDisableUnavailable = () => {
+      const failing = Object.entries(modelTests)
+        .filter(([_, data]) => data.status === "error")
+        .map(([mid]) => mid);
+
+      if (failing.length === 0) {
+        setStatusMessage({
+          type: "info",
+          text: "Nenhum modelo com status de erro identificado nos testes recentes.",
+        });
+        return;
+      }
+
+      const updated = Array.from(new Set([...disabledModels, ...failing]));
+      setDisabledModels(updated);
+      try {
+        localStorage.setItem("nexusmind_disabled_models", JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      setStatusMessage({
+        type: "success",
+        text: `${failing.length} modelos indisponíveis desativados! Clique em '⚡ Sincronizar Modelos no Buzz' para removê-los do Goose e Pi.`,
+      });
+    };
+
+    // Re-enable all models
+    const handleEnableAll = () => {
+      setDisabledModels([]);
+      try {
+        localStorage.setItem("nexusmind_disabled_models", JSON.stringify([]));
+      } catch {
+        // ignore
+      }
+      setStatusMessage({
+        type: "info",
+        text: "Todos os modelos foram reativados no catálogo.",
+      });
+    };
+
+    // Sync Models with active filters applied
     const handleSyncModels = async () => {
       setLoading(true);
       setStatusMessage({
         type: "info",
-        text: "Consultando API do NexusMind e gerando catálogos Goose e Pi...",
+        text: "Consultando API do NexusMind, aplicando filtros e configurando Goose e Pi...",
       });
 
       try {
-        // Collect effective keys for each group
         const effectiveKeys: Record<string, string> = {
           nexusmind_openai:
             (useCustomGroupKeys ? groupKeys.nexusmind_openai : apiKey.trim()) ||
@@ -254,7 +419,6 @@ export function apply(ctx: Context) {
             CANONICAL_GROUPS.nexusmind_grok.defaultKey,
         };
 
-        // Query models per group or globally
         const groupModelsMap: Record<string, string[]> = {
           nexusmind_openai: [],
           nexusmind_anthropic: [],
@@ -265,7 +429,7 @@ export function apply(ctx: Context) {
         const allFetched: any[] = [];
         const seenIds = new Set<string>();
 
-        // Fetch from API using group tokens
+        // Query upstream models
         for (const [pid, key] of Object.entries(effectiveKeys)) {
           try {
             const res = await ctx.host.request({
@@ -324,23 +488,36 @@ export function apply(ctx: Context) {
               }
             }
           } catch {
-            // fallback to default model if network error for that specific group
+            // fallback handled below
           }
         }
 
-        // Fill fallback models if empty
-        for (const [pid, groupDef] of Object.entries(CANONICAL_GROUPS)) {
-          if (!groupModelsMap[pid] || groupModelsMap[pid].length === 0) {
-            groupModelsMap[pid] = [groupDef.defaultModel];
+        // CRUCIAL: Filter out disabled models so they are NEVER exposed to Goose or Pi!
+        let totalExcluded = 0;
+        for (const pid of Object.keys(groupModelsMap)) {
+          const before = groupModelsMap[pid].length;
+          groupModelsMap[pid] = groupModelsMap[pid].filter((m) => !disabledModels.includes(m));
+          totalExcluded += before - groupModelsMap[pid].length;
+          // Ensure at least default model exists if all were disabled
+          if (groupModelsMap[pid].length === 0) {
+            groupModelsMap[pid] = [CANONICAL_GROUPS[pid].defaultModel];
           }
         }
 
         setModels(allFetched);
-        localStorage.setItem("nexusmind_cached_models", JSON.stringify(allFetched));
+        try {
+          localStorage.setItem("nexusmind_cached_models", JSON.stringify(allFetched));
+        } catch {
+          // ignore
+        }
 
         const now = new Date().toLocaleString();
         setLastSyncTime(now);
-        localStorage.setItem("nexusmind_last_sync", now);
+        try {
+          localStorage.setItem("nexusmind_last_sync", now);
+        } catch {
+          // ignore
+        }
 
         // Build complete Python payload to write Goose and Pi files
         const syncPayload = {
@@ -358,21 +535,21 @@ group_models = payload["groupModels"]
 CANONICAL = {
     "nexusmind_openai": {
         "display_name": "NexusMind OpenAI",
-        "description": "Modelos OpenAI, Codex e NVIDIA NIM via NexusMind (Grupo Saldo OpenAI)",
+        "description": "Modelos OpenAI, Codex, NVIDIA NIM e OpenCode via NexusMind (Grupo Saldo OpenAI)",
         "default_ctx": 131072,
         "default_out": 8192,
-        "default_model": "google/gemma-4-31b-it"
+        "default_model": "mistralai/mistral-large-4-1t-a52b"
     },
     "nexusmind_anthropic": {
         "display_name": "NexusMind Anthropic",
-        "description": "Modelos Anthropic Claude 3.5 e 3.7 via NexusMind (Grupo Saldo Claude)",
+        "description": "Modelos Anthropic Claude via NexusMind (Grupo Saldo Claude)",
         "default_ctx": 200000,
         "default_out": 8192,
         "default_model": "claude-sonnet-4-6"
     },
     "nexusmind_antigravity": {
         "display_name": "NexusMind Anti-Gravity",
-        "description": "Modelos Google Gemini e Anti-Gravity Gateway via NexusMind (Grupo Antigravity-Saldo)",
+        "description": "Modelos Google Gemini, Claude e Anti-Gravity Gateway via NexusMind (Grupo Antigravity-Saldo)",
         "default_ctx": 1048576,
         "default_out": 65536,
         "default_model": "gemini-3.8-flash-medium"
@@ -388,7 +565,7 @@ CANONICAL = {
 
 def is_reasoning(m):
     l = m.lower()
-    return any(w in l for w in ["reason", "thinking", "opus", "sonnet", "o1", "o3", "medium", "high", "sonar", "flash", "ultra", "luna", "sol", "free", "claude-3-7"])
+    return any(w in l for w in ["reason", "thinking", "opus", "sonnet", "o1", "o3", "medium", "high", "sonar", "flash", "ultra", "luna", "sol", "claude-3-7"])
 
 # 1. Update Goose Custom Providers
 goose_dir = os.path.expanduser("~/.config/goose/custom_providers")
@@ -477,7 +654,7 @@ if os.path.exists(goose_yaml):
             "nexusmind_grok": {"enabled": True, "configured": True, "model": "grok-4.5"},
             "nexusmind_anthropic": {"enabled": True, "configured": True, "model": "claude-sonnet-4-6"},
             "nexusmind_antigravity": {"enabled": True, "configured": True, "model": "gemini-3.8-flash-medium"},
-            "nexusmind_openai": {"enabled": True, "configured": True, "model": "google/gemma-4-31b-it"}
+            "nexusmind_openai": {"enabled": True, "configured": True, "model": "mistralai/mistral-large-4-1t-a52b"}
         }
         gy["active_provider"] = "nexusmind_antigravity"
         with open(goose_yaml, "w") as f:
@@ -485,7 +662,7 @@ if os.path.exists(goose_yaml):
     except:
         pass
 
-# 2. Update Pi Configuration in all directories
+# 2. Update Pi Configuration
 pi_models_payload = {"providers": pi_providers}
 pi_settings_payload = {
     "defaultProvider": "nexusmind_antigravity",
@@ -533,7 +710,7 @@ print("SYNC_SUCCESS")
 
         setStatusMessage({
           type: "success",
-          text: `Sincronização 100% concluída! ${totalActive} modelos ativos configurados nos 4 provedores do Goose (~/.config/goose/custom_providers/) e Pi (~/.buzz/.pi/models.json).`,
+          text: `Sincronização concluída com sucesso! ${totalActive} modelos ativos registrados no Goose e Pi (${totalExcluded} modelos desativados foram expurgados do catálogo).`,
         });
       } catch (err: any) {
         setStatusMessage({
@@ -548,7 +725,7 @@ print("SYNC_SUCCESS")
     // Filter models
     const filteredModels = models.filter((m: any) => {
       const id = (m.id || "").toLowerCase();
-      if (filterFree && !id.includes("free")) return false;
+      if (filterFree && !id.includes("free") && !id.includes("contributor")) return false;
       if (filterReasoning && !isReasoning(id)) return false;
 
       if (
@@ -606,11 +783,29 @@ print("SYNC_SUCCESS")
           h(
             "div",
             null,
-            h("div", { style: { fontWeight: "600", fontSize: "14px" } }, "NexusMind Gateway"),
+            h(
+              "div",
+              { style: { display: "flex", alignItems: "center", gap: "6px" } },
+              h("span", { style: { fontWeight: "600", fontSize: "14px" } }, "NexusMind Gateway"),
+              h(
+                "span",
+                {
+                  style: {
+                    fontSize: "10px",
+                    padding: "1px 6px",
+                    borderRadius: "10px",
+                    backgroundColor: "rgba(16, 185, 129, 0.2)",
+                    color: "#10b981",
+                    fontWeight: "600",
+                  },
+                },
+                "v2.0"
+              )
+            ),
             h(
               "div",
               { style: { fontSize: "12px", color: "var(--text-subtle, #a0a0a0)" } },
-              "Gateway oficial de IA para os agentes Goose e Pi no ecossistema OrgFy."
+              "Gateway oficial com Healthcheck de Modelos, Filtros e Sincronização Goose & Pi."
             )
           )
         ),
@@ -643,7 +838,14 @@ print("SYNC_SUCCESS")
           null,
           h(
             "label",
-            { style: { display: "block", fontSize: "12px", marginBottom: "4px", color: "var(--text-subtle, #a0a0a0)" } },
+            {
+              style: {
+                display: "block",
+                fontSize: "12px",
+                marginBottom: "4px",
+                color: "var(--text-subtle, #a0a0a0)",
+              },
+            },
             "NexusMind API Key:"
           ),
           h("input", {
@@ -732,7 +934,7 @@ print("SYNC_SUCCESS")
                 marginLeft: "auto",
               },
             },
-            "Abrir Página do Plugin →"
+            "Abrir Gerenciador Avançado →"
           )
         )
       );
@@ -744,7 +946,7 @@ print("SYNC_SUCCESS")
       {
         style: {
           padding: "var(--space-6, 24px)",
-          maxWidth: "1024px",
+          maxWidth: "1080px",
           margin: "0 auto",
           color: "var(--text-standard, #ffffff)",
           fontFamily: "var(--font-sans, system-ui)",
@@ -761,6 +963,8 @@ print("SYNC_SUCCESS")
             borderBottom: "1px solid var(--border-subtle, #333338)",
             paddingBottom: "var(--space-4, 16px)",
             marginBottom: "var(--space-6, 24px)",
+            flexWrap: "wrap",
+            gap: "12px",
           },
         },
         h(
@@ -790,8 +994,23 @@ print("SYNC_SUCCESS")
                     fontWeight: "600",
                   },
                 },
-                "OFICIAL"
-              )
+                "v2.0 OFICIAL"
+              ),
+              disabledModels.length > 0 &&
+                h(
+                  "span",
+                  {
+                    style: {
+                      fontSize: "11px",
+                      padding: "2px 8px",
+                      borderRadius: "12px",
+                      backgroundColor: "rgba(239, 68, 68, 0.2)",
+                      color: "#ef4444",
+                      fontWeight: "600",
+                    },
+                  },
+                  `${disabledModels.length} desativado(s)`
+                )
             ),
             h(
               "p",
@@ -802,30 +1021,51 @@ print("SYNC_SUCCESS")
                   fontSize: "13px",
                 },
               },
-              "Integração canônica do NexusMind para os 4 provedores do Buzz Desktop (Goose e Pi)."
+              "Integração canônica do NexusMind com Healthcheck, Gestão de Modelos e MCP para Goose e Pi."
             )
           )
         ),
         h(
-          "button",
-          {
-            onClick: handleSyncModels,
-            disabled: loading,
-            style: {
-              padding: "10px 22px",
-              borderRadius: "8px",
-              backgroundColor: "#10b981",
-              color: "#000000",
-              border: "none",
-              cursor: loading ? "not-allowed" : "pointer",
-              fontWeight: "600",
-              fontSize: "14px",
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
+          "div",
+          { style: { display: "flex", gap: "10px", alignItems: "center" } },
+          h(
+            "button",
+            {
+              onClick: () => setShowMcpSection(!showMcpSection),
+              style: {
+                padding: "8px 16px",
+                borderRadius: "8px",
+                backgroundColor: showMcpSection ? "rgba(168, 85, 247, 0.2)" : "#23232b",
+                color: showMcpSection ? "#c084fc" : "#ffffff",
+                border: "1px solid " + (showMcpSection ? "#a855f7" : "#333338"),
+                cursor: "pointer",
+                fontWeight: "500",
+                fontSize: "13px",
+              },
             },
-          },
-          loading ? "Sincronizando..." : "⚡ Sincronizar Modelos no Buzz"
+            showMcpSection ? "✕ Fechar MCP" : "🔌 NexusMind MCP"
+          ),
+          h(
+            "button",
+            {
+              onClick: handleSyncModels,
+              disabled: loading,
+              style: {
+                padding: "10px 22px",
+                borderRadius: "8px",
+                backgroundColor: "#10b981",
+                color: "#000000",
+                border: "none",
+                cursor: loading ? "not-allowed" : "pointer",
+                fontWeight: "600",
+                fontSize: "14px",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+              },
+            },
+            loading ? "Sincronizando..." : "⚡ Sincronizar Modelos no Buzz"
+          )
         )
       ),
 
@@ -864,13 +1104,118 @@ print("SYNC_SUCCESS")
           statusMessage.text
         ),
 
+      // Dedicated MCP Section (Collapsible)
+      showMcpSection &&
+        h(
+          "div",
+          {
+            style: {
+              backgroundColor: "rgba(168, 85, 247, 0.06)",
+              border: "1px solid rgba(168, 85, 247, 0.3)",
+              borderRadius: "12px",
+              padding: "20px",
+              marginBottom: "24px",
+            },
+          },
+          h(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" } },
+            h("span", { style: { fontSize: "18px" } }, "🔌"),
+            h(
+              "h3",
+              { style: { margin: 0, fontSize: "16px", color: "#c084fc", fontWeight: "600" } },
+              "NexusMind Model Context Protocol (MCP)"
+            )
+          ),
+          h(
+            "p",
+            { style: { margin: "0 0 16px", fontSize: "13px", color: "var(--text-subtle, #a0a0a0)", lineHeight: "1.5" } },
+            "O NexusMind oferece 2 modalidades oficiais de MCP para conectar seus agentes e plataformas de desenvolvimento:"
+          ),
+          h(
+            "div",
+            { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px", marginBottom: "16px" } },
+            h(
+              "div",
+              {
+                style: {
+                  padding: "14px",
+                  borderRadius: "8px",
+                  backgroundColor: "rgba(0,0,0,0.3)",
+                  border: "1px solid #333338",
+                },
+              },
+              h("div", { style: { fontWeight: "600", fontSize: "13px", color: "#10b981" } }, "1. MCP Admin Stdio (Recomendado)"),
+              h(
+                "div",
+                { style: { fontSize: "12px", color: "#a0a0a0", marginTop: "6px" } },
+                "Execução local via Python FastMCP com chave mestre administrativa. Dá acesso a 31 ferramentas sem expiração de token."
+              ),
+              h(
+                "code",
+                {
+                  style: {
+                    display: "block",
+                    marginTop: "8px",
+                    padding: "6px 8px",
+                    borderRadius: "4px",
+                    backgroundColor: "#111",
+                    fontSize: "11px",
+                    color: "#fff",
+                    userSelect: "all",
+                  },
+                },
+                "agy mcp add --type stdio nexusmind-admin python3 /Users/heltonfraga/.claude/skills/nexusmind/mcp_server.py"
+              )
+            ),
+            h(
+              "div",
+              {
+                style: {
+                  padding: "14px",
+                  borderRadius: "8px",
+                  backgroundColor: "rgba(0,0,0,0.3)",
+                  border: "1px solid #333338",
+                },
+              },
+              h("div", { style: { fontWeight: "600", fontSize: "13px", color: "#3b82f6" } }, "2. MCP Remoto OAuth (Sub2API)"),
+              h(
+                "div",
+                { style: { fontSize: "12px", color: "#a0a0a0", marginTop: "6px" } },
+                "Endpoint oficial em https://nexusmind.digital/api/v1/mcp. Utiliza autenticação OAuth 2.0 PKCE via navegador."
+              ),
+              h(
+                "code",
+                {
+                  style: {
+                    display: "block",
+                    marginTop: "8px",
+                    padding: "6px 8px",
+                    borderRadius: "4px",
+                    backgroundColor: "#111",
+                    fontSize: "11px",
+                    color: "#fff",
+                    userSelect: "all",
+                  },
+                },
+                "agy mcp add nexusmind https://nexusmind.digital/api/v1/mcp"
+              )
+            )
+          ),
+          h(
+            "div",
+            { style: { fontSize: "12px", color: "var(--text-subtle, #a0a0a0)" } },
+            "💡 No Antigravity IDE: Acesse o menu superior direito (...) > MCP Servers para gerenciar e inspecionar as ferramentas ativas."
+          )
+        ),
+
       // 4 Canonical Groups Overview Bar
       h(
         "div",
         {
           style: {
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
             gap: "12px",
             marginBottom: "24px",
           },
@@ -886,7 +1231,7 @@ print("SYNC_SUCCESS")
                 padding: "14px",
                 borderRadius: "10px",
                 backgroundColor: isSelected
-                  ? "rgba(59, 130, 246, 0.1)"
+                  ? "rgba(59, 130, 246, 0.12)"
                   : "var(--bg-card, #1a1a20)",
                 border: isSelected
                   ? "1px solid #3b82f6"
@@ -922,10 +1267,16 @@ print("SYNC_SUCCESS")
               { style: { fontSize: "12px", color: "var(--text-subtle, #a0a0a0)", marginTop: "6px" } },
               group.description
             ),
+            group.operationalNote &&
+              h(
+                "div",
+                { style: { fontSize: "11px", color: "#f59e0b", marginTop: "4px", fontStyle: "italic" } },
+                `⚠️ ${group.operationalNote}`
+              ),
             h(
               "div",
               { style: { fontSize: "11px", color: "#10b981", marginTop: "8px", fontWeight: "500" } },
-              `Padrão: ${group.defaultModel}`
+              `Padrão testado: ${group.defaultModel}`
             )
           );
         })
@@ -1091,7 +1442,7 @@ print("SYNC_SUCCESS")
         )
       ),
 
-      // Models Explorer Section
+      // Models Explorer Section with Interactive Testing and Governance Controls
       h(
         "div",
         null,
@@ -1113,7 +1464,7 @@ print("SYNC_SUCCESS")
             h(
               "h2",
               { style: { margin: 0, fontSize: "18px", fontWeight: "600" } },
-              "Catálogo e Modelos Sincronizados"
+              "Catálogo e Gestão Ativa de Modelos"
             ),
             lastSyncTime &&
               h(
@@ -1125,12 +1476,12 @@ print("SYNC_SUCCESS")
                     color: "var(--text-subtle, #a0a0a0)",
                   },
                 },
-                `Última sincronização no Buzz: ${lastSyncTime}`
+                `Última sincronização no Buzz: ${lastSyncTime} • ${models.length} modelos totais (${disabledModels.length} desativados)`
               )
           ),
           h(
             "div",
-            { style: { display: "flex", gap: "8px", alignItems: "center" } },
+            { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } },
             h("input", {
               type: "text",
               placeholder: "Buscar modelo...",
@@ -1177,6 +1528,89 @@ print("SYNC_SUCCESS")
               },
               "Apenas Free"
             )
+          )
+        ),
+
+        // Batch Governance Toolbar (Testar Visíveis, Desativar Indisponíveis, Reativar Todos)
+        h(
+          "div",
+          {
+            style: {
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              backgroundColor: "#15151a",
+              border: "1px solid #2d2d35",
+              padding: "10px 14px",
+              borderRadius: "8px",
+              marginBottom: "16px",
+              flexWrap: "wrap",
+              gap: "8px",
+            },
+          },
+          h(
+            "div",
+            { style: { fontSize: "12px", color: "#a0a0a0" } },
+            `Exibindo ${filteredModels.length} modelos | ` +
+              (disabledModels.length > 0
+                ? `${disabledModels.length} desativados serão excluídos do sync`
+                : "Todos os visíveis serão sincronizados")
+          ),
+          h(
+            "div",
+            { style: { display: "flex", gap: "8px" } },
+            h(
+              "button",
+              {
+                onClick: handleTestVisibleModels,
+                disabled: batchTesting,
+                style: {
+                  padding: "6px 12px",
+                  borderRadius: "6px",
+                  backgroundColor: "rgba(59, 130, 246, 0.15)",
+                  color: "#60a5fa",
+                  border: "1px solid #3b82f6",
+                  cursor: batchTesting ? "not-allowed" : "pointer",
+                  fontSize: "12px",
+                  fontWeight: "500",
+                },
+              },
+              batchTesting ? "Testando Visíveis..." : "🧪 Testar Visíveis"
+            ),
+            h(
+              "button",
+              {
+                onClick: handleDisableUnavailable,
+                style: {
+                  padding: "6px 12px",
+                  borderRadius: "6px",
+                  backgroundColor: "rgba(239, 68, 68, 0.15)",
+                  color: "#f87171",
+                  border: "1px solid #ef4444",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: "500",
+                },
+              },
+              "🛡️ Desativar Indisponíveis"
+            ),
+            disabledModels.length > 0 &&
+              h(
+                "button",
+                {
+                  onClick: handleEnableAll,
+                  style: {
+                    padding: "6px 12px",
+                    borderRadius: "6px",
+                    backgroundColor: "#2d2d35",
+                    color: "#ffffff",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                  },
+                },
+                "🔄 Reativar Todos"
+              )
           )
         ),
 
@@ -1245,10 +1679,12 @@ print("SYNC_SUCCESS")
               { style: { display: "grid", gridTemplateColumns: "1fr", gap: "8px" } },
               filteredModels.map((m: any) => {
                 const mid = m.id || "";
-                const isFree = mid.toLowerCase().includes("free");
+                const isFree = mid.toLowerCase().includes("free") || mid.toLowerCase().includes("contributor");
                 const hasReasoning = isReasoning(mid);
                 const ctxWindow = getContextWindow(selectedGroupTab, mid);
                 const maxOut = getMaxTokens(selectedGroupTab, mid);
+                const isDisabled = disabledModels.includes(mid);
+                const testState = modelTests[mid];
 
                 return h(
                   "div",
@@ -1260,14 +1696,50 @@ print("SYNC_SUCCESS")
                       alignItems: "center",
                       padding: "12px 16px",
                       borderRadius: "8px",
-                      backgroundColor: "var(--bg-card, #1a1a20)",
-                      border: "1px solid var(--border-subtle, #2d2d35)",
+                      backgroundColor: isDisabled ? "#141418" : "var(--bg-card, #1a1a20)",
+                      border: isDisabled
+                        ? "1px dashed #3a3a44"
+                        : "1px solid var(--border-subtle, #2d2d35)",
+                      opacity: isDisabled ? 0.5 : 1,
+                      transition: "all 0.15s ease",
+                      gap: "12px",
+                      flexWrap: "wrap",
                     },
                   },
                   h(
                     "div",
-                    null,
-                    h("span", { style: { fontWeight: "500", fontSize: "14px" } }, mid),
+                    { style: { flex: "1 1 auto", minWidth: "240px" } },
+                    h(
+                      "div",
+                      { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                      h(
+                        "span",
+                        {
+                          style: {
+                            fontWeight: "500",
+                            fontSize: "14px",
+                            textDecoration: isDisabled ? "line-through" : "none",
+                            color: isDisabled ? "#888890" : "#ffffff",
+                          },
+                        },
+                        mid
+                      ),
+                      isDisabled &&
+                        h(
+                          "span",
+                          {
+                            style: {
+                              fontSize: "10px",
+                              padding: "1px 6px",
+                              borderRadius: "4px",
+                              backgroundColor: "rgba(239, 68, 68, 0.15)",
+                              color: "#ef4444",
+                              fontWeight: "600",
+                            },
+                          },
+                          "DESATIVADO"
+                        )
+                    ),
                     h(
                       "div",
                       {
@@ -1349,10 +1821,93 @@ print("SYNC_SUCCESS")
                       )
                     )
                   ),
+                  // Test Status & Controls
                   h(
-                    "span",
-                    { style: { fontSize: "12px", color: "#10b981", fontWeight: "500" } },
-                    "✓ Ativo no Buzz"
+                    "div",
+                    { style: { display: "flex", alignItems: "center", gap: "10px" } },
+                    testState &&
+                      h(
+                        "span",
+                        {
+                          style: {
+                            fontSize: "11px",
+                            padding: "3px 8px",
+                            borderRadius: "6px",
+                            backgroundColor:
+                              testState.status === "ok"
+                                ? "rgba(16, 185, 129, 0.15)"
+                                : testState.status === "error"
+                                ? "rgba(239, 68, 68, 0.15)"
+                                : "rgba(245, 158, 11, 0.15)",
+                            color:
+                              testState.status === "ok"
+                                ? "#10b981"
+                                : testState.status === "error"
+                                ? "#ef4444"
+                                : "#f59e0b",
+                            border: `1px solid ${
+                              testState.status === "ok"
+                                ? "#10b981"
+                                : testState.status === "error"
+                                ? "#ef4444"
+                                : "#f59e0b"
+                            }`,
+                            fontWeight: "500",
+                          },
+                        },
+                        testState.status === "testing"
+                          ? "🟡 Testando..."
+                          : testState.status === "ok"
+                          ? `🟢 200 OK (${testState.latencyMs}ms)`
+                          : `🔴 ${testState.message || "Erro"} (${testState.latencyMs}ms)`
+                      ),
+                    !testState &&
+                      h(
+                        "span",
+                        {
+                          style: {
+                            fontSize: "12px",
+                            color: isDisabled ? "#888890" : "#10b981",
+                            fontWeight: "500",
+                          },
+                        },
+                        isDisabled ? "⊘ Excluído do Buzz" : "✓ Ativo no Buzz"
+                      ),
+                    h(
+                      "button",
+                      {
+                        onClick: () => handleTestModel(mid),
+                        style: {
+                          padding: "5px 10px",
+                          borderRadius: "6px",
+                          backgroundColor: "#2d2d35",
+                          color: "#ffffff",
+                          border: "1px solid #3e3e48",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                        },
+                      },
+                      "⚡ Testar"
+                    ),
+                    h(
+                      "button",
+                      {
+                        onClick: () => handleToggleModel(mid),
+                        style: {
+                          padding: "5px 10px",
+                          borderRadius: "6px",
+                          backgroundColor: isDisabled
+                            ? "rgba(16, 185, 129, 0.2)"
+                            : "rgba(239, 68, 68, 0.15)",
+                          color: isDisabled ? "#10b981" : "#f87171",
+                          border: isDisabled ? "1px solid #10b981" : "1px solid #ef4444",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                          fontWeight: "500",
+                        },
+                      },
+                      isDisabled ? "Ativar" : "Desativar"
+                    )
                   )
                 );
               })
