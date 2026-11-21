@@ -1,0 +1,20 @@
+tagline: Conecte o NexusMind ao Buzz e sincronize seus modelos com 1 clique.
+description: |
+  # NexusMind Gateway para Buzz Desktop
+
+  Plugin oficial de integração entre o ecossistema NexusMind e o Buzz Desktop.
+
+  ## Recursos Principais
+  - **Gerenciamento de API Key**: Configure sua chave NexusMind de forma segura e persistente.
+  - **Suporte aos 4 Grupos Canônicos**: Saldo OpenAI (NVIDIA NIM / OpenCode), Saldo Claude, Antigravity-Saldo e Grok.
+  - **Sincronização Automática**: Detecta os modelos ativos no seu plano e atualiza os harnesses Goose e Pi instantaneamente.
+  - **Detecção de Recursos Avançados**: Suporte a modelos de raciocínio (Thinking / Reasoning Effort: Low, Medium, High).
+category: developer-tools-and-integrations
+tags:
+  - nexusmind
+  - llm
+  - agents
+  - ai
+  - openai
+links:
+  docs: https://nexusmind.digital
