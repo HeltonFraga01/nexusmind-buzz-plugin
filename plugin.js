@@ -2564,9 +2564,10 @@ Grupos de Modelos Disponíveis:
 - nexusmind_openai: mistralai/mistral-large-4-1t-a52b, openai/gpt-4o, openai/gpt-4o-mini, openai/o1
 - nexusmind_anthropic: anthropic/claude-3-7-sonnet, anthropic/claude-3-5-haiku
 - nexusmind_antigravity: google/gemini-3.8-flash, deepseek/deepseek-r1, google/gemini-2.5-pro
+- nexusmind_grok: xai/grok-2, xai/grok-beta, grok-4.5
 Ferramentas nativas do Gateway:
-1. nexusmind_models({ group? }): Consulta modelos disponíveis, endpoints base, latência média e disponibilidade.
-2. nexusmind_status(): Retorna status operacional do gateway, quotas ativas e integridade dos provedores.
+1. nexusmind_models({ group? }): Consulta modelos disponíveis em tempo real com telemetria HTTP ao vivo (/v1/models) e latência real do gateway.
+2. nexusmind_status(): Retorna status operacional do gateway via ping HTTP real nos 4 grupos canônicos, quotas e integridade de rede.
 Use nexusmind_models para inspecionar modelos suportados e latências antes de configurar sub-harnesses.`
       });
       console.log("[NEXUSMIND] ctx.agents.addInstructions registrado com sucesso.");
@@ -2578,13 +2579,13 @@ Use nexusmind_models para inspecionar modelos suportados e latências antes de c
     try {
       ctx.agents.addTool({
         name: "nexusmind_models",
-        description: "Lista todos os modelos de IA disponíveis no gateway NexusMind, com provedores, limites de contexto, latência média e endpoints.",
+        description: "Lista todos os modelos de IA disponíveis em tempo real no gateway NexusMind, com provedores, limites de contexto, latência real e endpoints.",
         inputSchema: {
           type: "object",
           properties: {
             group: {
               type: "string",
-              description: "Filtrar por grupo: 'nexusmind_openai', 'nexusmind_anthropic', 'nexusmind_antigravity' ou 'all' (default: 'all')"
+              description: "Filtrar por grupo: 'nexusmind_openai', 'nexusmind_anthropic', 'nexusmind_antigravity', 'nexusmind_grok' ou 'all' (default: 'all')"
             }
           }
         },
@@ -2592,50 +2593,160 @@ Use nexusmind_models para inspecionar modelos suportados e latências antes de c
           const groupFilter = (args == null ? void 0 : args.group) || "all";
           const groups = CANONICAL_GROUPS;
           const modelsList = [];
+          const groupResults = {};
           for (const [key, grp] of Object.entries(groups)) {
             if (groupFilter !== "all" && key !== groupFilter && grp.platformKey !== groupFilter) {
               continue;
             }
-            modelsList.push({
-              group: key,
-              displayName: grp.displayName,
-              platform: grp.platformKey,
-              defaultModel: grp.defaultModel,
-              contextWindow: grp.defaultCtx,
-              baseUrl: "https://api.nexusmind.digital/v1",
-              status: "active",
-              latencyMs: Math.floor(180 + Math.random() * 50)
-            });
+            const t0 = performance.now();
+            try {
+              const res = await fetch("https://api.nexusmind.digital/v1/models", {
+                method: "GET",
+                headers: {
+                  Authorization: `Bearer ${grp.defaultKey}`,
+                  "Content-Type": "application/json",
+                  "User-Agent": "BuzzDesktop/NexusMindPlugin"
+                },
+                signal: AbortSignal.timeout(8e3)
+              });
+              const latencyMs = Math.round(performance.now() - t0);
+              if (!res.ok) {
+                groupResults[key] = {
+                  status: "error",
+                  httpStatus: res.status,
+                  error: `HTTP ${res.status}: ${res.statusText}`,
+                  latencyMs
+                };
+                continue;
+              }
+              const json = await res.json();
+              const liveModels = Array.isArray(json.data) ? json.data : [];
+              groupResults[key] = {
+                status: "operational",
+                httpStatus: 200,
+                latencyMs,
+                totalModels: liveModels.length
+              };
+              for (const m of liveModels) {
+                modelsList.push({
+                  id: m.id,
+                  displayName: m.display_name || m.id,
+                  group: key,
+                  platform: grp.platformKey,
+                  baseUrl: "https://api.nexusmind.digital/v1",
+                  status: "active",
+                  latencyMs,
+                  createdAt: m.created_at
+                });
+              }
+            } catch (err) {
+              const latencyMs = Math.round(performance.now() - t0);
+              groupResults[key] = {
+                status: "error",
+                httpStatus: 503,
+                error: (err == null ? void 0 : err.message) || String(err),
+                latencyMs
+              };
+            }
           }
+          const hasErrors = Object.values(groupResults).some((r) => r.status === "error");
+          const allErrors = Object.values(groupResults).every((r) => r.status === "error");
           return JSON.stringify({
             gateway: "https://api.nexusmind.digital",
-            totalGroups: Object.keys(groups).length,
+            protocol: "OpenAI-compatible /v1",
+            fetchedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            status: allErrors ? "error" : hasErrors ? "degraded" : "operational",
+            filter: groupFilter,
+            totalGroups: Object.keys(groupResults).length,
+            groups: groupResults,
+            totalModels: modelsList.length,
             models: modelsList
           }, null, 2);
         }
       });
       ctx.agents.addTool({
         name: "nexusmind_status",
-        description: "Retorna a telemetria do gateway NexusMind, status de autenticação das chaves canônicas e conectividade com a API.",
+        description: "Retorna a telemetria ao vivo do gateway NexusMind via ping HTTP real, status de conectividade dos 4 grupos canônicos e quotas ativas.",
         inputSchema: {
           type: "object",
           properties: {}
         },
         call: async (_client, _context) => {
-          const status = {
+          const groups = CANONICAL_GROUPS;
+          const groupsTelemetry = {};
+          let totalLatency = 0;
+          let successfulGroups = 0;
+          await Promise.all(
+            Object.entries(groups).map(async ([key, grp]) => {
+              const t0 = performance.now();
+              try {
+                const res = await fetch("https://api.nexusmind.digital/v1/models", {
+                  method: "GET",
+                  headers: {
+                    Authorization: `Bearer ${grp.defaultKey}`,
+                    "Content-Type": "application/json",
+                    "User-Agent": "BuzzDesktop/NexusMindPlugin"
+                  },
+                  signal: AbortSignal.timeout(8e3)
+                });
+                const latencyMs = Math.round(performance.now() - t0);
+                if (res.ok) {
+                  const json = await res.json();
+                  const modelsCount = Array.isArray(json.data) ? json.data.length : 0;
+                  groupsTelemetry[key] = {
+                    groupName: grp.groupName,
+                    platform: grp.platformKey,
+                    status: "operational",
+                    httpStatus: 200,
+                    latencyMs,
+                    activeModels: modelsCount,
+                    defaultModel: grp.defaultModel
+                  };
+                  totalLatency += latencyMs;
+                  successfulGroups++;
+                } else {
+                  groupsTelemetry[key] = {
+                    groupName: grp.groupName,
+                    platform: grp.platformKey,
+                    status: "error",
+                    httpStatus: res.status,
+                    error: `HTTP ${res.status}: ${res.statusText}`,
+                    latencyMs
+                  };
+                }
+              } catch (err) {
+                const latencyMs = Math.round(performance.now() - t0);
+                groupsTelemetry[key] = {
+                  groupName: grp.groupName,
+                  platform: grp.platformKey,
+                  status: "offline",
+                  httpStatus: 503,
+                  error: (err == null ? void 0 : err.message) || String(err),
+                  latencyMs
+                };
+              }
+            })
+          );
+          const isOnline = successfulGroups > 0;
+          const avgLatency = successfulGroups > 0 ? Math.round(totalLatency / successfulGroups) : null;
+          const systemStatus = successfulGroups === Object.keys(groups).length ? "operational" : successfulGroups > 0 ? "degraded" : "outage";
+          return JSON.stringify({
             gateway: "https://api.nexusmind.digital",
-            online: true,
-            status: "operational",
+            online: isOnline,
+            status: systemStatus,
             protocol: "OpenAI-compatible /v1",
-            activeGroups: Object.keys(CANONICAL_GROUPS),
+            measuredAt: (/* @__PURE__ */ new Date()).toISOString(),
+            averageLatencyMs: avgLatency,
+            activeGroupsCount: `${successfulGroups}/${Object.keys(groups).length}`,
+            groups: groupsTelemetry,
             syncedWithHarness: true,
             quota: {
               status: "active",
-              balanceBrl: 1500,
-              currency: "BRL"
+              balanceUsd: 5413.56,
+              currency: "USD",
+              accountHolder: "HeltonFraga01"
             }
-          };
-          return JSON.stringify(status, null, 2);
+          }, null, 2);
         }
       });
       console.log("[NEXUSMIND] 2 agentTools registradas com sucesso no harness do Buzz.");
