@@ -493,6 +493,7 @@ export function apply(ctx: Context) {
 
     // Filter & Pagination States
     const [selectedGroupTab, setSelectedGroupTab] = React.useState<string>("all");
+    const [statusFilter, setStatusFilter] = React.useState<"all" | "active" | "disabled" | "online" | "error">("all");
     const [filterFree, setFilterFree] = React.useState(false);
     const [filterReasoning, setFilterReasoning] = React.useState(false);
     const [searchQuery, setSearchQuery] = React.useState("");
@@ -1232,11 +1233,11 @@ print("SYNC_SUCCESS")
     const groupCounts = React.useMemo(() => {
       if (models.length === 0) {
         return {
-          all: 102,
-          nexusmind_openai: CANONICAL_GROUPS.nexusmind_openai.modelsCount,
-          nexusmind_anthropic: CANONICAL_GROUPS.nexusmind_anthropic.modelsCount,
-          nexusmind_antigravity: CANONICAL_GROUPS.nexusmind_antigravity.modelsCount,
-          nexusmind_grok: CANONICAL_GROUPS.nexusmind_grok.modelsCount,
+          all: 0,
+          nexusmind_openai: 0,
+          nexusmind_anthropic: 0,
+          nexusmind_antigravity: 0,
+          nexusmind_grok: 0,
         };
       }
       const counts: Record<string, number> = {
@@ -1255,6 +1256,29 @@ print("SYNC_SUCCESS")
       return counts;
     }, [models]);
 
+    const statusCounts = React.useMemo(() => {
+      const scoped = models.filter((m: any) => {
+        if (selectedGroupTab !== "all") {
+          const grps = getModelGroups(m);
+          if (!grps.includes(selectedGroupTab)) return false;
+        }
+        return true;
+      });
+      let active = 0;
+      let disabled = 0;
+      let online = 0;
+      let error = 0;
+      for (const m of scoped) {
+        const mid = m.id || "";
+        if (disabledModels.includes(mid)) disabled++;
+        else active++;
+        const t = modelTests[mid];
+        if (t?.status === "ok") online++;
+        else if (t?.status === "error") error++;
+      }
+      return { all: scoped.length, active, disabled, online, error };
+    }, [models, selectedGroupTab, disabledModels, modelTests]);
+
     const filteredModels = React.useMemo(() => {
       return models.filter((m: any) => {
         const mid = m.id || "";
@@ -1265,6 +1289,14 @@ print("SYNC_SUCCESS")
           const grps = getModelGroups(m);
           if (!grps.includes(selectedGroupTab)) return false;
         }
+
+        // Status & healthcheck filter
+        const isDisabled = disabledModels.includes(mid);
+        const testStatus = modelTests[mid]?.status;
+        if (statusFilter === "active" && isDisabled) return false;
+        if (statusFilter === "disabled" && !isDisabled) return false;
+        if (statusFilter === "online" && testStatus !== "ok") return false;
+        if (statusFilter === "error" && testStatus !== "error") return false;
 
         // Feature filters
         if (filterFree && !lower.includes(":free") && !lower.includes("free")) return false;
@@ -1285,7 +1317,7 @@ print("SYNC_SUCCESS")
 
         return true;
       });
-    }, [models, selectedGroupTab, filterFree, filterReasoning, searchQuery]);
+    }, [models, selectedGroupTab, statusFilter, disabledModels, modelTests, filterFree, filterReasoning, searchQuery]);
 
     const totalPages = pageSize === 0 ? 1 : Math.max(1, Math.ceil(filteredModels.length / (pageSize || 15)));
 
@@ -1502,7 +1534,7 @@ print("SYNC_SUCCESS")
               margin: "0 0 28px",
             },
           },
-          "Conecte sua conta do NexusMind para liberar 111 modelos corporativos (OpenAI, Anthropic Claude, Google Gemini e xAI Grok) para os agentes do Buzz Desktop."
+          "Conecte sua conta do NexusMind para liberar mais de 180 modelos corporativos (OpenAI, Anthropic Claude, Google Gemini e xAI Grok) para os agentes do Buzz Desktop."
         ),
         // Primary Connect Button
         h(
@@ -1754,9 +1786,13 @@ print("SYNC_SUCCESS")
                           backgroundColor: "rgba(59, 130, 246, 0.15)",
                           color: "#60a5fa",
                           fontWeight: "500",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "5px",
                         },
                       },
-                      "🟢 Conectado"
+                      h("span", { style: { width: "6px", height: "6px", borderRadius: "50%", backgroundColor: "#10b981" } }),
+                      "Conectado"
                     )
                   ),
                   h(
@@ -2005,7 +2041,7 @@ print("SYNC_SUCCESS")
               {
                 style: {
                   display: "grid",
-                  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
                   gap: "16px",
                 },
               },
@@ -2176,7 +2212,7 @@ print("SYNC_SUCCESS")
               {
                 style: {
                   display: "grid",
-                  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
                   gap: "16px",
                 },
               },
@@ -2449,8 +2485,92 @@ print("SYNC_SUCCESS")
                       },
                     },
                     "Apenas Free"
-                  )
+                  ),
+                  (statusFilter !== "all" || selectedGroupTab !== "all" || filterFree || filterReasoning || searchQuery.trim() !== "") &&
+                    h(
+                      "button",
+                      {
+                        onClick: () => {
+                          setSelectedGroupTab("all");
+                          setStatusFilter("all");
+                          setFilterFree(false);
+                          setFilterReasoning(false);
+                          setSearchQuery("");
+                          setCurrentPage(1);
+                        },
+                        style: {
+                          borderRadius: "9999px",
+                          padding: "6px 10px",
+                          border: "1px solid rgba(255, 255, 255, 0.12)",
+                          backgroundColor: "rgba(255, 255, 255, 0.04)",
+                          color: "#e4e4e7",
+                          cursor: "pointer",
+                          fontSize: "11px",
+                          fontWeight: "500",
+                        },
+                      },
+                      "Limpar filtros"
+                    )
                 )
+              ),
+
+              // Status & Healthcheck Segmented Filter Bar
+              h(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    flexWrap: "wrap",
+                  },
+                },
+                h(
+                  "span",
+                  {
+                    style: {
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "5px",
+                      fontSize: "11px",
+                      color: "var(--text-subtle, #8e8e96)",
+                      marginRight: "4px",
+                    },
+                  },
+                  SVG_ICONS.filter({ h, width: 12, height: 12 }),
+                  "Status:"
+                ),
+                [
+                  { id: "all", label: `Todos (${statusCounts.all})`, accent: "#ffffff" },
+                  { id: "active", label: `Ativos (${statusCounts.active})`, accent: "#10b981" },
+                  { id: "disabled", label: `Desativados (${statusCounts.disabled})`, accent: "#9ca3af" },
+                  { id: "online", label: `Online (${statusCounts.online})`, accent: "#34d399" },
+                  { id: "error", label: `Com Erro (${statusCounts.error})`, accent: "#f87171" },
+                ].map((st) => {
+                  const active = statusFilter === st.id;
+                  return h(
+                    "button",
+                    {
+                      key: st.id,
+                      onClick: () => {
+                        setStatusFilter(st.id as any);
+                        setCurrentPage(1);
+                      },
+                      style: {
+                        borderRadius: "9999px",
+                        padding: "4px 12px",
+                        border: `1px solid ${active ? st.accent : "rgba(255, 255, 255, 0.08)"}`,
+                        backgroundColor: active ? "rgba(255, 255, 255, 0.1)" : "transparent",
+                        color: active ? st.accent : "var(--text-subtle, #8e8e96)",
+                        cursor: "pointer",
+                        fontSize: "11px",
+                        fontWeight: active ? "600" : "500",
+                        transition: "all 0.15s ease",
+                      },
+                    },
+                    st.label
+                  );
+                })
               ),
 
               // Batch Action Bar
@@ -2525,7 +2645,25 @@ print("SYNC_SUCCESS")
               h(
                 "div",
                 { style: { display: "flex", flexDirection: "column", gap: "6px" } },
-                paginatedModels.map((item: any) => {
+                paginatedModels.length === 0
+                  ? h(
+                      "div",
+                      {
+                        style: {
+                          padding: "28px 16px",
+                          textAlign: "center",
+                          borderRadius: "10px",
+                          backgroundColor: "rgba(255, 255, 255, 0.02)",
+                          border: "1px dashed rgba(255, 255, 255, 0.08)",
+                          color: "var(--text-subtle, #8e8e96)",
+                          fontSize: "12px",
+                        },
+                      },
+                      statusFilter === "online" || statusFilter === "error"
+                        ? "Nenhum modelo corresponde a este filtro ainda. Clique em 'Testar Visíveis' para rodar o healthcheck."
+                        : "Nenhum modelo encontrado com os filtros atuais."
+                    )
+                  : paginatedModels.map((item: any) => {
                   const mid = item.id;
                   const isDisabled = disabledModels.includes(mid);
                   const lower = mid.toLowerCase();
@@ -2655,8 +2793,8 @@ print("SYNC_SUCCESS")
                           testRes.status === "testing"
                             ? "Testando..."
                             : testRes.status === "ok"
-                            ? `🟢 ${testRes.latency}ms (Online)`
-                            : `🔴 ${testRes.errorMsg || "Erro"}`
+                            ? `${testRes.latency}ms · Online`
+                            : `Erro · ${testRes.errorMsg || "Falha"}`
                         ),
                       // Individual Test Button
                       h(
@@ -2673,9 +2811,13 @@ print("SYNC_SUCCESS")
                             fontSize: "11px",
                             fontWeight: "500",
                             cursor: testRes?.status === "testing" ? "not-allowed" : "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
                           },
                         },
-                        "⚡ Testar"
+                        SVG_ICONS.pulse({ h, width: 11, height: 11 }),
+                        "Testar"
                       ),
                       // Active in Buzz Badge
                       h(
@@ -2775,7 +2917,7 @@ print("SYNC_SUCCESS")
                     "div",
                     { style: { display: "flex", alignItems: "center", gap: "4px", marginLeft: "12px" } },
                     h("span", { style: { fontSize: "12px", color: "#8e8e96" } }, "Por página:"),
-                    [15, 30, 50].map((sz) =>
+                    [15, 30, 50, 0].map((sz) =>
                       h(
                         "button",
                         {
@@ -2794,7 +2936,7 @@ print("SYNC_SUCCESS")
                             cursor: "pointer",
                           },
                         },
-                        String(sz)
+                        sz === 0 ? "Todos" : String(sz)
                       )
                     )
                   )
