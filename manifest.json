@@ -39,6 +39,11 @@
         "id": "python",
         "program": "python3",
         "args": ["-c"]
+      },
+      {
+        "id": "open",
+        "program": "open",
+        "args": []
       }
     ],
     "files": true

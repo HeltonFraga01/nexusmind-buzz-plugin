@@ -16,6 +16,13 @@ SESSION_FILE = os.path.expanduser("~/.buzz/.nexusmind_auth_session.json")
 MCP_HOST = "https://nexusmind.digital"
 MCP_RESOURCE = f"{MCP_HOST}/api/v1/mcp"
 
+def _write_session_secure(data):
+    os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
+    fd = os.open(SESSION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(SESSION_FILE, 0o600)
+
 def get_ssl_context():
     try:
         import certifi
@@ -137,8 +144,7 @@ def run_oauth_flow():
         "redirect_uri": redirect_uri,
         "started_at": int(time.time())
     }
-    with open(SESSION_FILE, "w") as f:
-        json.dump(session_data, f, indent=2)
+    _write_session_secure(session_data)
 
     # Print to stdout
     print(json.dumps({"type": "auth_url_ready", "auth_url": auth_url, "port": port}))
@@ -159,8 +165,7 @@ def run_oauth_flow():
     if "error" in received_code:
         session_data["status"] = "error"
         session_data["error"] = received_code["error"]
-        with open(SESSION_FILE, "w") as f:
-            json.dump(session_data, f, indent=2)
+        _write_session_secure(session_data)
         print(json.dumps({"type": "error", "error": received_code["error"]}))
         return
 
@@ -169,15 +174,13 @@ def run_oauth_flow():
 
     if not code:
         session_data["status"] = "timeout"
-        with open(SESSION_FILE, "w") as f:
-            json.dump(session_data, f, indent=2)
+        _write_session_secure(session_data)
         print(json.dumps({"type": "timeout", "error": "Timeout aguardando autorização no navegador"}))
         return
 
     if ret_state != state:
         session_data["status"] = "state_mismatch"
-        with open(SESSION_FILE, "w") as f:
-            json.dump(session_data, f, indent=2)
+        _write_session_secure(session_data)
         print(json.dumps({"type": "error", "error": "State mismatch na resposta OAuth"}))
         return
 
@@ -206,8 +209,7 @@ def run_oauth_flow():
     session_data["status"] = "authorized"
     session_data["token_data"] = token_info
     session_data["access_token"] = token_info.get("access_token")
-    with open(SESSION_FILE, "w") as f:
-        json.dump(session_data, f, indent=2)
+    _write_session_secure(session_data)
 
     print(json.dumps({"type": "authorized", "token": token_info.get("access_token")}))
     sys.stdout.flush()

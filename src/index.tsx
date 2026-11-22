@@ -726,9 +726,10 @@ subprocess.run([sys.executable, script_path])
 
     const handleOpenInBrowser = async () => {
       const urlToOpen = generatedAuthUrl || "https://nexusmind.digital/oauth/mcp/authorize";
+      if (!/^https?:\/\//i.test(urlToOpen)) return;
       try {
         if (ctx.host && ctx.host.spawn) {
-          await ctx.host.spawn("bash", { args: [`open "${urlToOpen}"`] });
+          await ctx.host.spawn("open", { args: [urlToOpen] });
         }
       } catch {
         window.open(urlToOpen, "_blank");
@@ -3032,8 +3033,8 @@ print("SYNC_SUCCESS")
   };
 
   const SESSION_PATHS = [
-    "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
     "~/.buzz/.nexusmind_auth_session.json",
+    "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
   ];
 
   const readSessionFile = async (): Promise<{ path: string; data: any } | null> => {
@@ -3051,16 +3052,18 @@ print("SYNC_SUCCESS")
     return null;
   };
 
-  const persistSessionData = async (sessionData: any, token: string) => {
+  const persistSessionData = async (sessionData: any, _token: string) => {
+    // Segurança: não persiste access_token/refresh_token em localStorage da WebView.
     try {
-      localStorage.setItem("nexusmind_mcp_token", token);
-      localStorage.setItem("nexusmind_auth_session", JSON.stringify(sessionData));
+      localStorage.removeItem("nexusmind_mcp_token");
+      localStorage.removeItem("nexusmind_auth_session");
     } catch {}
     const serialized = JSON.stringify(sessionData, null, 2);
     for (const p of SESSION_PATHS) {
       try {
         if ((ctx?.host as any)?.writeFile) {
           await (ctx.host as any).writeFile(p, serialized);
+          break;
         }
       } catch {}
     }

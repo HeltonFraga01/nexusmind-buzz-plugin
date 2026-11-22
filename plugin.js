@@ -610,9 +610,10 @@ subprocess.run([sys.executable, script_path])
     };
     const handleOpenInBrowser = async () => {
       const urlToOpen = generatedAuthUrl || "https://nexusmind.digital/oauth/mcp/authorize";
+      if (!/^https?:\/\//i.test(urlToOpen)) return;
       try {
         if (ctx.host && ctx.host.spawn) {
-          await ctx.host.spawn("bash", { args: [`open "${urlToOpen}"`] });
+          await ctx.host.spawn("open", { args: [urlToOpen] });
         }
       } catch {
         window.open(urlToOpen, "_blank");
@@ -2750,8 +2751,8 @@ print("SYNC_SUCCESS")
     return { status: res.status, body: res.body, json: parsed, latencyMs };
   };
   const SESSION_PATHS = [
-    "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
-    "~/.buzz/.nexusmind_auth_session.json"
+    "~/.buzz/.nexusmind_auth_session.json",
+    "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json"
   ];
   const readSessionFile = async () => {
     var _a2;
@@ -2769,11 +2770,11 @@ print("SYNC_SUCCESS")
     }
     return null;
   };
-  const persistSessionData = async (sessionData, token) => {
+  const persistSessionData = async (sessionData, _token) => {
     var _a2;
     try {
-      localStorage.setItem("nexusmind_mcp_token", token);
-      localStorage.setItem("nexusmind_auth_session", JSON.stringify(sessionData));
+      localStorage.removeItem("nexusmind_mcp_token");
+      localStorage.removeItem("nexusmind_auth_session");
     } catch {
     }
     const serialized = JSON.stringify(sessionData, null, 2);
@@ -2781,6 +2782,7 @@ print("SYNC_SUCCESS")
       try {
         if ((_a2 = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a2.writeFile) {
           await ctx.host.writeFile(p, serialized);
+          break;
         }
       } catch {
       }
