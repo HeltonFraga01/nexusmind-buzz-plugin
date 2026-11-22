@@ -433,6 +433,7 @@ function apply(ctx) {
       }, 2500);
     };
     const fetchTelemetry = async (tokenToUse) => {
+      var _a2, _b2, _c, _d;
       const token = tokenToUse.trim();
       if (!token) return;
       try {
@@ -445,9 +446,41 @@ function apply(ctx) {
           },
           timeoutMs: 8e3
         });
+        let u = null;
         if (profRes.status === 200) {
           const body = JSON.parse(profRes.body);
-          const u = body.data || body || {};
+          u = body.data || body || {};
+        } else {
+          try {
+            const mcpRes = await ctx.host.request({
+              url: "https://nexusmind.digital/api/v1/mcp",
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+                Accept: "application/json, text/event-stream",
+                "User-Agent": "BuzzDesktop/2.3"
+              },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "tools/call",
+                params: { name: "user_get_profile", arguments: {} }
+              }),
+              timeoutMs: 8e3
+            });
+            if (mcpRes.status === 200 && mcpRes.body) {
+              const mcpData = JSON.parse(mcpRes.body);
+              const innerText = (_c = (_b2 = (_a2 = mcpData.result) == null ? void 0 : _a2.content) == null ? void 0 : _b2[0]) == null ? void 0 : _c.text;
+              if (innerText) {
+                const inner = JSON.parse(innerText);
+                u = ((_d = inner.result) == null ? void 0 : _d.data) || inner.data || inner;
+              }
+            }
+          } catch {
+          }
+        }
+        if (u) {
           const parsedBalance = typeof u.balance === "number" ? u.balance : typeof u.quota === "number" ? u.quota : void 0;
           const profile = {
             username: u.username || u.name || profileData.username,
@@ -2716,36 +2749,117 @@ print("SYNC_SUCCESS")
     }
     return { status: res.status, body: res.body, json: parsed, latencyMs };
   };
-  const resolveLiveAccountToken = async () => {
-    var _a2, _b2, _c;
-    try {
-      const stored = (_a2 = localStorage.getItem("nexusmind_mcp_token")) == null ? void 0 : _a2.trim();
-      if (stored && stored !== "connected") return stored;
-    } catch {
-    }
-    if ((_b2 = ctx == null ? void 0 : ctx.host) == null ? void 0 : _b2.readFile) {
-      const candidatePaths = [
-        "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
-        "~/.buzz/.nexusmind_auth_session.json"
-      ];
-      for (const p of candidatePaths) {
-        try {
-          const raw = await ctx.host.readFile(p);
-          const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
-          const sess = JSON.parse(text);
-          const tok = (sess == null ? void 0 : sess.access_token) || (sess == null ? void 0 : sess.token) || ((_c = sess == null ? void 0 : sess.token_data) == null ? void 0 : _c.access_token);
-          if (typeof tok === "string" && tok.trim().length > 0) {
-            return tok.trim();
-          }
-        } catch {
+  const SESSION_PATHS = [
+    "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
+    "~/.buzz/.nexusmind_auth_session.json"
+  ];
+  const readSessionFile = async () => {
+    var _a2;
+    if (!((_a2 = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a2.readFile)) return null;
+    for (const p of SESSION_PATHS) {
+      try {
+        const raw = await ctx.host.readFile(p);
+        const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+        const data = JSON.parse(text);
+        if (data && typeof data === "object") {
+          return { path: p, data };
         }
+      } catch {
       }
     }
     return null;
   };
+  const persistSessionData = async (sessionData, token) => {
+    var _a2;
+    try {
+      localStorage.setItem("nexusmind_mcp_token", token);
+      localStorage.setItem("nexusmind_auth_session", JSON.stringify(sessionData));
+    } catch {
+    }
+    const serialized = JSON.stringify(sessionData, null, 2);
+    for (const p of SESSION_PATHS) {
+      try {
+        if ((_a2 = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a2.writeFile) {
+          await ctx.host.writeFile(p, serialized);
+        }
+      } catch {
+      }
+    }
+  };
+  const refreshOAuthSession = async (sessionData) => {
+    var _a2, _b2;
+    const clientId = sessionData == null ? void 0 : sessionData.client_id;
+    const refreshToken = ((_a2 = sessionData == null ? void 0 : sessionData.token_data) == null ? void 0 : _a2.refresh_token) || (sessionData == null ? void 0 : sessionData.refresh_token);
+    if (!clientId || !refreshToken || !((_b2 = ctx == null ? void 0 : ctx.host) == null ? void 0 : _b2.request)) {
+      return null;
+    }
+    try {
+      const formBody = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: clientId
+      }).toString();
+      const resp = await ctx.host.request({
+        url: "https://nexusmind.digital/api/v1/mcp/oauth/token",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+          "User-Agent": "BuzzDesktop/NexusMindPlugin"
+        },
+        body: formBody,
+        timeoutMs: 15e3
+      });
+      if (resp.status >= 200 && resp.status < 300 && resp.body) {
+        const tokenInfo = JSON.parse(resp.body);
+        const newAccessToken = tokenInfo.access_token;
+        const newRefreshToken = tokenInfo.refresh_token || refreshToken;
+        const expiresIn = tokenInfo.expires_in || 600;
+        sessionData.access_token = newAccessToken;
+        if (!sessionData.token_data) sessionData.token_data = {};
+        sessionData.token_data.access_token = newAccessToken;
+        sessionData.token_data.refresh_token = newRefreshToken;
+        sessionData.token_data.expires_in = expiresIn;
+        sessionData.token_data.updated_at = Math.floor(Date.now() / 1e3);
+        sessionData.status = "authorized";
+        await persistSessionData(sessionData, newAccessToken);
+        return newAccessToken;
+      }
+    } catch (err) {
+      console.warn("[NEXUSMIND] Falha ao renovar token OAuth:", err);
+    }
+    return null;
+  };
+  const resolveLiveAccountToken = async (forceRefresh = false) => {
+    var _a2, _b2, _c, _d;
+    let sessionObj = null;
+    const sessResult = await readSessionFile();
+    if (sessResult) {
+      sessionObj = sessResult.data;
+    }
+    if (sessionObj) {
+      const now = Math.floor(Date.now() / 1e3);
+      const updatedAt = ((_a2 = sessionObj.token_data) == null ? void 0 : _a2.updated_at) || sessionObj.started_at || 0;
+      const expiresIn = ((_b2 = sessionObj.token_data) == null ? void 0 : _b2.expires_in) || sessionObj.expires_in || 600;
+      const isNearExpiry = now - updatedAt >= expiresIn - 60;
+      if (forceRefresh || isNearExpiry) {
+        const renewed = await refreshOAuthSession(sessionObj);
+        if (renewed) return renewed;
+      }
+      const tok = sessionObj.access_token || sessionObj.token || ((_c = sessionObj.token_data) == null ? void 0 : _c.access_token);
+      if (typeof tok === "string" && tok.trim().length > 0) {
+        return tok.trim();
+      }
+    }
+    try {
+      const stored = (_d = localStorage.getItem("nexusmind_mcp_token")) == null ? void 0 : _d.trim();
+      if (stored && stored !== "connected") return stored;
+    } catch {
+    }
+    return null;
+  };
   const fetchLiveQuotaFromApi = async () => {
-    var _a2, _b2, _c;
-    const token = await resolveLiveAccountToken();
+    let token = await resolveLiveAccountToken(false);
     if (!token) {
       return {
         status: "unavailable",
@@ -2756,44 +2870,93 @@ print("SYNC_SUCCESS")
         reason: "Nenhum token OAuth/MCP da conta encontrado em localStorage ou ~/.buzz/.nexusmind_auth_session.json"
       };
     }
-    try {
-      const res = await hostGetJson("https://nexusmind.digital/api/v1/user/profile", token, 8e3);
-      if (res.status >= 200 && res.status < 300 && res.json) {
-        const u = res.json.data || res.json;
-        const rawBalance = typeof (u == null ? void 0 : u.balance) === "number" ? u.balance : typeof (u == null ? void 0 : u.quota) === "number" ? u.quota : null;
-        return {
-          status: rawBalance !== null ? "active" : "partial",
-          source: "live_api",
-          httpStatus: res.status,
-          latencyMs: res.latencyMs,
-          balanceUsd: rawBalance,
-          currency: "USD",
-          accountHolder: (u == null ? void 0 : u.username) || (u == null ? void 0 : u.name) || null,
-          role: (u == null ? void 0 : u.role) === 100 || (u == null ? void 0 : u.role) === "admin" ? "admin" : (u == null ? void 0 : u.role) ?? null
-        };
+    const queryQuota = async (tok) => {
+      var _a2, _b2, _c, _d;
+      try {
+        const resProf = await hostGetJson("https://nexusmind.digital/api/v1/user/profile", tok, 8e3);
+        if (resProf.status >= 200 && resProf.status < 300 && resProf.json) {
+          const u = resProf.json.data || resProf.json;
+          const rawBalance = typeof (u == null ? void 0 : u.balance) === "number" ? u.balance : typeof (u == null ? void 0 : u.quota) === "number" ? u.quota : null;
+          return {
+            status: rawBalance !== null ? "active" : "partial",
+            source: "live_api",
+            httpStatus: resProf.status,
+            latencyMs: resProf.latencyMs,
+            balanceUsd: rawBalance,
+            currency: "USD",
+            accountHolder: (u == null ? void 0 : u.username) || (u == null ? void 0 : u.name) || null,
+            role: (u == null ? void 0 : u.role) === 100 || (u == null ? void 0 : u.role) === "admin" ? "admin" : (u == null ? void 0 : u.role) ?? null
+          };
+        }
+      } catch {
       }
-      const apiErr = ((_b2 = (_a2 = res.json) == null ? void 0 : _a2.error) == null ? void 0 : _b2.message) || ((_c = res.json) == null ? void 0 : _c.message) || `HTTP ${res.status}`;
-      return {
-        status: "unavailable",
-        source: "live_api_error",
-        httpStatus: res.status,
-        latencyMs: res.latencyMs,
-        balanceUsd: null,
-        currency: "USD",
-        accountHolder: null,
-        error: apiErr
-      };
-    } catch (err) {
-      return {
-        status: "unavailable",
-        source: "network_error",
-        httpStatus: null,
-        balanceUsd: null,
-        currency: "USD",
-        accountHolder: null,
-        error: (err == null ? void 0 : err.message) || String(err)
-      };
+      try {
+        const t0 = performance.now();
+        const mcpReq = await ctx.host.request({
+          url: "https://nexusmind.digital/api/v1/mcp",
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tok}`,
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "User-Agent": "BuzzDesktop/NexusMindPlugin"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name: "user_get_profile", arguments: {} }
+          }),
+          timeoutMs: 8e3
+        });
+        const latencyMs = Math.round(performance.now() - t0);
+        if (mcpReq.status === 200 && mcpReq.body) {
+          const mcpData = JSON.parse(mcpReq.body);
+          const innerText = (_c = (_b2 = (_a2 = mcpData.result) == null ? void 0 : _a2.content) == null ? void 0 : _b2[0]) == null ? void 0 : _c.text;
+          if (innerText) {
+            const inner = JSON.parse(innerText);
+            const u = ((_d = inner.result) == null ? void 0 : _d.data) || inner.data || inner;
+            const rawBalance = typeof (u == null ? void 0 : u.balance) === "number" ? u.balance : typeof (u == null ? void 0 : u.quota) === "number" ? u.quota : null;
+            if (rawBalance !== null) {
+              return {
+                status: "active",
+                source: "live_api",
+                httpStatus: 200,
+                latencyMs,
+                balanceUsd: rawBalance,
+                currency: "USD",
+                accountHolder: (u == null ? void 0 : u.username) || "HeltonFraga01",
+                role: (u == null ? void 0 : u.role) === 100 || (u == null ? void 0 : u.role) === "admin" ? "admin" : (u == null ? void 0 : u.role) ?? null
+              };
+            }
+          }
+        } else if (mcpReq.status === 401) {
+          return { httpStatus: 401, status: "unauthorized" };
+        }
+      } catch {
+      }
+      return null;
+    };
+    let result = await queryQuota(token);
+    if (!result || result.httpStatus === 401) {
+      const renewedToken = await resolveLiveAccountToken(true);
+      if (renewedToken && renewedToken !== token) {
+        token = renewedToken;
+        result = await queryQuota(token);
+      }
     }
+    if (result && (result.status === "active" || result.status === "partial")) {
+      return result;
+    }
+    return {
+      status: "unavailable",
+      source: "live_api_error",
+      httpStatus: (result == null ? void 0 : result.httpStatus) || null,
+      balanceUsd: null,
+      currency: "USD",
+      accountHolder: null,
+      error: "Sessão expirada ou sem permissão de leitura de saldo"
+    };
   };
   if ((_a = ctx.agents) == null ? void 0 : _a.addInstructions) {
     try {

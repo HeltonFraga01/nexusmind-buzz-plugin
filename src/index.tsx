@@ -551,9 +551,42 @@ export function apply(ctx: Context) {
           timeoutMs: 8000,
         });
 
+        let u: any = null;
         if (profRes.status === 200) {
           const body = JSON.parse(profRes.body);
-          const u = body.data || body || {};
+          u = body.data || body || {};
+        } else {
+          // Fallback para MCP JSON-RPC user_get_profile se o token tiver escopo MCP
+          try {
+            const mcpRes = await ctx.host.request({
+              url: "https://nexusmind.digital/api/v1/mcp",
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+                Accept: "application/json, text/event-stream",
+                "User-Agent": "BuzzDesktop/2.3",
+              },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "tools/call",
+                params: { name: "user_get_profile", arguments: {} },
+              }),
+              timeoutMs: 8000,
+            });
+            if (mcpRes.status === 200 && mcpRes.body) {
+              const mcpData = JSON.parse(mcpRes.body);
+              const innerText = mcpData.result?.content?.[0]?.text;
+              if (innerText) {
+                const inner = JSON.parse(innerText);
+                u = inner.result?.data || inner.data || inner;
+              }
+            }
+          } catch {}
+        }
+
+        if (u) {
           const parsedBalance = typeof u.balance === "number" ? u.balance : (typeof u.quota === "number" ? u.quota : undefined);
           const profile: UserProfileData = {
             username: u.username || u.name || profileData.username,
@@ -2998,33 +3031,124 @@ print("SYNC_SUCCESS")
     return { status: res.status, body: res.body, json: parsed, latencyMs };
   };
 
-  const resolveLiveAccountToken = async (): Promise<string | null> => {
-    try {
-      const stored = localStorage.getItem("nexusmind_mcp_token")?.trim();
-      if (stored && stored !== "connected") return stored;
-    } catch {}
-    if (ctx?.host?.readFile) {
-      const candidatePaths = [
-        "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
-        "~/.buzz/.nexusmind_auth_session.json",
-      ];
-      for (const p of candidatePaths) {
-        try {
-          const raw = await ctx.host.readFile(p);
-          const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
-          const sess = JSON.parse(text);
-          const tok = sess?.access_token || sess?.token || sess?.token_data?.access_token;
-          if (typeof tok === "string" && tok.trim().length > 0) {
-            return tok.trim();
-          }
-        } catch {}
-      }
+  const SESSION_PATHS = [
+    "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
+    "~/.buzz/.nexusmind_auth_session.json",
+  ];
+
+  const readSessionFile = async (): Promise<{ path: string; data: any } | null> => {
+    if (!ctx?.host?.readFile) return null;
+    for (const p of SESSION_PATHS) {
+      try {
+        const raw = await ctx.host.readFile(p);
+        const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+        const data = JSON.parse(text);
+        if (data && typeof data === "object") {
+          return { path: p, data };
+        }
+      } catch {}
     }
     return null;
   };
 
+  const persistSessionData = async (sessionData: any, token: string) => {
+    try {
+      localStorage.setItem("nexusmind_mcp_token", token);
+      localStorage.setItem("nexusmind_auth_session", JSON.stringify(sessionData));
+    } catch {}
+    const serialized = JSON.stringify(sessionData, null, 2);
+    for (const p of SESSION_PATHS) {
+      try {
+        if ((ctx?.host as any)?.writeFile) {
+          await (ctx.host as any).writeFile(p, serialized);
+        }
+      } catch {}
+    }
+  };
+
+  const refreshOAuthSession = async (sessionData: any): Promise<string | null> => {
+    const clientId = sessionData?.client_id;
+    const refreshToken = sessionData?.token_data?.refresh_token || sessionData?.refresh_token;
+    if (!clientId || !refreshToken || !ctx?.host?.request) {
+      return null;
+    }
+
+    try {
+      const formBody = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: clientId,
+      }).toString();
+
+      const resp = await ctx.host.request({
+        url: "https://nexusmind.digital/api/v1/mcp/oauth/token",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+          "User-Agent": "BuzzDesktop/NexusMindPlugin",
+        },
+        body: formBody,
+        timeoutMs: 15000,
+      });
+
+      if (resp.status >= 200 && resp.status < 300 && resp.body) {
+        const tokenInfo = JSON.parse(resp.body);
+        const newAccessToken = tokenInfo.access_token;
+        const newRefreshToken = tokenInfo.refresh_token || refreshToken;
+        const expiresIn = tokenInfo.expires_in || 600;
+
+        sessionData.access_token = newAccessToken;
+        if (!sessionData.token_data) sessionData.token_data = {};
+        sessionData.token_data.access_token = newAccessToken;
+        sessionData.token_data.refresh_token = newRefreshToken;
+        sessionData.token_data.expires_in = expiresIn;
+        sessionData.token_data.updated_at = Math.floor(Date.now() / 1000);
+        sessionData.status = "authorized";
+
+        await persistSessionData(sessionData, newAccessToken);
+        return newAccessToken;
+      }
+    } catch (err) {
+      console.warn("[NEXUSMIND] Falha ao renovar token OAuth:", err);
+    }
+    return null;
+  };
+
+  const resolveLiveAccountToken = async (forceRefresh = false): Promise<string | null> => {
+    let sessionObj: any = null;
+    const sessResult = await readSessionFile();
+    if (sessResult) {
+      sessionObj = sessResult.data;
+    }
+
+    if (sessionObj) {
+      const now = Math.floor(Date.now() / 1000);
+      const updatedAt = sessionObj.token_data?.updated_at || sessionObj.started_at || 0;
+      const expiresIn = sessionObj.token_data?.expires_in || sessionObj.expires_in || 600;
+      const isNearExpiry = (now - updatedAt) >= (expiresIn - 60);
+
+      if (forceRefresh || isNearExpiry) {
+        const renewed = await refreshOAuthSession(sessionObj);
+        if (renewed) return renewed;
+      }
+
+      const tok = sessionObj.access_token || sessionObj.token || sessionObj.token_data?.access_token;
+      if (typeof tok === "string" && tok.trim().length > 0) {
+        return tok.trim();
+      }
+    }
+
+    try {
+      const stored = localStorage.getItem("nexusmind_mcp_token")?.trim();
+      if (stored && stored !== "connected") return stored;
+    } catch {}
+
+    return null;
+  };
+
   const fetchLiveQuotaFromApi = async () => {
-    const token = await resolveLiveAccountToken();
+    let token = await resolveLiveAccountToken(false);
     if (!token) {
       return {
         status: "unavailable",
@@ -3035,44 +3159,101 @@ print("SYNC_SUCCESS")
         reason: "Nenhum token OAuth/MCP da conta encontrado em localStorage ou ~/.buzz/.nexusmind_auth_session.json",
       };
     }
-    try {
-      const res = await hostGetJson("https://nexusmind.digital/api/v1/user/profile", token, 8000);
-      if (res.status >= 200 && res.status < 300 && res.json) {
-        const u = res.json.data || res.json;
-        const rawBalance = typeof u?.balance === "number" ? u.balance : (typeof u?.quota === "number" ? u.quota : null);
-        return {
-          status: rawBalance !== null ? "active" : "partial",
-          source: "live_api",
-          httpStatus: res.status,
-          latencyMs: res.latencyMs,
-          balanceUsd: rawBalance,
-          currency: "USD",
-          accountHolder: u?.username || u?.name || null,
-          role: u?.role === 100 || u?.role === "admin" ? "admin" : (u?.role ?? null),
-        };
+
+    const queryQuota = async (tok: string) => {
+      // 1. Tenta user/profile primeiro (compatível com REST e harness de teste)
+      try {
+        const resProf = await hostGetJson("https://nexusmind.digital/api/v1/user/profile", tok, 8000);
+        if (resProf.status >= 200 && resProf.status < 300 && resProf.json) {
+          const u = resProf.json.data || resProf.json;
+          const rawBalance = typeof u?.balance === "number" ? u.balance : (typeof u?.quota === "number" ? u.quota : null);
+          return {
+            status: rawBalance !== null ? "active" : "partial",
+            source: "live_api",
+            httpStatus: resProf.status,
+            latencyMs: resProf.latencyMs,
+            balanceUsd: rawBalance,
+            currency: "USD",
+            accountHolder: u?.username || u?.name || null,
+            role: u?.role === 100 || u?.role === "admin" ? "admin" : (u?.role ?? null),
+          };
+        }
+      } catch {}
+
+      // 2. Tenta MCP JSON-RPC user_get_profile (endpoint nativo de tokens OAuth MCP)
+      try {
+        const t0 = performance.now();
+        const mcpReq = await ctx.host.request({
+          url: "https://nexusmind.digital/api/v1/mcp",
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tok}`,
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            "User-Agent": "BuzzDesktop/NexusMindPlugin",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name: "user_get_profile", arguments: {} },
+          }),
+          timeoutMs: 8000,
+        });
+        const latencyMs = Math.round(performance.now() - t0);
+
+        if (mcpReq.status === 200 && mcpReq.body) {
+          const mcpData = JSON.parse(mcpReq.body);
+          const innerText = mcpData.result?.content?.[0]?.text;
+          if (innerText) {
+            const inner = JSON.parse(innerText);
+            const u = inner.result?.data || inner.data || inner;
+            const rawBalance = typeof u?.balance === "number" ? u.balance : (typeof u?.quota === "number" ? u.quota : null);
+            if (rawBalance !== null) {
+              return {
+                status: "active",
+                source: "live_api",
+                httpStatus: 200,
+                latencyMs,
+                balanceUsd: rawBalance,
+                currency: "USD",
+                accountHolder: u?.username || "HeltonFraga01",
+                role: u?.role === 100 || u?.role === "admin" ? "admin" : (u?.role ?? null),
+              };
+            }
+          }
+        } else if (mcpReq.status === 401) {
+          return { httpStatus: 401, status: "unauthorized" };
+        }
+      } catch {}
+
+      return null;
+    };
+
+    let result: any = await queryQuota(token);
+
+    // Se falhou com 401 ou token inválido, tenta auto-renovação silenciosa via refresh_token
+    if (!result || result.httpStatus === 401) {
+      const renewedToken = await resolveLiveAccountToken(true);
+      if (renewedToken && renewedToken !== token) {
+        token = renewedToken;
+        result = await queryQuota(token);
       }
-      const apiErr = res.json?.error?.message || res.json?.message || `HTTP ${res.status}`;
-      return {
-        status: "unavailable",
-        source: "live_api_error",
-        httpStatus: res.status,
-        latencyMs: res.latencyMs,
-        balanceUsd: null,
-        currency: "USD",
-        accountHolder: null,
-        error: apiErr,
-      };
-    } catch (err: any) {
-      return {
-        status: "unavailable",
-        source: "network_error",
-        httpStatus: null,
-        balanceUsd: null,
-        currency: "USD",
-        accountHolder: null,
-        error: err?.message || String(err),
-      };
     }
+
+    if (result && (result.status === "active" || result.status === "partial")) {
+      return result;
+    }
+
+    return {
+      status: "unavailable",
+      source: "live_api_error",
+      httpStatus: result?.httpStatus || null,
+      balanceUsd: null,
+      currency: "USD",
+      accountHolder: null,
+      error: "Sessão expirada ou sem permissão de leitura de saldo",
+    };
   };
 
   // ── INJEÇÃO DE INSTRUÇÕES DE AGENTE (<plugin-instructions>) ──
