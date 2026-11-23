@@ -743,17 +743,34 @@ subprocess.run([sys.executable, script_path])
     };
     const handleTestSingleModel = async (mid) => {
       var _a2;
-      let keyToUse = CANONICAL_GROUPS.nexusmind_openai.defaultKey;
-      const grps = getModelGroups(mid);
-      if (grps.includes("nexusmind_antigravity")) {
-        keyToUse = CANONICAL_GROUPS.nexusmind_antigravity.defaultKey;
-      } else if (grps.includes("nexusmind_grok")) {
-        keyToUse = CANONICAL_GROUPS.nexusmind_grok.defaultKey;
+      const modelObj = models.find((m) => m.id === mid);
+      const grps = getModelGroups(modelObj || mid);
+      let targetGroup;
+      if (selectedGroupTab !== "all" && selectedGroupTab in CANONICAL_GROUPS && grps.includes(selectedGroupTab)) {
+        targetGroup = selectedGroupTab;
       } else if (grps.includes("nexusmind_anthropic")) {
-        keyToUse = CANONICAL_GROUPS.nexusmind_antigravity.defaultKey;
+        targetGroup = "nexusmind_anthropic";
+      } else if (grps.includes("nexusmind_antigravity")) {
+        targetGroup = "nexusmind_antigravity";
+      } else if (grps.includes("nexusmind_grok")) {
+        targetGroup = "nexusmind_grok";
       } else {
-        keyToUse = CANONICAL_GROUPS.nexusmind_openai.defaultKey;
+        targetGroup = "nexusmind_openai";
       }
+      const keyToUse = CANONICAL_GROUPS[targetGroup].defaultKey;
+      const isAnthropic = targetGroup === "nexusmind_anthropic";
+      const endpointUrl = isAnthropic ? "https://api.nexusmind.digital/v1/messages" : "https://api.nexusmind.digital/v1/chat/completions";
+      const reqHeaders = isAnthropic ? {
+        "x-api-key": keyToUse,
+        Authorization: `Bearer ${keyToUse}`,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+        "User-Agent": "BuzzDesktop/2.3"
+      } : {
+        Authorization: `Bearer ${keyToUse}`,
+        "Content-Type": "application/json",
+        "User-Agent": "BuzzDesktop/2.3"
+      };
       setModelTests((prev) => ({
         ...prev,
         [mid]: { status: "testing" }
@@ -761,17 +778,13 @@ subprocess.run([sys.executable, script_path])
       const t0 = Date.now();
       try {
         const res = await ctx.host.request({
-          url: "https://api.nexusmind.digital/v1/chat/completions",
+          url: endpointUrl,
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${keyToUse}`,
-            "Content-Type": "application/json",
-            "User-Agent": "BuzzDesktop/2.3"
-          },
+          headers: reqHeaders,
           body: JSON.stringify({
             model: mid,
             messages: [{ role: "user", content: "oi" }],
-            max_tokens: 5
+            max_tokens: isAnthropic ? 16 : 5
           }),
           timeoutMs: 14e3
         });
@@ -785,7 +798,8 @@ subprocess.run([sys.executable, script_path])
           let errText = `Status ${res.status}`;
           try {
             const parsed = JSON.parse(res.body);
-            errText = ((_a2 = parsed.error) == null ? void 0 : _a2.message) || parsed.message || errText;
+            const rawMsg = ((_a2 = parsed.error) == null ? void 0 : _a2.message) || parsed.message;
+            if (rawMsg) errText = `HTTP ${res.status}: ${rawMsg}`;
           } catch {
           }
           setModelTests((prev) => ({

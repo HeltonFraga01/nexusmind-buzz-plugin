@@ -873,23 +873,45 @@ subprocess.run([sys.executable, script_path])
     };
 
     // ─────────────────────────────────────────────────────────────────────────
-    // MODEL HEALTHCHECK PING (CHAT/COMPLETIONS COM ROTEAMENTO DE CHAVE PRECISO)
+    // MODEL HEALTHCHECK PING (ROTEAMENTO PRECISO POR GRUPO + ANTHROPIC /v1/messages)
     // ─────────────────────────────────────────────────────────────────────────
     const handleTestSingleModel = async (mid: string) => {
-      // Determine the optimal sk-... key for this model
-      let keyToUse = CANONICAL_GROUPS.nexusmind_openai.defaultKey;
-      const grps = getModelGroups(mid);
+      const modelObj = models.find((m) => m.id === mid);
+      const grps = getModelGroups(modelObj || mid);
 
-      if (grps.includes("nexusmind_antigravity")) {
-        // Antigravity (Gemini e Claude via Vertex) oferece máxima estabilidade e menor latência
-        keyToUse = CANONICAL_GROUPS.nexusmind_antigravity.defaultKey;
-      } else if (grps.includes("nexusmind_grok")) {
-        keyToUse = CANONICAL_GROUPS.nexusmind_grok.defaultKey;
+      // Respeita a aba selecionada quando o modelo pertence a ela; caso contrário usa o grupo canônico real
+      type CanonicalGroupId = keyof typeof CANONICAL_GROUPS;
+      let targetGroup: CanonicalGroupId;
+      if (selectedGroupTab !== "all" && selectedGroupTab in CANONICAL_GROUPS && grps.includes(selectedGroupTab)) {
+        targetGroup = selectedGroupTab as CanonicalGroupId;
       } else if (grps.includes("nexusmind_anthropic")) {
-        keyToUse = CANONICAL_GROUPS.nexusmind_antigravity.defaultKey;
+        targetGroup = "nexusmind_anthropic";
+      } else if (grps.includes("nexusmind_antigravity")) {
+        targetGroup = "nexusmind_antigravity";
+      } else if (grps.includes("nexusmind_grok")) {
+        targetGroup = "nexusmind_grok";
       } else {
-        keyToUse = CANONICAL_GROUPS.nexusmind_openai.defaultKey;
+        targetGroup = "nexusmind_openai";
       }
+
+      const keyToUse = CANONICAL_GROUPS[targetGroup].defaultKey;
+      const isAnthropic = targetGroup === "nexusmind_anthropic";
+      const endpointUrl = isAnthropic
+        ? "https://api.nexusmind.digital/v1/messages"
+        : "https://api.nexusmind.digital/v1/chat/completions";
+      const reqHeaders: Record<string, string> = isAnthropic
+        ? {
+            "x-api-key": keyToUse,
+            Authorization: `Bearer ${keyToUse}`,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+            "User-Agent": "BuzzDesktop/2.3",
+          }
+        : {
+            Authorization: `Bearer ${keyToUse}`,
+            "Content-Type": "application/json",
+            "User-Agent": "BuzzDesktop/2.3",
+          };
 
       setModelTests((prev: any) => ({
         ...prev,
@@ -899,17 +921,13 @@ subprocess.run([sys.executable, script_path])
       const t0 = Date.now();
       try {
         const res = await ctx.host.request({
-          url: "https://api.nexusmind.digital/v1/chat/completions",
+          url: endpointUrl,
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${keyToUse}`,
-            "Content-Type": "application/json",
-            "User-Agent": "BuzzDesktop/2.3",
-          },
+          headers: reqHeaders,
           body: JSON.stringify({
             model: mid,
             messages: [{ role: "user", content: "oi" }],
-            max_tokens: 5,
+            max_tokens: isAnthropic ? 16 : 5,
           }),
           timeoutMs: 14000,
         });
@@ -924,7 +942,8 @@ subprocess.run([sys.executable, script_path])
           let errText = `Status ${res.status}`;
           try {
             const parsed = JSON.parse(res.body);
-            errText = parsed.error?.message || parsed.message || errText;
+            const rawMsg = parsed.error?.message || parsed.message;
+            if (rawMsg) errText = `HTTP ${res.status}: ${rawMsg}`;
           } catch {}
           setModelTests((prev: any) => ({
             ...prev,
