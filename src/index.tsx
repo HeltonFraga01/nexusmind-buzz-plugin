@@ -2711,6 +2711,64 @@ print("SYNC_SUCCESS")
                 )
               ),
 
+              // Ranking Rápido de Healthcheck (apenas quando há modelos testados ao vivo)
+              (() => {
+                const tested = Object.entries(modelTests).filter(([, t]) => t.status === "ok" || t.status === "error");
+                if (tested.length === 0) return null;
+                const onlineSorted = tested
+                  .filter(([, t]) => t.status === "ok" && typeof t.latency === "number")
+                  .sort((a, b) => (a[1].latency ?? 999999) - (b[1].latency ?? 999999));
+                const okCount = onlineSorted.length;
+                const pct = Math.round((okCount / tested.length) * 100);
+                const top3 = onlineSorted.slice(0, 3);
+                return h(
+                  "div",
+                  {
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      flexWrap: "wrap",
+                      gap: "10px",
+                      padding: "8px 14px",
+                      borderRadius: "10px",
+                      backgroundColor: "rgba(16, 185, 129, 0.06)",
+                      border: "1px solid rgba(16, 185, 129, 0.2)",
+                      fontSize: "11px",
+                    },
+                  },
+                  h(
+                    "div",
+                    { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+                    h("span", { style: { fontWeight: "700", color: "#10b981" } }, "Ranking Ping Real:"),
+                    top3.length === 0
+                      ? h("span", { style: { color: "#f87171" } }, "Nenhum modelo online nos testes recentes.")
+                      : top3.map(([mid, t], idx) =>
+                          h(
+                            "span",
+                            {
+                              key: mid,
+                              style: {
+                                padding: "2px 8px",
+                                borderRadius: "9999px",
+                                backgroundColor: idx === 0 ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.06)",
+                                color: idx === 0 ? "#34d399" : "#e4e4e7",
+                                fontFamily: "monospace",
+                                fontWeight: idx === 0 ? "700" : "500",
+                              },
+                            },
+                            `#${idx + 1} ${mid} (${t.latency}ms)`
+                          )
+                        )
+                  ),
+                  h(
+                    "span",
+                    { style: { color: "#9ca3af", fontFamily: "monospace" } },
+                    `Estabilidade: ${okCount}/${tested.length} online (${pct}%)`
+                  )
+                );
+              })(),
+
               // Model List Rows
               h(
                 "div",
