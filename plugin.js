@@ -164,7 +164,7 @@ const CANONICAL_GROUPS = {
     accentColor: "#d97706",
     logoKey: "claude",
     modelsCount: 18,
-    telemetrySummary: "Contingência ativa via Antigravity"
+    telemetrySummary: "Carregando dados..."
   },
   nexusmind_antigravity: {
     id: "nexusmind_antigravity",
@@ -984,7 +984,7 @@ goose_secrets_path = os.path.expanduser("~/.config/goose/secrets.yaml")
 secrets_map = {
     "OPENAI_API_KEY": keys.get("nexusmind_openai", ""),
     "ANTIGRAVITY_API_KEY": keys.get("nexusmind_antigravity", ""),
-    "ANTHROPIC_API_KEY": keys.get("nexusmind_antigravity", "") or keys.get("nexusmind_anthropic", ""),
+    "ANTHROPIC_API_KEY": keys.get("nexusmind_anthropic", "") or keys.get("nexusmind_antigravity", ""),
     "GROK_API_KEY": keys.get("nexusmind_grok", ""),
     "XAI_API_KEY": keys.get("nexusmind_grok", ""),
     "GOOGLE_API_KEY": keys.get("nexusmind_antigravity", "")
@@ -2022,6 +2022,22 @@ print("SYNC_SUCCESS")
           Object.entries(CANONICAL_GROUPS).map(([pid, group]) => {
             var _a2;
             const isSelected = selectedGroupTab === pid;
+            const getLiveSummary = (groupId, staticSummary) => {
+              const platformMap = {
+                nexusmind_openai: "openai",
+                nexusmind_anthropic: "anthropic",
+                nexusmind_antigravity: "antigravity",
+                nexusmind_grok: "grok"
+              };
+              const platform = platformMap[groupId];
+              if (!platform || !(dashboardMetrics == null ? void 0 : dashboardMetrics.by_platform)) return staticSummary;
+              const p = dashboardMetrics.by_platform.find((x) => x.platform === platform);
+              if (!p) return staticSummary;
+              const tokens = p.today_tokens || 0;
+              const reqs = p.today_requests || 0;
+              const fmtTokens = tokens >= 1e9 ? `${(tokens / 1e9).toFixed(1)}B` : tokens >= 1e6 ? `${(tokens / 1e6).toFixed(1)}M` : tokens >= 1e3 ? `${(tokens / 1e3).toFixed(1)}k` : `${tokens}`;
+              return `Hoje: ${fmtTokens} tokens • ${reqs.toLocaleString()} reqs`;
+            };
             return h(
               "div",
               {
@@ -2093,7 +2109,7 @@ print("SYNC_SUCCESS")
               h(
                 "div",
                 { style: { fontSize: "12px", color: "#d1d5db", fontWeight: "500" } },
-                group.telemetrySummary
+                getLiveSummary(group.id, group.telemetrySummary)
               ),
               // Bottom Filter Pill (Quick Filter to view models in this group)
               h(
