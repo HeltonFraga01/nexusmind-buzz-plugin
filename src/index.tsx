@@ -123,7 +123,7 @@ export const inject = ["react", "pages", "settingsCards", "host", "agents"];
 const ICON =
   "data:image/svg+xml;base64," +
   btoa(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"/><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>'
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="nm" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#nm)"/><circle cx="32" cy="32" r="19" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="2.5"/><path d="M21 42V22l22 20V22" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="21" cy="22" r="3.5" fill="#ffffff"/><circle cx="43" cy="42" r="3.5" fill="#ffffff"/><circle cx="43" cy="22" r="3.5" fill="#d1fae5"/><circle cx="21" cy="42" r="3.5" fill="#d1fae5"/></svg>'
   );
 
 // ─────────────────────────────────────────────────────────────────────────────
