@@ -225,32 +225,369 @@ async function applyBestModelToAgent(ctx, groups, input) {
     message: `Agente '${target.name || target.key}' atualizado de '${previousModel || "padrão"}' para '${selection.selectedModel}' (${selection.selectedGroup}, ${selection.selectedLatencyMs}ms).`
   };
 }
+const DECISIONS_CONFIG_STORAGE_KEY = "nexusmind_decisions_config_v1";
+const DECISIONS_CONFIG_DISK_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-decisions-config.json";
+function readDecisionsConfig(defaultModel) {
+  var _a, _b;
+  const defaults = {
+    primaryModel: defaultModel,
+    fallbackModels: ["gpt-6.1-terra", "claude-sonnet-5-5", "grok-4.1-fast"],
+    autoRankFallback: true
+  };
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, DECISIONS_CONFIG_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw);
+    const primary = String((parsed == null ? void 0 : parsed.primaryModel) || "").trim() || defaults.primaryModel;
+    const fallbacks = Array.isArray(parsed == null ? void 0 : parsed.fallbackModels) ? parsed.fallbackModels.map((x) => String(x || "").trim()).filter(Boolean) : defaults.fallbackModels;
+    const autoRankFallback = (parsed == null ? void 0 : parsed.autoRankFallback) !== false;
+    return { primaryModel: primary, fallbackModels: fallbacks, autoRankFallback };
+  } catch {
+    return defaults;
+  }
+}
+function saveDecisionsConfig(ctx, cfg) {
+  var _a, _b;
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, DECISIONS_CONFIG_STORAGE_KEY, JSON.stringify(cfg));
+  } catch {
+  }
+  try {
+    const host = ctx == null ? void 0 : ctx.host;
+    if (typeof (host == null ? void 0 : host.writeFile) === "function") {
+      void host.writeFile(DECISIONS_CONFIG_DISK_PATH, JSON.stringify(cfg, null, 2));
+    }
+  } catch {
+  }
+}
+function resolveGroupForModel(modelId, groups, fallbackGroup) {
+  const m = String(modelId || "").toLowerCase();
+  if (m.includes("grok") && groups.nexusmind_grok) return groups.nexusmind_grok;
+  if (m.includes("claude") && groups.nexusmind_anthropic) return groups.nexusmind_anthropic;
+  if ((m.includes("gemini") || m.includes("antigravity")) && groups.nexusmind_antigravity) {
+    return groups.nexusmind_antigravity;
+  }
+  if (groups.nexusmind_openai) return groups.nexusmind_openai;
+  return fallbackGroup;
+}
+function getKnownDecisionModels(groups) {
+  var _a, _b, _c, _d;
+  const set = /* @__PURE__ */ new Set();
+  for (const grp of Object.values(groups)) {
+    if (grp == null ? void 0 : grp.defaultModel) set.add(grp.defaultModel);
+  }
+  for (const seed of [
+    "gemini-3.8-flash-medium",
+    "gpt-6.1-terra",
+    "claude-sonnet-5-5",
+    "grok-4.1-fast",
+    "gemini-2.5-flash"
+  ]) {
+    set.add(seed);
+  }
+  try {
+    const rawRank = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, "nexusmind_model_ranking");
+    if (rawRank) {
+      const parsed = JSON.parse(rawRank);
+      for (const m of Array.isArray(parsed == null ? void 0 : parsed.models) ? parsed.models : []) {
+        if ((m == null ? void 0 : m.model) && (m == null ? void 0 : m.online) !== false && !(m == null ? void 0 : m.isDisabled) && !isFreeModel(m.model)) {
+          set.add(String(m.model));
+        }
+      }
+    }
+  } catch {
+  }
+  try {
+    const rawCached = (_d = (_c = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _c.getItem) == null ? void 0 : _d.call(_c, "nexusmind_cached_models");
+    if (rawCached) {
+      const parsed = JSON.parse(rawCached);
+      for (const m of Array.isArray(parsed) ? parsed : []) {
+        if ((m == null ? void 0 : m.id) && !isFreeModel(m.id)) set.add(String(m.id));
+      }
+    }
+  } catch {
+  }
+  return Array.from(set);
+}
+function getRankingFallbackModels() {
+  var _a, _b;
+  try {
+    const rawRank = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, "nexusmind_model_ranking");
+    if (!rawRank) return [];
+    const parsed = JSON.parse(rawRank);
+    if (!Array.isArray(parsed == null ? void 0 : parsed.models)) return [];
+    return parsed.models.filter((m) => (m == null ? void 0 : m.model) && (m == null ? void 0 : m.online) !== false && !(m == null ? void 0 : m.isDisabled) && !isFreeModel(m.model)).slice(0, 6).map((m) => String(m.model));
+  } catch {
+    return [];
+  }
+}
 function createNexusMindDecisionProvider(ctx, groups) {
   const fastGroup = groups.nexusmind_antigravity || Object.values(groups)[0];
-  const fallbackGroup = groups.nexusmind_openai || fastGroup;
-  const decisionModel = (fastGroup == null ? void 0 : fastGroup.defaultModel) || "gemini-3.8-flash-medium";
+  const defaultModel = (fastGroup == null ? void 0 : fastGroup.defaultModel) || "gemini-3.8-flash-medium";
+  const listeners = /* @__PURE__ */ new Set();
+  const notifyListeners = () => {
+    for (const fn of Array.from(listeners)) {
+      try {
+        fn();
+      } catch {
+      }
+    }
+  };
+  const React = ctx == null ? void 0 : ctx.react;
+  const SettingsComponent = (React == null ? void 0 : React.createElement) ? function NexusMindDecisionsSettings() {
+    const h = React.createElement;
+    const [cfg, setCfg] = React.useState(() => readDecisionsConfig(defaultModel));
+    const [fallbackInput, setFallbackInput] = React.useState(
+      () => readDecisionsConfig(defaultModel).fallbackModels.join(", ")
+    );
+    const [savedMsg, setSavedMsg] = React.useState("");
+    const [pingState, setPingState] = React.useState({
+      busy: false,
+      text: ""
+    });
+    const knownModels = React.useMemo(() => getKnownDecisionModels(groups), []);
+    const applySave = (nextCfg, note) => {
+      setCfg(nextCfg);
+      setFallbackInput(nextCfg.fallbackModels.join(", "));
+      saveDecisionsConfig(ctx, nextCfg);
+      notifyListeners();
+      setSavedMsg(note);
+    };
+    const handleSaveClick = () => {
+      const cleanPrimary = String(cfg.primaryModel || "").trim() || defaultModel;
+      const cleanFallbacks = fallbackInput.split(/[,\n]+/).map((s) => s.trim()).filter((s) => Boolean(s) && s.toLowerCase() !== cleanPrimary.toLowerCase());
+      applySave(
+        {
+          primaryModel: cleanPrimary,
+          fallbackModels: Array.from(new Set(cleanFallbacks)),
+          autoRankFallback: cfg.autoRankFallback
+        },
+        `Salvo: ${cleanPrimary} (+ ${cleanFallbacks.length} fallback${cleanFallbacks.length === 1 ? "" : "s"})`
+      );
+    };
+    const handlePickBestAuto = async () => {
+      setPingState({ busy: true, text: "Testando modelos mais rápidos no NexusMind..." });
+      try {
+        const best = await selectBestModelByTier(ctx, groups, { tier: "decision", max_probes: 5 });
+        if (best.ok && best.selectedModel) {
+          const otherOnline = best.ranking.filter((r) => r.online && r.model !== best.selectedModel).map((r) => r.model);
+          const nextFallbacks = Array.from(/* @__PURE__ */ new Set([...otherOnline, ...cfg.fallbackModels])).filter(
+            (m) => m !== best.selectedModel
+          );
+          applySave(
+            { primaryModel: best.selectedModel, fallbackModels: nextFallbacks.slice(0, 5), autoRankFallback: true },
+            `Auto-selecionado: ${best.selectedModel} (${best.selectedLatencyMs}ms)`
+          );
+          setPingState({ busy: false, ok: true, text: `Online: ${best.selectedModel} (${best.selectedLatencyMs}ms)` });
+        } else {
+          setPingState({ busy: false, ok: false, text: best.message });
+        }
+      } catch (err) {
+        setPingState({ busy: false, ok: false, text: `Erro ao testar: ${(err == null ? void 0 : err.message) || err}` });
+      }
+    };
+    const handleTestPrimary = async () => {
+      const mdl = String(cfg.primaryModel || "").trim() || defaultModel;
+      const grp = resolveGroupForModel(mdl, groups, fastGroup);
+      setPingState({ busy: true, text: `Pingando ${mdl} via ${grp.id}...` });
+      const res = await pingModel(ctx, mdl, grp);
+      setPingState({
+        busy: false,
+        ok: res.online,
+        text: res.online ? `OK · ${mdl} respondeu em ${res.latencyMs}ms (${grp.id})` : `FALHA · ${mdl} (${res.error || "indisponível"}) — failover automático entrará em ação se ocorrer em produção.`
+      });
+    };
+    const inputStyle = {
+      width: "100%",
+      boxSizing: "border-box",
+      padding: "8px 10px",
+      borderRadius: "6px",
+      border: "1px solid rgba(255,255,255,0.16)",
+      backgroundColor: "rgba(0,0,0,0.28)",
+      color: "#f3f4f6",
+      fontSize: "12px",
+      fontFamily: "monospace"
+    };
+    return h(
+      "div",
+      {
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          gap: "12px",
+          padding: "14px",
+          borderRadius: "10px",
+          border: "1px solid rgba(255,255,255,0.12)",
+          backgroundColor: "rgba(255,255,255,0.03)",
+          maxWidth: "560px",
+          width: "100%",
+          boxSizing: "border-box"
+        }
+      },
+      h(
+        "div",
+        { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+        h("label", { style: { fontSize: "12px", fontWeight: "600", color: "#e5e7eb" } }, "Modelo Principal (Customizável)"),
+        h("input", {
+          type: "text",
+          value: cfg.primaryModel,
+          placeholder: "Ex.: gemini-3.8-flash-medium, gpt-6.1-terra, claude-sonnet-5-5",
+          onChange: (e) => {
+            setSavedMsg("");
+            setCfg({ ...cfg, primaryModel: e.target.value });
+          },
+          style: inputStyle
+        }),
+        h(
+          "select",
+          {
+            value: knownModels.includes(cfg.primaryModel) ? cfg.primaryModel : "",
+            onChange: (e) => {
+              if (e.target.value) {
+                setSavedMsg("");
+                setCfg({ ...cfg, primaryModel: e.target.value });
+              }
+            },
+            style: { ...inputStyle, cursor: "pointer" }
+          },
+          h("option", { value: "" }, "— Escolher da lista do NexusMind Gateway —"),
+          ...knownModels.map((m) => h("option", { key: m, value: m }, m))
+        )
+      ),
+      h(
+        "div",
+        { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+        h(
+          "label",
+          { style: { fontSize: "12px", fontWeight: "600", color: "#e5e7eb" } },
+          "Cadeia de Fallback Automático (separados por vírgula)"
+        ),
+        h("input", {
+          type: "text",
+          value: fallbackInput,
+          placeholder: "gpt-6.1-terra, claude-sonnet-5-5, grok-4.1-fast",
+          onChange: (e) => {
+            setSavedMsg("");
+            setFallbackInput(e.target.value);
+          },
+          style: inputStyle
+        })
+      ),
+      h(
+        "label",
+        { style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#cbd5e1", cursor: "pointer" } },
+        h("input", {
+          type: "checkbox",
+          checked: cfg.autoRankFallback,
+          onChange: (e) => {
+            setSavedMsg("");
+            setCfg({ ...cfg, autoRankFallback: Boolean(e.target.checked) });
+          }
+        }),
+        "Usar Ranking NexusMind automaticamente como failover se principal + fallbacks falharem"
+      ),
+      h(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+        h(
+          "button",
+          {
+            type: "button",
+            onClick: handleSaveClick,
+            style: {
+              padding: "7px 14px",
+              borderRadius: "6px",
+              border: "none",
+              backgroundColor: "#10b981",
+              color: "#000",
+              fontSize: "12px",
+              fontWeight: "700",
+              cursor: "pointer"
+            }
+          },
+          "Salvar Modelo"
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            onClick: handleTestPrimary,
+            disabled: pingState.busy,
+            style: {
+              padding: "7px 12px",
+              borderRadius: "6px",
+              border: "1px solid rgba(56,189,248,0.45)",
+              backgroundColor: "rgba(56,189,248,0.12)",
+              color: "#38bdf8",
+              fontSize: "12px",
+              fontWeight: "600",
+              cursor: pingState.busy ? "wait" : "pointer"
+            }
+          },
+          pingState.busy ? "Testando..." : "Testar Modelo"
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            onClick: handlePickBestAuto,
+            disabled: pingState.busy,
+            style: {
+              padding: "7px 12px",
+              borderRadius: "6px",
+              border: "1px solid rgba(255,255,255,0.16)",
+              backgroundColor: "rgba(255,255,255,0.06)",
+              color: "#e5e7eb",
+              fontSize: "12px",
+              fontWeight: "600",
+              cursor: pingState.busy ? "wait" : "pointer"
+            }
+          },
+          "⚡ Auto (Melhor Online)"
+        )
+      ),
+      savedMsg && h("div", { style: { fontSize: "11px", color: "#34d399", fontFamily: "monospace" } }, savedMsg),
+      pingState.text && h(
+        "div",
+        {
+          style: {
+            fontSize: "11px",
+            color: pingState.ok === false ? "#fca5a5" : pingState.ok === true ? "#34d399" : "#93c5fd",
+            fontFamily: "monospace"
+          }
+        },
+        pingState.text
+      )
+    );
+  } : void 0;
   return {
     id: "nexusmind-fast",
     label: "NexusMind Fast Decisions",
-    description: `Modelo rápido via NexusMind Gateway (${decisionModel}) para classificadores Attention e roteamento OrgFy.`,
+    description: "Modelo customizável via NexusMind Gateway com fallback automático para Attention e roteamento OrgFy.",
     order: 5,
     status: () => (fastGroup == null ? void 0 : fastGroup.defaultKey) ? "ready" : "needs-setup",
-    subscribe: () => () => {
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
+    ...SettingsComponent ? { Settings: SettingsComponent } : {},
     decide: async (request, options) => {
+      var _a;
       const host = ctx == null ? void 0 : ctx.host;
       if (typeof (host == null ? void 0 : host.request) !== "function") {
         return { outcome: "failed", reason: "unavailable" };
       }
       const questionsSpec = Object.entries(request.questions || {}).map(([key, q]) => {
-        var _a;
+        var _a2;
         if (q.type === "yes_no") {
           return `- "${key}" (yes_no): ${q.instructions} -> retorne {"type":"yes_no","probability": <numero 0..1>}`;
         }
         if (q.type === "choice") {
           return `- "${key}" (choice): ${q.instructions} | opcoes: ${JSON.stringify(q.options)} -> retorne {"type":"choice","choice":"<uma das chaves>","confidence":<0..1>,"probabilities":{}}`;
         }
-        return `- "${key}" (score): ${q.instructions} | niveis 0..${(((_a = q.levels) == null ? void 0 : _a.length) || 2) - 1}: ${JSON.stringify(q.levels)} -> retorne {"type":"score","score":<numero 0..N-1>,"confidence":<0..1>,"probabilities":{}}`;
+        return `- "${key}" (score): ${q.instructions} | niveis 0..${(((_a2 = q.levels) == null ? void 0 : _a2.length) || 2) - 1}: ${JSON.stringify(q.levels)} -> retorne {"type":"score","score":<numero 0..N-1>,"confidence":<0..1>,"probabilities":{}}`;
       });
       const prompt = [
         "Você é um motor de decisão determinístico ultrarrápido. Responda APENAS um objeto JSON válido (sem markdown, sem comentários) mapeando cada chave de pergunta para sua resposta exata.",
@@ -261,35 +598,51 @@ function createNexusMindDecisionProvider(ctx, groups) {
         String(request.state || "").slice(0, 6e3)
       ].join("\n");
       const tryCall = async (grp, mdl) => {
-        var _a, _b, _c, _d, _e;
-        if ((_a = options == null ? void 0 : options.signal) == null ? void 0 : _a.aborted) {
+        var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j;
+        if ((_a2 = options == null ? void 0 : options.signal) == null ? void 0 : _a2.aborted) {
           return { outcome: "failed", reason: "timeout" };
         }
+        const isAnthropic = grp.id === "nexusmind_anthropic";
+        const url = isAnthropic ? "https://api.nexusmind.digital/v1/messages" : "https://api.nexusmind.digital/v1/chat/completions";
+        const headers = isAnthropic ? {
+          "x-api-key": grp.defaultKey,
+          Authorization: `Bearer ${grp.defaultKey}`,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+          "User-Agent": "BuzzDesktop/NexusMindDecisions"
+        } : {
+          Authorization: `Bearer ${grp.defaultKey}`,
+          "Content-Type": "application/json",
+          "User-Agent": "BuzzDesktop/NexusMindDecisions"
+        };
+        const reqBody = isAnthropic ? {
+          model: mdl,
+          max_tokens: 600,
+          temperature: 0,
+          system: "Retorne estritamente JSON válido seguindo o schema solicitado.",
+          messages: [{ role: "user", content: prompt }]
+        } : {
+          model: mdl,
+          temperature: 0,
+          max_tokens: 600,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: "Retorne estritamente JSON válido seguindo o schema solicitado." },
+            { role: "user", content: prompt }
+          ]
+        };
         const res = await host.request({
-          url: "https://api.nexusmind.digital/v1/chat/completions",
+          url,
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${grp.defaultKey}`,
-            "Content-Type": "application/json",
-            "User-Agent": "BuzzDesktop/NexusMindDecisions"
-          },
-          body: JSON.stringify({
-            model: mdl,
-            temperature: 0,
-            max_tokens: 600,
-            response_format: { type: "json_object" },
-            messages: [
-              { role: "system", content: "Retorne estritamente JSON válido seguindo o schema solicitado." },
-              { role: "user", content: prompt }
-            ]
-          }),
+          headers,
+          body: JSON.stringify(reqBody),
           timeoutMs: Math.min(25e3, Math.max(2e3, Number(request.timeoutMs || 1e4)))
         });
         if (!res || res.status < 200 || res.status >= 300 || !res.body) {
           return null;
         }
         const outer = JSON.parse(res.body);
-        const rawText = String(((_d = (_c = (_b = outer == null ? void 0 : outer.choices) == null ? void 0 : _b[0]) == null ? void 0 : _c.message) == null ? void 0 : _d.content) || "").trim();
+        const rawText = isAnthropic ? String(((_d = (_c = (_b = outer == null ? void 0 : outer.content) == null ? void 0 : _b.find) == null ? void 0 : _c.call(_b, (b) => (b == null ? void 0 : b.type) === "text")) == null ? void 0 : _d.text) || ((_f = (_e = outer == null ? void 0 : outer.content) == null ? void 0 : _e[0]) == null ? void 0 : _f.text) || "").trim() : String(((_i = (_h = (_g = outer == null ? void 0 : outer.choices) == null ? void 0 : _g[0]) == null ? void 0 : _h.message) == null ? void 0 : _i.content) || "").trim();
         const cleaned = rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
         const parsed = JSON.parse(cleaned);
         if (!parsed || typeof parsed !== "object") return null;
@@ -311,7 +664,7 @@ function createNexusMindDecisionProvider(ctx, groups) {
               probabilities: raw.probabilities && typeof raw.probabilities === "object" ? raw.probabilities : { [ch]: conf }
             };
           } else if (q.type === "score") {
-            const maxIdx = Math.max(1, (((_e = q.levels) == null ? void 0 : _e.length) || 2) - 1);
+            const maxIdx = Math.max(1, (((_j = q.levels) == null ? void 0 : _j.length) || 2) - 1);
             const sc = Math.max(0, Math.min(maxIdx, Number(raw.score ?? 0)));
             const conf = Math.max(0, Math.min(1, Number(raw.confidence ?? 0.8)));
             answers[k] = {
@@ -324,12 +677,25 @@ function createNexusMindDecisionProvider(ctx, groups) {
         }
         return { outcome: "answered", model: mdl, answers };
       };
+      const cfg = readDecisionsConfig(defaultModel);
+      const chain = [
+        cfg.primaryModel,
+        ...cfg.fallbackModels,
+        ...cfg.autoRankFallback ? getRankingFallbackModels() : [],
+        ...Object.values(groups).map((g) => g.defaultModel)
+      ].map((m) => String(m || "").trim()).filter(Boolean);
+      const uniqueChain = Array.from(new Set(chain)).slice(0, 6);
       try {
-        const primary = await tryCall(fastGroup, decisionModel);
-        if (primary) return primary;
-        if (fallbackGroup && fallbackGroup.defaultModel !== decisionModel) {
-          const secondary = await tryCall(fallbackGroup, fallbackGroup.defaultModel);
-          if (secondary) return secondary;
+        for (const candidateModel of uniqueChain) {
+          if ((_a = options == null ? void 0 : options.signal) == null ? void 0 : _a.aborted) {
+            return { outcome: "failed", reason: "timeout" };
+          }
+          const grp = resolveGroupForModel(candidateModel, groups, fastGroup);
+          try {
+            const result = await tryCall(grp, candidateModel);
+            if (result) return result;
+          } catch {
+          }
         }
         return { outcome: "failed", reason: "service_error" };
       } catch {

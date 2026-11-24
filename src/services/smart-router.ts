@@ -332,26 +332,393 @@ export async function applyBestModelToAgent(
   };
 }
 
+export interface DecisionsModelConfig {
+  primaryModel: string;
+  fallbackModels: string[];
+  autoRankFallback: boolean;
+}
+
+const DECISIONS_CONFIG_STORAGE_KEY = "nexusmind_decisions_config_v1";
+const DECISIONS_CONFIG_DISK_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-decisions-config.json";
+
+function readDecisionsConfig(defaultModel: string): DecisionsModelConfig {
+  const defaults: DecisionsModelConfig = {
+    primaryModel: defaultModel,
+    fallbackModels: ["gpt-6.1-terra", "claude-sonnet-5-5", "grok-4.1-fast"],
+    autoRankFallback: true,
+  };
+  try {
+    const raw = (globalThis as any)?.localStorage?.getItem?.(DECISIONS_CONFIG_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw);
+    const primary = String(parsed?.primaryModel || "").trim() || defaults.primaryModel;
+    const fallbacks = Array.isArray(parsed?.fallbackModels)
+      ? parsed.fallbackModels.map((x: any) => String(x || "").trim()).filter(Boolean)
+      : defaults.fallbackModels;
+    const autoRankFallback = parsed?.autoRankFallback !== false;
+    return { primaryModel: primary, fallbackModels: fallbacks, autoRankFallback };
+  } catch {
+    return defaults;
+  }
+}
+
+function saveDecisionsConfig(ctx: Context, cfg: DecisionsModelConfig): void {
+  try {
+    (globalThis as any)?.localStorage?.setItem?.(DECISIONS_CONFIG_STORAGE_KEY, JSON.stringify(cfg));
+  } catch {}
+  try {
+    const host = (ctx as any)?.host;
+    if (typeof host?.writeFile === "function") {
+      void host.writeFile(DECISIONS_CONFIG_DISK_PATH, JSON.stringify(cfg, null, 2));
+    }
+  } catch {}
+}
+
+function resolveGroupForModel(
+  modelId: string,
+  groups: Record<string, CanonicalGroupDef>,
+  fallbackGroup: CanonicalGroupDef
+): CanonicalGroupDef {
+  const m = String(modelId || "").toLowerCase();
+  if (m.includes("grok") && groups.nexusmind_grok) return groups.nexusmind_grok;
+  if (m.includes("claude") && groups.nexusmind_anthropic) return groups.nexusmind_anthropic;
+  if ((m.includes("gemini") || m.includes("antigravity")) && groups.nexusmind_antigravity) {
+    return groups.nexusmind_antigravity;
+  }
+  if (groups.nexusmind_openai) return groups.nexusmind_openai;
+  return fallbackGroup;
+}
+
+function getKnownDecisionModels(groups: Record<string, CanonicalGroupDef>): string[] {
+  const set = new Set<string>();
+  for (const grp of Object.values(groups)) {
+    if (grp?.defaultModel) set.add(grp.defaultModel);
+  }
+  for (const seed of [
+    "gemini-3.8-flash-medium",
+    "gpt-6.1-terra",
+    "claude-sonnet-5-5",
+    "grok-4.1-fast",
+    "gemini-2.5-flash",
+  ]) {
+    set.add(seed);
+  }
+  try {
+    const rawRank = (globalThis as any)?.localStorage?.getItem?.("nexusmind_model_ranking");
+    if (rawRank) {
+      const parsed = JSON.parse(rawRank);
+      for (const m of Array.isArray(parsed?.models) ? parsed.models : []) {
+        if (m?.model && m?.online !== false && !m?.isDisabled && !isFreeModel(m.model)) {
+          set.add(String(m.model));
+        }
+      }
+    }
+  } catch {}
+  try {
+    const rawCached = (globalThis as any)?.localStorage?.getItem?.("nexusmind_cached_models");
+    if (rawCached) {
+      const parsed = JSON.parse(rawCached);
+      for (const m of Array.isArray(parsed) ? parsed : []) {
+        if (m?.id && !isFreeModel(m.id)) set.add(String(m.id));
+      }
+    }
+  } catch {}
+  return Array.from(set);
+}
+
+function getRankingFallbackModels(): string[] {
+  try {
+    const rawRank = (globalThis as any)?.localStorage?.getItem?.("nexusmind_model_ranking");
+    if (!rawRank) return [];
+    const parsed = JSON.parse(rawRank);
+    if (!Array.isArray(parsed?.models)) return [];
+    return parsed.models
+      .filter((m: any) => m?.model && m?.online !== false && !m?.isDisabled && !isFreeModel(m.model))
+      .slice(0, 6)
+      .map((m: any) => String(m.model));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Registra um DecisionProvider nativo do NexusMind no Buzz Desktop (`Settings > Decisions API`),
- * usando um modelo ultrarrápido e barato do próprio Gateway (gemini-3.8-flash-medium) para responder
- * perguntas batch yes_no / choice / score do Attention Classifier e do OrgFy Decision Router.
+ * com seleção de modelo customizado + cadeia de fallback automático (sem ficar preso a um único modelo).
  */
 export function createNexusMindDecisionProvider(
   ctx: Context,
   groups: Record<string, CanonicalGroupDef>
 ) {
   const fastGroup = groups.nexusmind_antigravity || Object.values(groups)[0];
-  const fallbackGroup = groups.nexusmind_openai || fastGroup;
-  const decisionModel = fastGroup?.defaultModel || "gemini-3.8-flash-medium";
+  const defaultModel = fastGroup?.defaultModel || "gemini-3.8-flash-medium";
+  const listeners = new Set<() => void>();
+  const notifyListeners = () => {
+    for (const fn of Array.from(listeners)) {
+      try {
+        fn();
+      } catch {}
+    }
+  };
+
+  const React = (ctx as any)?.react;
+  const SettingsComponent = React?.createElement
+    ? function NexusMindDecisionsSettings() {
+        const h = React.createElement;
+        const [cfg, setCfg] = React.useState(() => readDecisionsConfig(defaultModel)) as [DecisionsModelConfig, (v: DecisionsModelConfig) => void];
+        const [fallbackInput, setFallbackInput] = React.useState(() =>
+          readDecisionsConfig(defaultModel).fallbackModels.join(", ")
+        ) as [string, (v: string) => void];
+        const [savedMsg, setSavedMsg] = React.useState("") as [string, (v: string) => void];
+        const [pingState, setPingState] = React.useState({
+          busy: false,
+          text: "",
+        }) as [{ busy: boolean; text: string; ok?: boolean }, (v: { busy: boolean; text: string; ok?: boolean }) => void];
+        const knownModels = React.useMemo(() => getKnownDecisionModels(groups), []);
+
+        const applySave = (nextCfg: DecisionsModelConfig, note: string) => {
+          setCfg(nextCfg);
+          setFallbackInput(nextCfg.fallbackModels.join(", "));
+          saveDecisionsConfig(ctx, nextCfg);
+          notifyListeners();
+          setSavedMsg(note);
+        };
+
+        const handleSaveClick = () => {
+          const cleanPrimary = String(cfg.primaryModel || "").trim() || defaultModel;
+          const cleanFallbacks = fallbackInput
+            .split(/[,\n]+/)
+            .map((s: string) => s.trim())
+            .filter((s: string) => Boolean(s) && s.toLowerCase() !== cleanPrimary.toLowerCase());
+          applySave(
+            {
+              primaryModel: cleanPrimary,
+              fallbackModels: Array.from(new Set(cleanFallbacks)),
+              autoRankFallback: cfg.autoRankFallback,
+            },
+            `Salvo: ${cleanPrimary} (+ ${cleanFallbacks.length} fallback${cleanFallbacks.length === 1 ? "" : "s"})`
+          );
+        };
+
+        const handlePickBestAuto = async () => {
+          setPingState({ busy: true, text: "Testando modelos mais rápidos no NexusMind..." });
+          try {
+            const best = await selectBestModelByTier(ctx, groups, { tier: "decision", max_probes: 5 });
+            if (best.ok && best.selectedModel) {
+              const otherOnline = best.ranking
+                .filter((r) => r.online && r.model !== best.selectedModel)
+                .map((r) => r.model);
+              const nextFallbacks = Array.from(new Set([...otherOnline, ...cfg.fallbackModels])).filter(
+                (m) => m !== best.selectedModel
+              );
+              applySave(
+                { primaryModel: best.selectedModel, fallbackModels: nextFallbacks.slice(0, 5), autoRankFallback: true },
+                `Auto-selecionado: ${best.selectedModel} (${best.selectedLatencyMs}ms)`
+              );
+              setPingState({ busy: false, ok: true, text: `Online: ${best.selectedModel} (${best.selectedLatencyMs}ms)` });
+            } else {
+              setPingState({ busy: false, ok: false, text: best.message });
+            }
+          } catch (err: any) {
+            setPingState({ busy: false, ok: false, text: `Erro ao testar: ${err?.message || err}` });
+          }
+        };
+
+        const handleTestPrimary = async () => {
+          const mdl = String(cfg.primaryModel || "").trim() || defaultModel;
+          const grp = resolveGroupForModel(mdl, groups, fastGroup);
+          setPingState({ busy: true, text: `Pingando ${mdl} via ${grp.id}...` });
+          const res = await pingModel(ctx, mdl, grp);
+          setPingState({
+            busy: false,
+            ok: res.online,
+            text: res.online
+              ? `OK · ${mdl} respondeu em ${res.latencyMs}ms (${grp.id})`
+              : `FALHA · ${mdl} (${res.error || "indisponível"}) — failover automático entrará em ação se ocorrer em produção.`,
+          });
+        };
+
+        const inputStyle = {
+          width: "100%",
+          boxSizing: "border-box" as const,
+          padding: "8px 10px",
+          borderRadius: "6px",
+          border: "1px solid rgba(255,255,255,0.16)",
+          backgroundColor: "rgba(0,0,0,0.28)",
+          color: "#f3f4f6",
+          fontSize: "12px",
+          fontFamily: "monospace",
+        };
+
+        return h(
+          "div",
+          {
+            style: {
+              display: "flex",
+              flexDirection: "column",
+              gap: "12px",
+              padding: "14px",
+              borderRadius: "10px",
+              border: "1px solid rgba(255,255,255,0.12)",
+              backgroundColor: "rgba(255,255,255,0.03)",
+              maxWidth: "560px",
+              width: "100%",
+              boxSizing: "border-box",
+            },
+          },
+          h(
+            "div",
+            { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+            h("label", { style: { fontSize: "12px", fontWeight: "600", color: "#e5e7eb" } }, "Modelo Principal (Customizável)"),
+            h("input", {
+              type: "text",
+              value: cfg.primaryModel,
+              placeholder: "Ex.: gemini-3.8-flash-medium, gpt-6.1-terra, claude-sonnet-5-5",
+              onChange: (e: any) => {
+                setSavedMsg("");
+                setCfg({ ...cfg, primaryModel: e.target.value });
+              },
+              style: inputStyle,
+            }),
+            h(
+              "select",
+              {
+                value: knownModels.includes(cfg.primaryModel) ? cfg.primaryModel : "",
+                onChange: (e: any) => {
+                  if (e.target.value) {
+                    setSavedMsg("");
+                    setCfg({ ...cfg, primaryModel: e.target.value });
+                  }
+                },
+                style: { ...inputStyle, cursor: "pointer" },
+              },
+              h("option", { value: "" }, "— Escolher da lista do NexusMind Gateway —"),
+              ...knownModels.map((m: string) => h("option", { key: m, value: m }, m))
+            )
+          ),
+          h(
+            "div",
+            { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+            h(
+              "label",
+              { style: { fontSize: "12px", fontWeight: "600", color: "#e5e7eb" } },
+              "Cadeia de Fallback Automático (separados por vírgula)"
+            ),
+            h("input", {
+              type: "text",
+              value: fallbackInput,
+              placeholder: "gpt-6.1-terra, claude-sonnet-5-5, grok-4.1-fast",
+              onChange: (e: any) => {
+                setSavedMsg("");
+                setFallbackInput(e.target.value);
+              },
+              style: inputStyle,
+            })
+          ),
+          h(
+            "label",
+            { style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#cbd5e1", cursor: "pointer" } },
+            h("input", {
+              type: "checkbox",
+              checked: cfg.autoRankFallback,
+              onChange: (e: any) => {
+                setSavedMsg("");
+                setCfg({ ...cfg, autoRankFallback: Boolean(e.target.checked) });
+              },
+            }),
+            "Usar Ranking NexusMind automaticamente como failover se principal + fallbacks falharem"
+          ),
+          h(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+            h(
+              "button",
+              {
+                type: "button",
+                onClick: handleSaveClick,
+                style: {
+                  padding: "7px 14px",
+                  borderRadius: "6px",
+                  border: "none",
+                  backgroundColor: "#10b981",
+                  color: "#000",
+                  fontSize: "12px",
+                  fontWeight: "700",
+                  cursor: "pointer",
+                },
+              },
+              "Salvar Modelo"
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                onClick: handleTestPrimary,
+                disabled: pingState.busy,
+                style: {
+                  padding: "7px 12px",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(56,189,248,0.45)",
+                  backgroundColor: "rgba(56,189,248,0.12)",
+                  color: "#38bdf8",
+                  fontSize: "12px",
+                  fontWeight: "600",
+                  cursor: pingState.busy ? "wait" : "pointer",
+                },
+              },
+              pingState.busy ? "Testando..." : "Testar Modelo"
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                onClick: handlePickBestAuto,
+                disabled: pingState.busy,
+                style: {
+                  padding: "7px 12px",
+                  borderRadius: "6px",
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  backgroundColor: "rgba(255,255,255,0.06)",
+                  color: "#e5e7eb",
+                  fontSize: "12px",
+                  fontWeight: "600",
+                  cursor: pingState.busy ? "wait" : "pointer",
+                },
+              },
+              "⚡ Auto (Melhor Online)"
+            )
+          ),
+          savedMsg &&
+            h("div", { style: { fontSize: "11px", color: "#34d399", fontFamily: "monospace" } }, savedMsg),
+          pingState.text &&
+            h(
+              "div",
+              {
+                style: {
+                  fontSize: "11px",
+                  color: pingState.ok === false ? "#fca5a5" : pingState.ok === true ? "#34d399" : "#93c5fd",
+                  fontFamily: "monospace",
+                },
+              },
+              pingState.text
+            )
+        );
+      }
+    : undefined;
 
   return {
     id: "nexusmind-fast",
     label: "NexusMind Fast Decisions",
-    description: `Modelo rápido via NexusMind Gateway (${decisionModel}) para classificadores Attention e roteamento OrgFy.`,
+    description:
+      "Modelo customizável via NexusMind Gateway com fallback automático para Attention e roteamento OrgFy.",
     order: 5,
     status: () => (fastGroup?.defaultKey ? "ready" : "needs-setup") as "ready" | "needs-setup",
-    subscribe: () => () => {},
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    ...(SettingsComponent ? { Settings: SettingsComponent } : {}),
     decide: async (request: any, options: { signal: AbortSignal }) => {
       const host = (ctx as any)?.host;
       if (typeof host?.request !== "function") {
@@ -381,24 +748,47 @@ export function createNexusMindDecisionProvider(
         if (options?.signal?.aborted) {
           return { outcome: "failed" as const, reason: "timeout" as const };
         }
+        const isAnthropic = grp.id === "nexusmind_anthropic";
+        const url = isAnthropic
+          ? "https://api.nexusmind.digital/v1/messages"
+          : "https://api.nexusmind.digital/v1/chat/completions";
+        const headers: Record<string, string> = isAnthropic
+          ? {
+              "x-api-key": grp.defaultKey,
+              Authorization: `Bearer ${grp.defaultKey}`,
+              "anthropic-version": "2023-06-01",
+              "Content-Type": "application/json",
+              "User-Agent": "BuzzDesktop/NexusMindDecisions",
+            }
+          : {
+              Authorization: `Bearer ${grp.defaultKey}`,
+              "Content-Type": "application/json",
+              "User-Agent": "BuzzDesktop/NexusMindDecisions",
+            };
+        const reqBody = isAnthropic
+          ? {
+              model: mdl,
+              max_tokens: 600,
+              temperature: 0,
+              system: "Retorne estritamente JSON válido seguindo o schema solicitado.",
+              messages: [{ role: "user", content: prompt }],
+            }
+          : {
+              model: mdl,
+              temperature: 0,
+              max_tokens: 600,
+              response_format: { type: "json_object" },
+              messages: [
+                { role: "system", content: "Retorne estritamente JSON válido seguindo o schema solicitado." },
+                { role: "user", content: prompt },
+              ],
+            };
+
         const res = await host.request({
-          url: "https://api.nexusmind.digital/v1/chat/completions",
+          url,
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${grp.defaultKey}`,
-            "Content-Type": "application/json",
-            "User-Agent": "BuzzDesktop/NexusMindDecisions",
-          },
-          body: JSON.stringify({
-            model: mdl,
-            temperature: 0,
-            max_tokens: 600,
-            response_format: { type: "json_object" },
-            messages: [
-              { role: "system", content: "Retorne estritamente JSON válido seguindo o schema solicitado." },
-              { role: "user", content: prompt },
-            ],
-          }),
+          headers,
+          body: JSON.stringify(reqBody),
           timeoutMs: Math.min(25000, Math.max(2000, Number(request.timeoutMs || 10000))),
         });
 
@@ -406,7 +796,9 @@ export function createNexusMindDecisionProvider(
           return null;
         }
         const outer = JSON.parse(res.body);
-        const rawText = String(outer?.choices?.[0]?.message?.content || "").trim();
+        const rawText = isAnthropic
+          ? String(outer?.content?.find?.((b: any) => b?.type === "text")?.text || outer?.content?.[0]?.text || "").trim()
+          : String(outer?.choices?.[0]?.message?.content || "").trim();
         const cleaned = rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
         const parsed = JSON.parse(cleaned);
         if (!parsed || typeof parsed !== "object") return null;
@@ -444,12 +836,29 @@ export function createNexusMindDecisionProvider(
         return { outcome: "answered" as const, model: mdl, answers };
       };
 
+      const cfg = readDecisionsConfig(defaultModel);
+      const chain: string[] = [
+        cfg.primaryModel,
+        ...cfg.fallbackModels,
+        ...(cfg.autoRankFallback ? getRankingFallbackModels() : []),
+        ...Object.values(groups).map((g) => g.defaultModel),
+      ]
+        .map((m) => String(m || "").trim())
+        .filter(Boolean);
+      const uniqueChain = Array.from(new Set(chain)).slice(0, 6);
+
       try {
-        const primary = await tryCall(fastGroup, decisionModel);
-        if (primary) return primary;
-        if (fallbackGroup && fallbackGroup.defaultModel !== decisionModel) {
-          const secondary = await tryCall(fallbackGroup, fallbackGroup.defaultModel);
-          if (secondary) return secondary;
+        for (const candidateModel of uniqueChain) {
+          if (options?.signal?.aborted) {
+            return { outcome: "failed" as const, reason: "timeout" as const };
+          }
+          const grp = resolveGroupForModel(candidateModel, groups, fastGroup);
+          try {
+            const result = await tryCall(grp, candidateModel);
+            if (result) return result;
+          } catch {
+            // Tenta próximo modelo na cadeia de fallback
+          }
         }
         return { outcome: "failed" as const, reason: "service_error" as const };
       } catch {
