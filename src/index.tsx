@@ -144,11 +144,11 @@ const SVG_ICONS = {
 
 export const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions"];
 
-// Ícone monocromático padrão Buzz (sem fundo colorido, traço limpo igual aos ícones nativos da barra lateral)
+// Ícone monocromático padrão Buzz com currentColor (branco inativo, preto quando selecionado)
 const ICON =
   "data:image/svg+xml;base64," +
   btoa(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#e6e6e6" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M5 18V6l14 12V6"/><circle cx="5" cy="6" r="1.5" fill="#e6e6e6" stroke="none"/><circle cx="19" cy="18" r="1.5" fill="#e6e6e6" stroke="none"/></svg>'
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M5 18V6l14 12V6"/><circle cx="5" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="19" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>'
   );
 
 // ─────────────────────────────────────────────────────────────────────────────
