@@ -8,6 +8,7 @@ import {
 import {
   buildModelRankingSnapshot,
   loadGatewayUsageByModel,
+  loadSavedRoutingPolicy,
   persistModelRankingSnapshot,
   type RankingTier,
 } from "./services/model-ranking";
@@ -143,10 +144,11 @@ const SVG_ICONS = {
 
 export const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions"];
 
+// Ícone monocromático padrão Buzz (sem fundo colorido, traço limpo igual aos ícones nativos da barra lateral)
 const ICON =
   "data:image/svg+xml;base64," +
   btoa(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="nm" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#nm)"/><circle cx="32" cy="32" r="19" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="2.5"/><path d="M21 42V22l22 20V22" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="21" cy="22" r="3.5" fill="#ffffff"/><circle cx="43" cy="42" r="3.5" fill="#ffffff"/><circle cx="43" cy="22" r="3.5" fill="#d1fae5"/><circle cx="21" cy="42" r="3.5" fill="#d1fae5"/></svg>'
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#e6e6e6" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M5 18V6l14 12V6"/><circle cx="5" cy="6" r="1.5" fill="#e6e6e6" stroke="none"/><circle cx="19" cy="18" r="1.5" fill="#e6e6e6" stroke="none"/></svg>'
   );
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -514,8 +516,9 @@ export function apply(ctx: Context) {
       Record<string, { status: "testing" | "ok" | "error"; latency?: number; errorMsg?: string }>
     >({});
 
-    // Primary Workspace Section (Catálogo & Gateway vs. Ranking de Modelos)
+    // Primary Workspace Section (Modelos vs. Ranking & Roteamento)
     const [activeSection, setActiveSection] = React.useState<"catalog" | "ranking">("catalog");
+    const [showGatewayDetails, setShowGatewayDetails] = React.useState<boolean>(false);
     const ModelRankingTab = React.useMemo(
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS as any),
       []
@@ -1039,6 +1042,44 @@ subprocess.run([sys.executable, script_path])
       }
       setDisabledModels(next);
       localStorage.setItem("nexusmind_disabled_models", JSON.stringify(next));
+    };
+
+    const handleEnableFilteredBulk = () => {
+      const idsToEnable = new Set(filteredModels.map((m: any) => m.id));
+      if (idsToEnable.size === 0) return;
+      const next = disabledModels.filter((id: string) => !idsToEnable.has(id));
+      setDisabledModels(next);
+      localStorage.setItem("nexusmind_disabled_models", JSON.stringify(next));
+      setStatusMessage({ type: "success", text: `${idsToEnable.size} modelo(s) filtrado(s) ativados em massa.` });
+    };
+
+    const handleDisableFilteredBulk = () => {
+      const idsToDisable = filteredModels.map((m: any) => m.id).filter(Boolean);
+      if (idsToDisable.length === 0) return;
+      const next = Array.from(new Set([...disabledModels, ...idsToDisable]));
+      setDisabledModels(next);
+      localStorage.setItem("nexusmind_disabled_models", JSON.stringify(next));
+      setStatusMessage({ type: "info", text: `${idsToDisable.length} modelo(s) filtrado(s) desativados em massa.` });
+    };
+
+    const handleDisableFreeBulk = () => {
+      const freeIds = models
+        .map((m: any) => m.id)
+        .filter((id: string) => {
+          const low = String(id || "").toLowerCase();
+          return low.includes(":free") || low.includes("-free") || low.endsWith("free");
+        });
+      if (freeIds.length === 0) return;
+      const next = Array.from(new Set([...disabledModels, ...freeIds]));
+      setDisabledModels(next);
+      localStorage.setItem("nexusmind_disabled_models", JSON.stringify(next));
+      setStatusMessage({ type: "info", text: `${freeIds.length} modelo(s) :free desativados em massa.` });
+    };
+
+    const handleToggleAllFiltered = () => {
+      const allActive = filteredModels.length > 0 && filteredModels.every((m: any) => !disabledModels.includes(m.id));
+      if (allActive) handleDisableFilteredBulk();
+      else handleEnableFilteredBulk();
     };
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1790,7 +1831,7 @@ print("SYNC_SUCCESS")
               },
             },
 
-            // 1. TOP HEADER & IDENTITY BAR
+            // 1. BUZZ-NATIVE MINIMALIST HEADER (SEM CARD DENTRO DE CARD, SEM NEON)
             h(
               "div",
               {
@@ -1799,124 +1840,107 @@ print("SYNC_SUCCESS")
                   alignItems: "center",
                   justifyContent: "space-between",
                   flexWrap: "wrap",
-                  gap: "16px",
-                  paddingBottom: "20px",
-                  borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+                  gap: "12px",
+                  paddingBottom: "14px",
+                  borderBottom: "1px solid var(--border-primary, #333333)",
                 },
               },
-              // Header Brand & Title
+              // Left: Title + Primary Tabs inline
               h(
                 "div",
-                { style: { display: "flex", alignItems: "center", gap: "14px" } },
+                { style: { display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" } },
+                h(
+                  "div",
+                  { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                  h(
+                    "h1",
+                    {
+                      style: {
+                        fontSize: "16px",
+                        fontWeight: "600",
+                        margin: 0,
+                        color: "var(--text-primary, #ffffff)",
+                        letterSpacing: "-0.01em",
+                      },
+                    },
+                    "NexusMind"
+                  ),
+                  h("span", {
+                    title: "Conectado",
+                    style: {
+                      width: "7px",
+                      height: "7px",
+                      borderRadius: "50%",
+                      backgroundColor: "var(--green-11, #3dd68c)",
+                      display: "inline-block",
+                    },
+                  })
+                ),
                 h(
                   "div",
                   {
                     style: {
-                      width: "44px",
-                      height: "44px",
-                      borderRadius: "14px",
-                      background: "linear-gradient(135deg, #10b981 0%, #06b6d4 100%)",
-                      display: "flex",
+                      display: "inline-flex",
                       alignItems: "center",
-                      justifyContent: "center",
-                      color: "#000000",
-                      boxShadow: "0 4px 16px rgba(16, 185, 129, 0.25)",
+                      gap: "2px",
+                      backgroundColor: "var(--bg-panel, #1a1a1a)",
+                      border: "1px solid var(--border-primary, #333333)",
+                      borderRadius: "8px",
+                      padding: "2px",
                     },
                   },
-                  SVG_ICONS.dashboard({ h, width: 22, height: 22 })
-                ),
-                h(
-                  "div",
-                  null,
-                  h(
-                    "div",
-                    { style: { display: "flex", alignItems: "center", gap: "8px" } },
-                    h(
-                      "h1",
+                  [
+                    { id: "catalog", label: "Modelos" },
+                    { id: "ranking", label: "Ranking & Roteamento" },
+                  ].map((tab) => {
+                    const active = activeSection === tab.id;
+                    return h(
+                      "button",
                       {
+                        key: tab.id,
+                        onClick: () => setActiveSection(tab.id as "catalog" | "ranking"),
                         style: {
-                          fontSize: "18px",
-                          fontWeight: "700",
-                          margin: 0,
-                          color: "#ffffff",
-                          letterSpacing: "-0.01em",
+                          borderRadius: "6px",
+                          padding: "5px 12px",
+                          border: "none",
+                          backgroundColor: active ? "var(--affordance-selected, #333333)" : "transparent",
+                          color: active ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
+                          fontSize: "12px",
+                          fontWeight: active ? "600" : "500",
+                          cursor: "pointer",
                         },
                       },
-                      "NexusMind Gateway"
-                    ),
-                    h(
-                      "span",
-                      {
-                        style: {
-                          fontSize: "11px",
-                          padding: "2px 8px",
-                          borderRadius: "9999px",
-                          backgroundColor: "rgba(16, 185, 129, 0.15)",
-                          color: "#10b981",
-                          fontWeight: "600",
-                          border: "1px solid rgba(16, 185, 129, 0.3)",
-                        },
-                      },
-                      "v2.3 OFICIAL"
-                    ),
-                    h(
-                      "span",
-                      {
-                        style: {
-                          fontSize: "11px",
-                          padding: "2px 8px",
-                          borderRadius: "9999px",
-                          backgroundColor: "rgba(59, 130, 246, 0.15)",
-                          color: "#60a5fa",
-                          fontWeight: "500",
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: "5px",
-                        },
-                      },
-                      h("span", { style: { width: "6px", height: "6px", borderRadius: "50%", backgroundColor: "#10b981" } }),
-                      "Conectado"
-                    )
-                  ),
-                  h(
-                    "p",
-                    {
-                      style: {
-                        fontSize: "12px",
-                        color: "var(--text-subtle, #8e8e96)",
-                        margin: "3px 0 0",
-                      },
-                    },
-                    "Gateway corporativo com healthcheck live, governança e sincronização nativa para Goose e Pi."
-                  )
+                      tab.label
+                    );
+                  })
                 )
               ),
 
-              // Action Buttons & User Badge
+              // Right: Compact Actions & Account
               h(
                 "div",
-                { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+                { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
                 h(
                   "button",
                   {
                     onClick: handlePullModelsFromNexusMind,
                     disabled: loadingPull,
                     style: {
-                      borderRadius: "9999px",
-                      padding: "8px 18px",
-                      backgroundColor: "rgba(255, 255, 255, 0.08)",
-                      color: "#ffffff",
-                      border: "1px solid rgba(255, 255, 255, 0.12)",
+                      borderRadius: "8px",
+                      padding: "6px 12px",
+                      backgroundColor: "var(--affordance-subtle, #232323)",
+                      color: "var(--text-primary, #ffffff)",
+                      border: "1px solid var(--border-primary, #333333)",
                       cursor: loadingPull ? "not-allowed" : "pointer",
                       fontWeight: "500",
-                      fontSize: "13px",
+                      fontSize: "12px",
                       display: "flex",
                       alignItems: "center",
-                      gap: "8px",
+                      gap: "6px",
                     },
                   },
-                  SVG_ICONS.pull({ h, width: 14, height: 14 }),
-                  loadingPull ? "Buscando..." : "1. Puxar do NexusMind"
+                  SVG_ICONS.pull({ h, width: 13, height: 13 }),
+                  loadingPull ? "Buscando..." : "Puxar"
                 ),
                 h(
                   "button",
@@ -1924,43 +1948,40 @@ print("SYNC_SUCCESS")
                     onClick: handleSyncModelsToBuzz,
                     disabled: loadingSync,
                     style: {
-                      borderRadius: "9999px",
-                      padding: "8px 22px",
-                      backgroundColor: "#10b981",
-                      color: "#000000",
+                      borderRadius: "8px",
+                      padding: "6px 14px",
+                      backgroundColor: "var(--affordance-prominent, #ffffff)",
+                      color: "var(--text-on-prominent, #000000)",
                       border: "none",
                       cursor: loadingSync ? "not-allowed" : "pointer",
                       fontWeight: "600",
-                      fontSize: "13px",
+                      fontSize: "12px",
                       display: "flex",
                       alignItems: "center",
-                      gap: "8px",
-                      boxShadow: "0 2px 10px rgba(16, 185, 129, 0.3)",
+                      gap: "6px",
                     },
                   },
-                  SVG_ICONS.sync({ h, width: 14, height: 14 }),
-                  loadingSync ? "Sincronizando..." : "2. Sincronizar no Buzz"
+                  SVG_ICONS.sync({ h, width: 13, height: 13 }),
+                  loadingSync ? "Sincronizando..." : "Sincronizar"
                 ),
-                // User Chip
                 h(
                   "div",
                   {
                     style: {
                       display: "flex",
                       alignItems: "center",
-                      gap: "8px",
-                      backgroundColor: "rgba(255, 255, 255, 0.05)",
-                      border: "1px solid rgba(255, 255, 255, 0.1)",
-                      borderRadius: "9999px",
-                      padding: "5px 14px",
-                      marginLeft: "6px",
+                      gap: "6px",
+                      backgroundColor: "var(--bg-panel, #1a1a1a)",
+                      border: "1px solid var(--border-primary, #333333)",
+                      borderRadius: "8px",
+                      padding: "5px 10px",
+                      fontSize: "12px",
                     },
                   },
-                  SVG_ICONS.user({ h, width: 14, height: 14, color: "#10b981" }),
-                  h("span", { style: { fontSize: "12px", fontWeight: "600" } }, profileData.username),
+                  h("span", { style: { color: "var(--text-secondary, #c7c7c7)" } }, profileData.username),
                   h(
                     "span",
-                    { style: { fontSize: "12px", color: "#10b981", fontWeight: "600" } },
+                    { style: { color: "var(--green-11, #3dd68c)", fontWeight: "600", fontFamily: "monospace" } },
                     `$${(profileData.balance || 0).toFixed(2)}`
                   ),
                   h(
@@ -1971,11 +1992,11 @@ print("SYNC_SUCCESS")
                       style: {
                         background: "none",
                         border: "none",
-                        color: "#ef4444",
+                        color: "var(--text-tertiary, #a4a4a4)",
                         cursor: "pointer",
                         fontSize: "11px",
-                        padding: "2px 4px",
-                        marginLeft: "4px",
+                        padding: "0 2px",
+                        marginLeft: "2px",
                       },
                     },
                     "✕"
@@ -1984,170 +2005,33 @@ print("SYNC_SUCCESS")
               )
             ),
 
-            // PRIMARY NAVIGATION TABS (Catálogo & Gateway | Ranking de Modelos)
-            h(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
-                  paddingBottom: "10px",
-                },
-              },
-              [
-                { id: "catalog", label: "Catálogo & Gateway" },
-                { id: "ranking", label: "Ranking de Modelos (Telemetria Real)" },
-              ].map((tab) => {
-                const active = activeSection === tab.id;
-                return h(
-                  "button",
-                  {
-                    key: tab.id,
-                    onClick: () => setActiveSection(tab.id as "catalog" | "ranking"),
-                    style: {
-                      borderRadius: "9999px",
-                      padding: "7px 16px",
-                      border: active ? "1px solid rgba(16, 185, 129, 0.45)" : "1px solid rgba(255, 255, 255, 0.08)",
-                      backgroundColor: active ? "rgba(16, 185, 129, 0.16)" : "rgba(255, 255, 255, 0.03)",
-                      color: active ? "#34d399" : "#a1a1aa",
-                      fontSize: "12px",
-                      fontWeight: active ? "700" : "500",
-                      cursor: "pointer",
-                    },
-                  },
-                  tab.label
-                );
-              })
-            ),
-
-            activeSection === "ranking"
-              ? h(ModelRankingTab, {
-                  models,
-                  disabledModels,
-                  modelTests,
-                  onTestSingleModel: handleTestSingleModel,
-                  onNotify: setStatusMessage,
-                })
-              : h(
-                  React.Fragment,
-                  null,
-            // OFFICIAL NEXUSMIND GATEWAY ENDPOINTS BAR (Matching Official Dashboard)
-            h(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  overflowX: "auto",
-                  padding: "4px 2px 8px",
-                  scrollbarWidth: "none",
-                },
-              },
-              OFFICIAL_ENDPOINTS.map((ep) => {
-                const isCopied = copiedEndpoint === ep.url;
-                return h(
-                  "div",
-                  {
-                    key: ep.id,
-                    onClick: () => handleCopyEndpoint(ep.url, ep.label),
-                    title: `${ep.desc} — Clique para copiar (${ep.url})`,
-                    style: {
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "8px",
-                      backgroundColor: isCopied ? "rgba(16, 185, 129, 0.15)" : "rgba(255, 255, 255, 0.04)",
-                      border: isCopied ? "1px solid rgba(16, 185, 129, 0.4)" : "1px solid rgba(255, 255, 255, 0.08)",
-                      borderRadius: "9999px",
-                      padding: "6px 14px",
-                      cursor: "pointer",
-                      fontSize: "12px",
-                      color: isCopied ? "#10b981" : "var(--text-normal, #e4e4e7)",
-                      whiteSpace: "nowrap",
-                      transition: "all 0.15s ease",
-                      flexShrink: 0,
-                    },
-                  },
-                  h("span", { style: { fontWeight: "600", fontSize: "11px", color: "#f4f4f5" } }, ep.label),
-                  h(
-                    "span",
-                    {
-                      style: {
-                        fontSize: "10px",
-                        padding: "1px 6px",
-                        borderRadius: "4px",
-                        backgroundColor: `${ep.tagColor}22`,
-                        color: ep.tagColor,
-                        fontWeight: "600",
-                        border: `1px solid ${ep.tagColor}44`,
-                      },
-                    },
-                    ep.tag
-                  ),
-                  h("span", { style: { opacity: 0.3 } }, "|"),
-                  h(
-                    "code",
-                    {
-                      style: {
-                        fontFamily: "monospace",
-                        fontSize: "11px",
-                        color: isCopied ? "#10b981" : "var(--text-subtle, #a1a1aa)",
-                      },
-                    },
-                    ep.url
-                  ),
-                  h(
-                    "span",
-                    {
-                      style: {
-                        display: "inline-flex",
-                        alignItems: "center",
-                        marginLeft: "2px",
-                        color: isCopied ? "#10b981" : "var(--text-subtle, #71717a)",
-                      },
-                    },
-                    isCopied
-                      ? SVG_ICONS.check({ h, width: 12, height: 12 })
-                      : SVG_ICONS.copy({ h, width: 12, height: 12 })
-                  )
-                );
-              })
-            ),
-
-            // 2. STATUS TOAST BANNER (IF ACTIVE)
+            // 2. STATUS TOAST BANNER (COMPACT & FLAT)
             statusMessage &&
               h(
                 "div",
                 {
                   style: {
-                    padding: "12px 18px",
-                    borderRadius: "12px",
-                    fontSize: "13px",
+                    padding: "9px 14px",
+                    borderRadius: "8px",
+                    fontSize: "12px",
                     fontWeight: "500",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "space-between",
-                    backgroundColor:
-                      statusMessage.type === "success"
-                        ? "rgba(16, 185, 129, 0.12)"
-                        : statusMessage.type === "error"
-                        ? "rgba(239, 68, 68, 0.12)"
-                        : "rgba(59, 130, 246, 0.12)",
+                    backgroundColor: "var(--bg-panel, #1a1a1a)",
                     border: `1px solid ${
                       statusMessage.type === "success"
-                        ? "rgba(16, 185, 129, 0.3)"
+                        ? "var(--green-11, #3dd68c)"
                         : statusMessage.type === "error"
-                        ? "rgba(239, 68, 68, 0.3)"
-                        : "rgba(59, 130, 246, 0.3)"
+                        ? "var(--red-11, #ff9592)"
+                        : "var(--border-primary, #333333)"
                     }`,
                     color:
                       statusMessage.type === "success"
-                        ? "#10b981"
+                        ? "var(--green-11, #3dd68c)"
                         : statusMessage.type === "error"
-                        ? "#ef4444"
-                        : "#60a5fa",
+                        ? "var(--red-11, #ff9592)"
+                        : "var(--text-secondary, #c7c7c7)",
                   },
                 },
                 h("span", null, statusMessage.text),
@@ -2160,343 +2044,172 @@ print("SYNC_SUCCESS")
                       border: "none",
                       color: "inherit",
                       cursor: "pointer",
-                      fontSize: "14px",
+                      fontSize: "12px",
                     },
                   },
                   "✕"
                 )
               ),
 
-            // 3. MICRO DASHBOARD (4 METRIC CARDS IN A BALANCED 4-COLUMN ROW)
+            activeSection === "ranking"
+              ? h(ModelRankingTab, {
+                  models,
+                  disabledModels,
+                  modelTests,
+                  onTestSingleModel: handleTestSingleModel,
+                  onNotify: setStatusMessage,
+                })
+              : h(
+                  React.Fragment,
+                  null,
+            // 3. ONE-LINE SUMMARY STRIP + COLLAPSIBLE GATEWAY & ENDPOINTS
             h(
               "div",
               {
                 style: {
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                  gap: "16px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: "12px",
+                  padding: "8px 12px",
+                  backgroundColor: "var(--bg-panel, #1a1a1a)",
+                  border: "1px solid var(--border-primary, #333333)",
+                  borderRadius: "8px",
+                  fontSize: "12px",
+                  color: "var(--text-secondary, #c7c7c7)",
                 },
               },
-              // Card 1: Saldo Disponível
               h(
                 "div",
-                {
-                  style: {
-                    backgroundColor: "rgba(16, 185, 129, 0.04)",
-                    border: "1px solid rgba(16, 185, 129, 0.18)",
-                    borderRadius: "14px",
-                    padding: "16px 20px",
-                  },
-                },
+                { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" } },
                 h(
-                  "div",
-                  {
-                    style: {
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
-                      color: "#10b981",
-                      fontSize: "11px",
-                      fontWeight: "600",
-                      letterSpacing: "0.04em",
-                      marginBottom: "6px",
-                    },
-                  },
-                  SVG_ICONS.wallet({ h, width: 14, height: 14 }),
-                  "SALDO DISPONÍVEL"
+                  "span",
+                  null,
+                  "Ativos: ",
+                  h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, `${models.length - disabledModels.length}`),
+                  h("span", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, ` / ${models.length}`)
                 ),
                 h(
-                  "div",
-                  { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-                  `$${(profileData.balance || 0).toFixed(2)} USD`
+                  "span",
+                  null,
+                  "Hoje: ",
+                  h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, formatTokens(dashboardMetrics.today_tokens)),
+                  ` (${formatNumber(dashboardMetrics.today_requests)} reqs)`
                 ),
-                h(
-                  "div",
-                  { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                  "Recarga Total: $2,000.00 • 13 Grupos Ativos"
-                )
+                lastSyncTime &&
+                  h("span", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, `Sync: ${lastSyncTime}`)
               ),
-
-              // Card 2: Consumo Hoje
               h(
-                "div",
+                "button",
                 {
+                  onClick: () => setShowGatewayDetails((v: boolean) => !v),
                   style: {
-                    backgroundColor: "rgba(59, 130, 246, 0.04)",
-                    border: "1px solid rgba(59, 130, 246, 0.18)",
-                    borderRadius: "14px",
-                    padding: "16px 20px",
+                    background: "none",
+                    border: "none",
+                    color: "var(--text-secondary, #c7c7c7)",
+                    cursor: "pointer",
+                    fontSize: "11px",
+                    fontWeight: "500",
+                    padding: "2px 6px",
                   },
                 },
-                h(
-                  "div",
-                  {
-                    style: {
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
-                      color: "#60a5fa",
-                      fontSize: "11px",
-                      fontWeight: "600",
-                      letterSpacing: "0.04em",
-                      marginBottom: "6px",
-                    },
-                  },
-                  SVG_ICONS.pulse({ h, width: 14, height: 14 }),
-                  "CONSUMO HOJE"
-                ),
-                h(
-                  "div",
-                  { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-                  `${formatTokens(dashboardMetrics.today_tokens)} tokens`
-                ),
-                h(
-                  "div",
-                  { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                  `${formatNumber(dashboardMetrics.today_requests)} requisições ($${dashboardMetrics.today_cost.toFixed(2)})`
-                )
-              ),
-
-              // Card 3: Histórico Acumulado
-              h(
-                "div",
-                {
-                  style: {
-                    backgroundColor: "rgba(168, 85, 247, 0.04)",
-                    border: "1px solid rgba(168, 85, 247, 0.18)",
-                    borderRadius: "14px",
-                    padding: "16px 20px",
-                  },
-                },
-                h(
-                  "div",
-                  {
-                    style: {
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
-                      color: "#c084fc",
-                      fontSize: "11px",
-                      fontWeight: "600",
-                      letterSpacing: "0.04em",
-                      marginBottom: "6px",
-                    },
-                  },
-                  SVG_ICONS.dashboard({ h, width: 14, height: 14 }),
-                  "HISTÓRICO ACUMULADO"
-                ),
-                h(
-                  "div",
-                  { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-                  `${formatTokens(dashboardMetrics.total_tokens)} tokens`
-                ),
-                h(
-                  "div",
-                  { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                  `${formatNumber(dashboardMetrics.total_requests)} requisições ($${dashboardMetrics.total_cost.toFixed(2)})`
-                )
-              ),
-
-              // Card 4: Governança & Harness
-              h(
-                "div",
-                {
-                  style: {
-                    backgroundColor: "rgba(255, 255, 255, 0.03)",
-                    border: "1px solid rgba(255, 255, 255, 0.08)",
-                    borderRadius: "14px",
-                    padding: "16px 20px",
-                  },
-                },
-                h(
-                  "div",
-                  {
-                    style: {
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
-                      color: "#e2e8f0",
-                      fontSize: "11px",
-                      fontWeight: "600",
-                      letterSpacing: "0.04em",
-                      marginBottom: "6px",
-                    },
-                  },
-                  SVG_ICONS.shield({ h, width: 14, height: 14 }),
-                  "GOVERNANÇA & HARNESS"
-                ),
-                h(
-                  "div",
-                  { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-                  `${models.length - disabledModels.length} Ativos / ${disabledModels.length} Inativos`
-                ),
-                h(
-                  "div",
-                  { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                  lastSyncTime ? `Sincronizado: ${lastSyncTime}` : "Pronto para Goose & Pi"
-                )
+                showGatewayDetails ? "Ocultar Gateway & Endpoints ▾" : "Gateway & Endpoints ▸"
               )
             ),
 
-            // 4. OS 4 GRUPOS CANÔNICOS (GRID PERFEITO DE 4 COLUNAS, ZERO "3 E 1", ZERO POLUIÇÃO)
-            h(
-              "div",
-              {
-                style: {
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
-                  gap: "16px",
+            showGatewayDetails &&
+              h(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                    padding: "12px",
+                    backgroundColor: "var(--bg-panel, #1a1a1a)",
+                    border: "1px solid var(--border-primary, #333333)",
+                    borderRadius: "8px",
+                  },
                 },
-              },
-              Object.entries(CANONICAL_GROUPS).map(([pid, group]) => {
-                const isSelected = selectedGroupTab === pid;
-
-                const getLiveSummary = (groupId: string, staticSummary: string): string => {
-                  const platformMap: Record<string, string> = {
-                    nexusmind_openai: "openai",
-                    nexusmind_anthropic: "anthropic",
-                    nexusmind_antigravity: "antigravity",
-                    nexusmind_grok: "grok",
-                  };
-                  const platform = platformMap[groupId];
-                  if (!platform || !dashboardMetrics?.by_platform) return staticSummary;
-                  const p = (dashboardMetrics.by_platform as any[]).find((x: any) => x.platform === platform);
-                  if (!p) return staticSummary;
-                  const tokens = p.today_tokens || 0;
-                  const reqs = p.today_requests || 0;
-                  const fmtTokens = tokens >= 1e9 ? `${(tokens/1e9).toFixed(1)}B` : tokens >= 1e6 ? `${(tokens/1e6).toFixed(1)}M` : tokens >= 1e3 ? `${(tokens/1e3).toFixed(1)}k` : `${tokens}`;
-                  return `Hoje: ${fmtTokens} tokens • ${reqs.toLocaleString()} reqs`;
-                };
-
-                return h(
+                h(
+                  "div",
+                  { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
+                  OFFICIAL_ENDPOINTS.map((ep) => {
+                    const isCopied = copiedEndpoint === ep.url;
+                    return h(
+                      "button",
+                      {
+                        key: ep.id,
+                        onClick: () => handleCopyEndpoint(ep.url, ep.label),
+                        title: `${ep.desc} — Clique para copiar`,
+                        style: {
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          backgroundColor: "var(--affordance-subtle, #232323)",
+                          border: `1px solid ${isCopied ? "var(--green-11, #3dd68c)" : "var(--border-primary, #333333)"}`,
+                          borderRadius: "6px",
+                          padding: "4px 10px",
+                          cursor: "pointer",
+                          fontSize: "11px",
+                          color: isCopied ? "var(--green-11, #3dd68c)" : "var(--text-secondary, #c7c7c7)",
+                        },
+                      },
+                      h("span", { style: { fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, ep.label),
+                      h("code", { style: { fontFamily: "monospace", fontSize: "11px" } }, ep.url)
+                    );
+                  })
+                ),
+                h(
                   "div",
                   {
-                    key: pid,
                     style: {
-                      backgroundColor: isSelected ? "rgba(255, 255, 255, 0.05)" : "rgba(255, 255, 255, 0.02)",
-                      border: `1px solid ${isSelected ? group.accentColor : "rgba(255, 255, 255, 0.08)"}`,
-                      borderRadius: "14px",
-                      padding: "16px 18px",
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "space-between",
-                      gap: "10px",
-                      transition: "all 0.15s ease",
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+                      gap: "8px",
                     },
                   },
-                  // Group Header (Official SVG Logo + Name + Status)
-                  h(
-                    "div",
-                    {
-                      style: {
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                      },
-                    },
+                  Object.entries(CANONICAL_GROUPS).map(([pid, group]) =>
                     h(
                       "div",
-                      { style: { display: "flex", alignItems: "center", gap: "10px" } },
-                      h(
-                        "div",
-                        {
-                          style: {
-                            width: "34px",
-                            height: "34px",
-                            borderRadius: "10px",
-                            backgroundColor: "rgba(255, 255, 255, 0.06)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            color: group.accentColor,
-                          },
+                      {
+                        key: pid,
+                        style: {
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "8px 10px",
+                          backgroundColor: "var(--bg-app, #101010)",
+                          border: "1px solid var(--border-primary, #333333)",
+                          borderRadius: "6px",
+                          fontSize: "11px",
                         },
-                        (SVG_ICONS as any)[group.logoKey]?.({ h, width: 20, height: 20 })
-                      ),
+                      },
                       h(
                         "div",
                         null,
-                        h("div", { style: { fontWeight: "600", fontSize: "14px", color: "#ffffff" } }, group.groupName),
-                        h("div", { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } }, pid)
+                        h("div", { style: { fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, group.groupName),
+                        h("div", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, `Padrão: ${group.defaultModel.split("/").pop()}`)
+                      ),
+                      h(
+                        "span",
+                        { style: { color: "var(--text-secondary, #c7c7c7)", fontFamily: "monospace" } },
+                        `${groupCounts[pid] ?? group.modelsCount}`
                       )
-                    ),
-                    h(
-                      "span",
-                      {
-                        style: {
-                          fontSize: "10px",
-                          padding: "2px 7px",
-                          borderRadius: "9999px",
-                          backgroundColor: "rgba(16, 185, 129, 0.15)",
-                          color: "#10b981",
-                          fontWeight: "600",
-                        },
-                      },
-                      "Ativo"
-                    )
-                  ),
-
-                  // Middle Telemetry Metric (Clean & Concise)
-                  h(
-                    "div",
-                    { style: { fontSize: "12px", color: "#d1d5db", fontWeight: "500" } },
-                    getLiveSummary(group.id, group.telemetrySummary)
-                  ),
-
-                  // Bottom Filter Pill (Quick Filter to view models in this group)
-                  h(
-                    "div",
-                    {
-                      style: {
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        paddingTop: "8px",
-                        borderTop: "1px solid rgba(255, 255, 255, 0.06)",
-                      },
-                    },
-                    h(
-                      "span",
-                      { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                      `Padrão: ${group.defaultModel.split("/").pop()}`
-                    ),
-                    h(
-                      "button",
-                      {
-                        onClick: () => {
-                          setSelectedGroupTab(isSelected ? "all" : pid);
-                          setCurrentPage(1);
-                        },
-                        style: {
-                          borderRadius: "9999px",
-                          padding: "3px 10px",
-                          backgroundColor: isSelected ? group.accentColor : "rgba(255, 255, 255, 0.08)",
-                          color: isSelected ? "#000000" : "#ffffff",
-                          border: "none",
-                          fontSize: "11px",
-                          fontWeight: "600",
-                          cursor: "pointer",
-                        },
-                      },
-                      `${groupCounts[pid] ?? group.modelsCount} modelos`
                     )
                   )
-                );
-              })
-            ),
+                )
+              ),
 
-            // 5. CATALOG WORKSPACE & MODEL MANAGEMENT
+            // 5. CATALOG WORKSPACE & MODEL MANAGEMENT (FLAT, SEM BONECA RUSSA)
             h(
               "div",
               {
                 style: {
-                  backgroundColor: "rgba(255, 255, 255, 0.02)",
-                  border: "1px solid rgba(255, 255, 255, 0.07)",
-                  borderRadius: "16px",
-                  padding: "22px 24px",
                   display: "flex",
                   flexDirection: "column",
-                  gap: "18px",
+                  gap: "12px",
                 },
               },
               // Header Controls (Filter Tabs + Search Bar)
@@ -2722,73 +2435,97 @@ print("SYNC_SUCCESS")
                 })
               ),
 
-              // Batch Action Bar
-              h(
-                "div",
-                {
-                  style: {
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    backgroundColor: "rgba(0, 0, 0, 0.2)",
-                    borderRadius: "10px",
-                    padding: "8px 14px",
+              // Batch Action Bar (Seleção & Gestão em Massa — Padrão Buzz)
+              (() => {
+                const allFilteredActive =
+                  filteredModels.length > 0 &&
+                  filteredModels.every((m: any) => !disabledModels.includes(m.id));
+                const btnNeutral = {
+                  borderRadius: "6px",
+                  padding: "4px 10px",
+                  backgroundColor: "var(--affordance-subtle, #232323)",
+                  color: "var(--text-secondary, #c7c7c7)",
+                  border: "1px solid var(--border-primary, #333333)",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: "500",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "5px",
+                };
+                return h(
+                  "div",
+                  {
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      flexWrap: "wrap",
+                      gap: "10px",
+                      backgroundColor: "var(--bg-panel, #1a1a1a)",
+                      border: "1px solid var(--border-primary, #333333)",
+                      borderRadius: "8px",
+                      padding: "8px 12px",
+                    },
                   },
-                },
-                h(
-                  "div",
-                  { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
-                  disabledModels.length > 0
-                    ? `${disabledModels.length} modelo(s) desativado(s) serão expurgados do Buzz.`
-                    : "Todos os modelos listados estão ativos para sincronização."
-                ),
-                h(
-                  "div",
-                  { style: { display: "flex", gap: "8px" } },
                   h(
-                    "button",
+                    "label",
                     {
-                      onClick: handleBatchTestVisible,
                       style: {
-                        borderRadius: "9999px",
-                        padding: "5px 12px",
-                        backgroundColor: "rgba(59, 130, 246, 0.12)",
-                        color: "#60a5fa",
-                        border: "1px solid rgba(59, 130, 246, 0.25)",
-                        cursor: "pointer",
-                        fontSize: "11px",
-                        fontWeight: "600",
-                        display: "flex",
+                        display: "inline-flex",
                         alignItems: "center",
-                        gap: "5px",
+                        gap: "8px",
+                        fontSize: "12px",
+                        color: "var(--text-secondary, #c7c7c7)",
+                        cursor: "pointer",
                       },
                     },
-                    SVG_ICONS.sparkles({ h, width: 12, height: 12 }),
-                    "Testar Visíveis"
+                    h("input", {
+                      type: "checkbox",
+                      checked: allFilteredActive,
+                      onChange: handleToggleAllFiltered,
+                      style: { cursor: "pointer", accentColor: "#ffffff", width: "14px", height: "14px" },
+                    }),
+                    h(
+                      "span",
+                      null,
+                      allFilteredActive
+                        ? `Todos os ${filteredModels.length} filtrados ativos`
+                        : `Selecionar todos os ${filteredModels.length} filtrados`
+                    ),
+                    disabledModels.length > 0 &&
+                      h(
+                        "span",
+                        { style: { color: "var(--text-tertiary, #a4a4a4)", fontSize: "11px" } },
+                        `· ${disabledModels.length} desativados`
+                      )
                   ),
                   h(
-                    "button",
-                    {
-                      onClick: handleBatchDisableUnavailable,
-                      style: {
-                        borderRadius: "9999px",
-                        padding: "5px 12px",
-                        backgroundColor: "rgba(239, 68, 68, 0.12)",
-                        color: "#f87171",
-                        border: "1px solid rgba(239, 68, 68, 0.25)",
-                        cursor: "pointer",
-                        fontSize: "11px",
-                        fontWeight: "600",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "5px",
+                    "div",
+                    { style: { display: "flex", gap: "6px", flexWrap: "wrap" } },
+                    h("button", { onClick: handleEnableFilteredBulk, style: btnNeutral }, "Ativar filtrados"),
+                    h("button", { onClick: handleDisableFilteredBulk, style: btnNeutral }, "Desativar filtrados"),
+                    h("button", { onClick: handleDisableFreeBulk, style: btnNeutral }, "Desativar :free"),
+                    h(
+                      "button",
+                      { onClick: handleBatchTestVisible, style: btnNeutral },
+                      SVG_ICONS.sparkles({ h, width: 12, height: 12 }),
+                      "Testar visíveis"
+                    ),
+                    h(
+                      "button",
+                      {
+                        onClick: handleBatchDisableUnavailable,
+                        style: {
+                          ...btnNeutral,
+                          color: "var(--red-11, #ff9592)",
+                        },
                       },
-                    },
-                    SVG_ICONS.shield({ h, width: 12, height: 12 }),
-                    "Desativar Indisponíveis"
+                      "Desativar c/ erro"
+                    )
                   )
-                )
-              ),
+                );
+              })(),
 
               // Ranking Rápido de Healthcheck (apenas quando há modelos testados ao vivo)
               (() => {
@@ -3793,6 +3530,7 @@ Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model 
             const raw = localStorage.getItem("nexusmind_cached_models");
             if (raw) cachedModels = JSON.parse(raw);
           } catch {}
+          const savedPolicy = loadSavedRoutingPolicy();
           const snap = buildModelRankingSnapshot({
             catalogModels: cachedModels,
             groups: CANONICAL_GROUPS as any,
@@ -3800,7 +3538,8 @@ Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model 
             usageSampleSize: usage.sampleSize,
             liveProbes,
             tier,
-            avoidFree,
+            avoidFree: savedPolicy.forceFree ? false : avoidFree,
+            policy: savedPolicy,
           });
           await persistModelRankingSnapshot(ctx, snap);
           return JSON.stringify(

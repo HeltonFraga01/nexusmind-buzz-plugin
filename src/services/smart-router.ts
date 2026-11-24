@@ -165,11 +165,20 @@ export async function selectBestModelByTier(
   input: BestModelInput = {}
 ): Promise<BestModelResult> {
   const tier: NexusTier = input.tier || "tier2_balanced";
-  const preferFree = Boolean(input.prefer_free);
-  const avoidFree = input.avoid_free !== false && !preferFree; // Por padrão evita :free (propensos a 429)
+  let savedPolicy: { forceFree?: boolean; autoAssignBlocked?: string[] } = {};
+  try {
+    const rawPol = (globalThis as any)?.localStorage?.getItem?.("nexusmind_routing_policy");
+    if (rawPol) savedPolicy = JSON.parse(rawPol) || {};
+  } catch {}
+  const preferFree = input.prefer_free !== undefined ? Boolean(input.prefer_free) : Boolean(savedPolicy.forceFree);
+  const avoidFree = input.avoid_free !== false && !preferFree;
   const maxProbes = Math.max(1, Math.min(8, Number(input.max_probes || 5)));
   const disabled = getDisabledModels();
-  const excluded = new Set((input.exclude_models || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
+  const blockedAuto = new Set((savedPolicy.autoAssignBlocked || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
+  const excluded = new Set([
+    ...(input.exclude_models || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean),
+    ...blockedAuto,
+  ]);
   const host = (ctx as any)?.host;
 
   const catalog = new Map<string, { id: string; group: CanonicalGroupDef }>();

@@ -151,10 +151,59 @@ assert.equal(rankingSnap.source, "gateway_usage+live_probe");
 assert.ok(rankingSnap.bestByTier.geral && !rankingSnap.bestByTier.geral.model.includes(":free"));
 assert.ok(rankingSnap.bestByTier.tier1_fast?.model === "gemini-3.8-flash-medium");
 
-console.log("[NEXUSMIND GATEWAY v2.5 OK]", JSON.stringify({
+// 5. Testar política de roteamento: autoAssignBlocked e forceFree
+const snapBlocked = nmMod.buildModelRankingSnapshot({
+  catalogModels: [
+    { id: "qwen/qwen3:free", primaryGroup: "nexusmind_openai" },
+    { id: "gemini-3.8-flash-medium", primaryGroup: "nexusmind_antigravity" },
+    { id: "claude-opus-5-5", primaryGroup: "nexusmind_anthropic" },
+  ],
+  groups,
+  usageByModel: {
+    "claude-opus-5-5": { calls: 402, avgDurationMs: 9000, avgFirstTokenMs: 1100, totalCostUsd: 120, avgCostUsd: 0.30, cacheHitPct: 80, lastSeenAt: "2026-11-24T18:00:00Z" },
+    "gemini-3.8-flash-medium": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
+  },
+  usageSampleSize: 1760,
+  tier: "tier3_frontier",
+  policy: {
+    strategy: "balanced",
+    forceFree: false,
+    maxCostPerReqUsd: null,
+    autoAssignBlocked: ["claude-opus-5-5"],
+    tierPins: {},
+  },
+});
+const opusRow = snapBlocked.models.find((m) => m.model === "claude-opus-5-5");
+assert.ok(opusRow, "modelo bloqueado continua visível na tabela para uso manual");
+assert.equal(opusRow.eligibleForAuto, false, "modelo em autoAssignBlocked deve ter eligibleForAuto=false");
+assert.notEqual(snapBlocked.bestByTier.tier3_frontier?.model, "claude-opus-5-5", "modelo bloqueado não pode ser eleito automaticamente");
+
+const snapForceFree = nmMod.buildModelRankingSnapshot({
+  catalogModels: [
+    { id: "qwen/qwen3:free", primaryGroup: "nexusmind_openai" },
+    { id: "gemini-3.8-flash-medium", primaryGroup: "nexusmind_antigravity" },
+  ],
+  groups,
+  usageByModel: {
+    "gemini-3.8-flash-medium": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
+  },
+  usageSampleSize: 1358,
+  tier: "geral",
+  policy: {
+    strategy: "balanced",
+    forceFree: true,
+    maxCostPerReqUsd: null,
+    autoAssignBlocked: [],
+    tierPins: {},
+  },
+});
+assert.equal(snapForceFree.bestByTier.geral?.model, "qwen/qwen3:free", "forceFree=true deve priorizar modelos :free");
+
+console.log("[NEXUSMIND GATEWAY v2.6 OK]", JSON.stringify({
   tools: Array.from(tools.keys()),
   decisionProvider: registeredProvider.id,
   bestFast: bestFast.selectedModel,
   appliedFrontier: applied.selectedModel,
   rankingTopGeral: rankingSnap.bestByTier.geral.model,
+  forceFreeTop: snapForceFree.bestByTier.geral.model,
 }));

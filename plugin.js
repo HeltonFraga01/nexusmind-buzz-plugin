@@ -84,12 +84,23 @@ async function pingModel(ctx, modelId, group) {
   }
 }
 async function selectBestModelByTier(ctx, groups, input = {}) {
+  var _a, _b;
   const tier = input.tier || "tier2_balanced";
-  const preferFree = Boolean(input.prefer_free);
+  let savedPolicy = {};
+  try {
+    const rawPol = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, "nexusmind_routing_policy");
+    if (rawPol) savedPolicy = JSON.parse(rawPol) || {};
+  } catch {
+  }
+  const preferFree = input.prefer_free !== void 0 ? Boolean(input.prefer_free) : Boolean(savedPolicy.forceFree);
   const avoidFree = input.avoid_free !== false && !preferFree;
   const maxProbes = Math.max(1, Math.min(8, Number(input.max_probes || 5)));
   const disabled = getDisabledModels();
-  const excluded = new Set((input.exclude_models || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
+  const blockedAuto = new Set((savedPolicy.autoAssignBlocked || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
+  const excluded = /* @__PURE__ */ new Set([
+    ...(input.exclude_models || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean),
+    ...blockedAuto
+  ]);
   const host = ctx == null ? void 0 : ctx.host;
   const catalog = /* @__PURE__ */ new Map();
   if (typeof (host == null ? void 0 : host.request) === "function") {
@@ -327,12 +338,48 @@ function createNexusMindDecisionProvider(ctx, groups) {
     }
   };
 }
+const DEFAULT_ROUTING_POLICY = {
+  strategy: "balanced",
+  forceFree: false,
+  maxCostPerReqUsd: null,
+  autoAssignBlocked: [],
+  tierPins: {}
+};
 const SHARED_RANKING_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-model-ranking.json";
+const SHARED_USAGE_SUMMARY_PATHS = [
+  "/Users/heltonfraga/.buzz/.scratch/nm_usage_summary.json",
+  "~/.buzz/.scratch/nm_usage_summary.json"
+];
 const SHARED_USAGE_PATHS = [
   "/Users/heltonfraga/.buzz/.scratch/nm_usage.json",
   "~/.buzz/.scratch/nm_usage.json"
 ];
 const LOCAL_STORAGE_RANKING_KEY = "nexusmind_model_ranking";
+const LOCAL_STORAGE_POLICY_KEY = "nexusmind_routing_policy";
+function loadSavedRoutingPolicy() {
+  var _a, _b;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_POLICY_KEY);
+    if (!raw) return { ...DEFAULT_ROUTING_POLICY };
+    const p = JSON.parse(raw);
+    return {
+      strategy: ["balanced", "speed", "quality", "cost"].includes(p == null ? void 0 : p.strategy) ? p.strategy : "balanced",
+      forceFree: Boolean(p == null ? void 0 : p.forceFree),
+      maxCostPerReqUsd: typeof (p == null ? void 0 : p.maxCostPerReqUsd) === "number" && p.maxCostPerReqUsd > 0 ? p.maxCostPerReqUsd : null,
+      autoAssignBlocked: Array.isArray(p == null ? void 0 : p.autoAssignBlocked) ? p.autoAssignBlocked.map(String) : [],
+      tierPins: (p == null ? void 0 : p.tierPins) && typeof p.tierPins === "object" ? { ...p.tierPins } : {}
+    };
+  } catch {
+    return { ...DEFAULT_ROUTING_POLICY };
+  }
+}
+function saveRoutingPolicy(policy) {
+  var _a, _b;
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_POLICY_KEY, JSON.stringify(policy));
+  } catch {
+  }
+}
 function decodeFileContent(raw) {
   if (typeof raw === "string") return raw;
   if (raw instanceof Uint8Array) return new TextDecoder("utf-8").decode(raw);
@@ -358,30 +405,34 @@ async function loadGatewayUsageByModel(ctx) {
   if (typeof (host == null ? void 0 : host.readFile) !== "function") {
     return { sampleSize: 0, byModel: {} };
   }
+  for (const path of SHARED_USAGE_SUMMARY_PATHS) {
+    try {
+      const raw = await host.readFile(path);
+      if (!raw) continue;
+      const parsed = JSON.parse(decodeFileContent(raw));
+      if (parsed && typeof parsed.byModel === "object" && parsed.sampleSize > 0) {
+        return {
+          sampleSize: Number(parsed.sampleSize || 0),
+          byModel: parsed.byModel
+        };
+      }
+    } catch {
+    }
+  }
   for (const path of SHARED_USAGE_PATHS) {
     try {
       const raw = await host.readFile(path);
       if (!raw) continue;
-      const text = decodeFileContent(raw);
-      const parsed = JSON.parse(text);
+      const parsed = JSON.parse(decodeFileContent(raw));
       const items = Array.isArray((_a = parsed == null ? void 0 : parsed.data) == null ? void 0 : _a.items) ? parsed.data.items : Array.isArray(parsed == null ? void 0 : parsed.items) ? parsed.items : Array.isArray(parsed) ? parsed : [];
+      if (items.length === 0) continue;
       const acc = /* @__PURE__ */ new Map();
       for (const it of items) {
         const mid = String((it == null ? void 0 : it.model) || "").trim();
         if (!mid) continue;
         let cur = acc.get(mid);
         if (!cur) {
-          cur = {
-            calls: 0,
-            durSum: 0,
-            durN: 0,
-            ttftSum: 0,
-            ttftN: 0,
-            cost: 0,
-            inputTok: 0,
-            cacheReadTok: 0,
-            lastSeen: null
-          };
+          cur = { calls: 0, durSum: 0, durN: 0, ttftSum: 0, ttftN: 0, cost: 0, inputTok: 0, cacheReadTok: 0, lastSeen: null };
           acc.set(mid, cur);
         }
         cur.calls += 1;
@@ -424,7 +475,7 @@ async function loadGatewayUsageByModel(ctx) {
   }
   return { sampleSize: 0, byModel: {} };
 }
-function computeModelRowScore(modelId, tier, usage, probe, avoidFree) {
+function computeModelRowScore(modelId, tier, usage, probe, policy) {
   const effectiveTier = tier === "geral" ? "tier2_balanced" : tier;
   const { capability, tierMatch } = scoreModelForTier(modelId, effectiveTier);
   const calls = (usage == null ? void 0 : usage.calls) ?? 0;
@@ -437,11 +488,25 @@ function computeModelRowScore(modelId, tier, usage, probe, avoidFree) {
   } else if ((usage == null ? void 0 : usage.avgDurationMs) && usage.avgDurationMs > 0) {
     speedScore = Math.max(20, Math.min(95, Math.round(100 - usage.avgDurationMs / 1e3 * 1.4)));
   }
-  let rawScore = tier === "tier1_fast" || tier === "decision" ? tierMatch * 0.35 + speedScore * 0.35 + capability * 0.15 + adoptionScore * 0.15 : tier === "tier3_frontier" || tier === "reasoning" ? capability * 0.45 + tierMatch * 0.35 + adoptionScore * 0.1 + speedScore * 0.1 : capability * 0.35 + tierMatch * 0.3 + adoptionScore * 0.2 + speedScore * 0.15;
+  const avgCost = (usage == null ? void 0 : usage.avgCostUsd) ?? 0;
+  const costScore = avgCost <= 0 ? 100 : Math.max(10, Math.round(100 - Math.min(90, avgCost * 1800)));
+  let rawScore;
+  if (policy.strategy === "speed" || tier === "tier1_fast" || tier === "decision") {
+    rawScore = speedScore * 0.4 + tierMatch * 0.3 + adoptionScore * 0.15 + capability * 0.15;
+  } else if (policy.strategy === "quality" || tier === "tier3_frontier" || tier === "reasoning") {
+    rawScore = capability * 0.48 + tierMatch * 0.32 + adoptionScore * 0.1 + speedScore * 0.1;
+  } else if (policy.strategy === "cost") {
+    rawScore = costScore * 0.4 + tierMatch * 0.25 + adoptionScore * 0.2 + capability * 0.15;
+  } else {
+    rawScore = capability * 0.32 + tierMatch * 0.28 + adoptionScore * 0.22 + speedScore * 0.18;
+  }
   if ((usage == null ? void 0 : usage.cacheHitPct) && usage.cacheHitPct >= 50) {
     rawScore += Math.min(5, (usage.cacheHitPct - 40) / 12);
   }
-  if (avoidFree && isFreeModel(modelId)) {
+  const free = isFreeModel(modelId);
+  if (policy.forceFree) {
+    rawScore += free ? 18 : -25;
+  } else if (free) {
     rawScore -= 20;
   }
   if ((probe == null ? void 0 : probe.status) === "ok") {
@@ -458,9 +523,17 @@ function computeModelRowScore(modelId, tier, usage, probe, avoidFree) {
   };
 }
 function buildModelRankingSnapshot(params) {
+  var _a, _b, _c;
   const tier = params.tier || "geral";
-  const avoidFree = params.avoidFree !== false;
+  const policy = {
+    ...DEFAULT_ROUTING_POLICY,
+    ...params.policy || {},
+    forceFree: ((_a = params.policy) == null ? void 0 : _a.forceFree) ?? (params.avoidFree === false ? true : false),
+    autoAssignBlocked: Array.isArray((_b = params.policy) == null ? void 0 : _b.autoAssignBlocked) ? params.policy.autoAssignBlocked : [],
+    tierPins: ((_c = params.policy) == null ? void 0 : _c.tierPins) ? { ...params.policy.tierPins } : {}
+  };
   const disabledSet = new Set(params.disabledModels || []);
+  const blockedSet = new Set(policy.autoAssignBlocked.map((m) => m.toLowerCase()));
   const liveProbes = params.liveProbes || {};
   const pool = /* @__PURE__ */ new Map();
   for (const m of params.catalogModels || []) {
@@ -485,14 +558,22 @@ function buildModelRankingSnapshot(params) {
       const usage = params.usageByModel[item.id];
       const probe = liveProbes[item.id];
       const isDisabled = disabledSet.has(item.id);
-      const scored = computeModelRowScore(item.id, targetTier, usage, probe, avoidFree);
+      const isBlocked = blockedSet.has(item.id.toLowerCase());
+      const free = isFreeModel(item.id);
+      const avgCost = (usage == null ? void 0 : usage.avgCostUsd) ?? 0;
+      const exceedsCostCap = policy.maxCostPerReqUsd !== null && avgCost > 0 && avgCost > policy.maxCostPerReqUsd;
+      const freeMismatch = policy.forceFree ? !free : false;
+      const eligibleForAuto = !isDisabled && !isBlocked && (probe == null ? void 0 : probe.status) !== "error" && !exceedsCostCap && !freeMismatch;
+      const scored = computeModelRowScore(item.id, targetTier, usage, probe, policy);
       rows.push({
         rank: 0,
         model: item.id,
         group: item.group.id,
         platform: item.group.platformKey,
-        isFree: isFreeModel(item.id),
+        isFree: free,
         isDisabled,
+        autoAssignBlocked: isBlocked,
+        eligibleForAuto,
         score: isDisabled ? -1 : scored.score,
         capabilityScore: scored.capabilityScore,
         tierMatchScore: scored.tierMatchScore,
@@ -505,7 +586,7 @@ function buildModelRankingSnapshot(params) {
         avgDurationMs: (usage == null ? void 0 : usage.avgDurationMs) ?? null,
         avgFirstTokenMs: (usage == null ? void 0 : usage.avgFirstTokenMs) ?? null,
         cacheHitPct: (usage == null ? void 0 : usage.cacheHitPct) ?? null,
-        avgCostUsd: (usage == null ? void 0 : usage.avgCostUsd) ?? 0,
+        avgCostUsd: avgCost,
         totalCostUsd: (usage == null ? void 0 : usage.totalCostUsd) ?? 0
       });
     }
@@ -527,7 +608,9 @@ function buildModelRankingSnapshot(params) {
   for (const t of tiers) {
     const ranked = rankForTier(t);
     if (t === tier) selectedRows = ranked;
-    const winner = ranked.find((r) => !r.isDisabled && r.online !== false) || null;
+    const pinnedModel = policy.tierPins[t];
+    const pinnedRow = pinnedModel ? ranked.find((r) => r.model === pinnedModel && !r.isDisabled && !r.autoAssignBlocked && r.online !== false) : void 0;
+    const winner = pinnedRow || ranked.find((r) => r.eligibleForAuto) || ranked.find((r) => !r.isDisabled && !r.autoAssignBlocked && r.online !== false) || null;
     bestByTier[t] = winner ? {
       model: winner.model,
       group: winner.group,
@@ -537,18 +620,20 @@ function buildModelRankingSnapshot(params) {
       calls: winner.calls,
       online: winner.online,
       avgCostUsd: winner.avgCostUsd,
-      cacheHitPct: winner.cacheHitPct
+      cacheHitPct: winner.cacheHitPct,
+      pinned: Boolean(pinnedRow)
     } : null;
   }
   const hasUsage = params.usageSampleSize > 0;
   const hasProbes = Object.values(liveProbes).some((p) => p.status === "ok" || p.status === "error");
   const source = hasUsage && hasProbes ? "gateway_usage+live_probe" : hasUsage ? "gateway_usage" : hasProbes ? "live_probe" : "catalog";
   return {
-    version: 1,
+    version: 2,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     source,
     usageSampleSize: params.usageSampleSize,
     tier,
+    policy,
     bestByTier,
     models: selectedRows
   };
@@ -558,8 +643,7 @@ async function persistModelRankingSnapshot(ctx, snapshot) {
   const payload = JSON.stringify(
     {
       ...snapshot,
-      // Limita lista salva em disco aos top 60 para leitura ultrarrápida
-      models: snapshot.models.slice(0, 60)
+      models: snapshot.models.slice(0, 80)
     },
     null,
     2
@@ -589,12 +673,18 @@ async function persistModelRankingSnapshot(ctx, snapshot) {
   return false;
 }
 const TIER_OPTIONS = [
-  { id: "geral", label: "Geral", hint: "Equilíbrio entre qualidade, adoção real e velocidade" },
-  { id: "tier1_fast", label: "Tier 1 · Rápido", hint: "Triagem, tarefas simples e baixa latência" },
-  { id: "tier2_balanced", label: "Tier 2 · Equilibrado", hint: "Execução padrão de cards e código" },
-  { id: "tier3_frontier", label: "Tier 3 · Frontier", hint: "Arquitetura, revisão crítica e alto rigor" },
-  { id: "reasoning", label: "Raciocínio", hint: "Debugging complexo e planejamento profundo" },
-  { id: "decision", label: "Decision API", hint: "Classificadores yes_no / choice / score" }
+  { id: "geral", label: "Geral" },
+  { id: "tier1_fast", label: "Tier 1 · Rápido" },
+  { id: "tier2_balanced", label: "Tier 2 · Código" },
+  { id: "tier3_frontier", label: "Tier 3 · Frontier" },
+  { id: "reasoning", label: "Raciocínio" },
+  { id: "decision", label: "Decision" }
+];
+const STRATEGY_OPTIONS = [
+  { id: "balanced", label: "Balanceado" },
+  { id: "speed", label: "Velocidade" },
+  { id: "quality", label: "Máxima Qualidade" },
+  { id: "cost", label: "Menor Custo" }
 ];
 function fmtMs(ms) {
   if (ms === null || ms === void 0 || !Number.isFinite(ms)) return "—";
@@ -602,9 +692,9 @@ function fmtMs(ms) {
   return `${Math.round(ms)}ms`;
 }
 function fmtCost(usd) {
-  if (!Number.isFinite(usd) || usd <= 0) return "$0.00";
-  if (usd < 1e-3) return `$${(usd * 1e3).toFixed(3)}/1k`;
-  return `$${usd.toFixed(4)}/req`;
+  if (!Number.isFinite(usd) || usd <= 0) return "$0";
+  if (usd < 1e-3) return `$${(usd * 1e3).toFixed(2)}/1k`;
+  return `$${usd.toFixed(4)}`;
 }
 function createModelRankingTabComponent(ctx, groups) {
   const React = ctx.react;
@@ -617,13 +707,21 @@ function createModelRankingTabComponent(ctx, groups) {
     onNotify
   }) {
     const [selectedTier, setSelectedTier] = React.useState("geral");
-    const [hideFree, setHideFree] = React.useState(true);
+    const [policy, setPolicy] = React.useState(() => loadSavedRoutingPolicy());
     const [usageByModel, setUsageByModel] = React.useState({});
     const [usageSampleSize, setUsageSampleSize] = React.useState(0);
     const [probingTop, setProbingTop] = React.useState(false);
     const [selectedAgentKey, setSelectedAgentKey] = React.useState("");
     const [applyingModel, setApplyingModel] = React.useState(null);
-    const [lastSavedAt, setLastSavedAt] = React.useState("");
+    const [onlyAutoEligible, setOnlyAutoEligible] = React.useState(false);
+    const [searchFilter, setSearchFilter] = React.useState("");
+    const updatePolicy = (updater) => {
+      setPolicy((prev) => {
+        const next = updater(prev);
+        saveRoutingPolicy(next);
+        return next;
+      });
+    };
     const agentsList = React.useMemo(() => {
       var _a, _b;
       try {
@@ -665,87 +763,269 @@ function createModelRankingTabComponent(ctx, groups) {
         liveProbes: modelTests,
         disabledModels,
         tier: selectedTier,
-        avoidFree: hideFree
+        policy
       });
-    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, hideFree]);
+    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy]);
     React.useEffect(() => {
       if (snapshot.models.length === 0) return;
-      persistModelRankingSnapshot(ctx, snapshot).then((ok) => {
-        if (ok) {
-          setLastSavedAt(
-            (/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-          );
-        }
-      });
+      persistModelRankingSnapshot(ctx, snapshot);
     }, [snapshot]);
     const visibleRows = React.useMemo(() => {
-      return snapshot.models.filter((r) => !r.isDisabled && (!hideFree || !r.isFree)).slice(0, 30);
-    }, [snapshot, hideFree]);
-    const topOverall = visibleRows[0] || null;
-    const topFastest = React.useMemo(() => {
-      const candidates = visibleRows.filter((r) => r.online !== false && (r.pingLatencyMs !== null || r.avgFirstTokenMs !== null || r.avgDurationMs !== null));
-      return [...candidates].sort((a, b) => {
-        const la = a.pingLatencyMs ?? a.avgFirstTokenMs ?? a.avgDurationMs ?? 999999;
-        const lb = b.pingLatencyMs ?? b.avgFirstTokenMs ?? b.avgDurationMs ?? 999999;
-        return la - lb;
-      })[0] || null;
-    }, [visibleRows]);
-    const topMostUsed = React.useMemo(() => {
-      const candidates = visibleRows.filter((r) => r.calls > 0);
-      return [...candidates].sort((a, b) => b.calls - a.calls)[0] || null;
-    }, [visibleRows]);
+      const q = searchFilter.trim().toLowerCase();
+      return snapshot.models.filter((r) => {
+        if (r.isDisabled) return false;
+        if (policy.forceFree && !r.isFree) return false;
+        if (onlyAutoEligible && !r.eligibleForAuto) return false;
+        if (q && !r.model.toLowerCase().includes(q)) return false;
+        return true;
+      }).slice(0, 40);
+    }, [snapshot, policy.forceFree, onlyAutoEligible, searchFilter]);
+    const activeWinner = snapshot.bestByTier[selectedTier] || null;
+    const pinnedForTier = policy.tierPins[selectedTier] || null;
+    const toggleAutoAssignBlock = (modelId) => {
+      updatePolicy((prev) => {
+        const lower = modelId.toLowerCase();
+        const exists = prev.autoAssignBlocked.some((m) => m.toLowerCase() === lower);
+        const nextBlocked = exists ? prev.autoAssignBlocked.filter((m) => m.toLowerCase() !== lower) : [...prev.autoAssignBlocked, modelId];
+        return { ...prev, autoAssignBlocked: nextBlocked };
+      });
+    };
+    const togglePinForTier = (modelId) => {
+      updatePolicy((prev) => {
+        const nextPins = { ...prev.tierPins };
+        if (nextPins[selectedTier] === modelId) {
+          delete nextPins[selectedTier];
+        } else {
+          nextPins[selectedTier] = modelId;
+        }
+        return { ...prev, tierPins: nextPins };
+      });
+    };
     const handleProbeTopCandidates = async () => {
       const topToTest = visibleRows.slice(0, 6);
       if (topToTest.length === 0) return;
       setProbingTop(true);
-      onNotify({
-        type: "info",
-        text: `Testando saúde HTTP 200 ao vivo nos ${topToTest.length} melhores modelos de '${selectedTier}'...`
-      });
+      onNotify({ type: "info", text: `Testando saúde HTTP 200 dos top ${topToTest.length} modelos...` });
       try {
         await Promise.all(topToTest.map((row) => onTestSingleModel(row.model)));
         await refreshUsageTelemetry();
-        onNotify({
-          type: "success",
-          text: `Ranking atualizado e salvo em nexusmind-model-ranking.json para o OrgFy e agentes.`
-        });
+        onNotify({ type: "success", text: `Ranking e políticas sincronizados com o OrgFy e agentes.` });
       } finally {
         setProbingTop(false);
       }
     };
-    const handleApplyModelToSelectedAgent = async (row) => {
+    const handleApplyModel = async (modelId, groupId) => {
       const agentsApi = ctx == null ? void 0 : ctx.agents;
       const target = agentsList.find((a) => a.key === selectedAgentKey);
       if (!target || typeof (agentsApi == null ? void 0 : agentsApi.save) !== "function") {
-        onNotify({ type: "error", text: "Selecione um agente válido para aplicar o modelo." });
+        onNotify({ type: "error", text: "Selecione um agente para aplicar o modelo." });
         return;
       }
-      setApplyingModel(row.model);
+      setApplyingModel(modelId);
       try {
         const nextCfg = {
           ...target.config && typeof target.config === "object" ? target.config : {},
-          model: row.model,
-          provider: row.group
+          model: modelId,
+          provider: groupId
         };
         await agentsApi.save(target.key, { config: nextCfg });
-        onNotify({
-          type: "success",
-          text: `Agente '${target.name || target.key}' atualizado para '${row.model}' (${row.group}, score ${row.score}).`
-        });
+        onNotify({ type: "success", text: `${target.name || target.key} atualizado para ${modelId}.` });
       } catch (err) {
-        onNotify({
-          type: "error",
-          text: `Erro ao aplicar modelo em ${target.name || target.key}: ${(err == null ? void 0 : err.message) || err}`
-        });
+        onNotify({ type: "error", text: `Falha ao aplicar: ${(err == null ? void 0 : err.message) || err}` });
       } finally {
         setApplyingModel(null);
       }
     };
-    const activeTierInfo = TIER_OPTIONS.find((t) => t.id === selectedTier) || TIER_OPTIONS[0];
     return h(
       "div",
-      { style: { display: "flex", flexDirection: "column", gap: "18px" } },
-      // Barra de Controles do Ranking
+      { style: { display: "flex", flexDirection: "column", gap: "14px" } },
+      // 1. Barra compacta de Tier + Critérios de Roteamento (flat, estilo Buzz)
+      h(
+        "div",
+        {
+          style: {
+            display: "flex",
+            flexDirection: "column",
+            gap: "10px",
+            padding: "12px 14px",
+            borderRadius: "10px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)"
+          }
+        },
+        // Linha 1: Tiers + Ação de Healthcheck
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+          h(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" } },
+            TIER_OPTIONS.map((t) => {
+              const active = selectedTier === t.id;
+              return h(
+                "button",
+                {
+                  key: t.id,
+                  onClick: () => setSelectedTier(t.id),
+                  style: {
+                    borderRadius: "6px",
+                    padding: "5px 10px",
+                    border: "none",
+                    backgroundColor: active ? "var(--affordance-selected, #333333)" : "transparent",
+                    color: active ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
+                    fontSize: "12px",
+                    fontWeight: active ? "600" : "500",
+                    cursor: "pointer"
+                  }
+                },
+                t.label
+              );
+            })
+          ),
+          h(
+            "button",
+            {
+              onClick: handleProbeTopCandidates,
+              disabled: probingTop,
+              style: {
+                borderRadius: "6px",
+                padding: "6px 12px",
+                backgroundColor: "var(--affordance-prominent, #ffffff)",
+                color: "var(--text-on-prominent, #000000)",
+                border: "none",
+                fontSize: "12px",
+                fontWeight: "600",
+                cursor: probingTop ? "wait" : "pointer"
+              }
+            },
+            probingTop ? "Testando..." : "Testar Top 6"
+          )
+        ),
+        // Linha 2: Critérios de Política (Estratégia, Teto de Custo, Forçar :free, Busca)
+        h(
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "10px",
+              paddingTop: "8px",
+              borderTop: "1px solid var(--border-primary, #2a2a2a)"
+            }
+          },
+          h(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+            // Estratégia
+            h(
+              "label",
+              { style: { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
+              "Critério:",
+              h(
+                "select",
+                {
+                  value: policy.strategy,
+                  onChange: (e) => updatePolicy((p) => ({ ...p, strategy: e.target.value })),
+                  style: {
+                    backgroundColor: "var(--surface-inset, #101010)",
+                    color: "var(--text-primary, #ffffff)",
+                    border: "1px solid var(--border-primary, #333333)",
+                    borderRadius: "6px",
+                    padding: "4px 8px",
+                    fontSize: "11px"
+                  }
+                },
+                STRATEGY_OPTIONS.map((s) => h("option", { key: s.id, value: s.id }, s.label))
+              )
+            ),
+            // Teto de custo por requisição
+            h(
+              "label",
+              { style: { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
+              "Teto custo/req:",
+              h(
+                "select",
+                {
+                  value: policy.maxCostPerReqUsd === null ? "" : String(policy.maxCostPerReqUsd),
+                  onChange: (e) => {
+                    const v = e.target.value ? Number(e.target.value) : null;
+                    updatePolicy((p) => ({ ...p, maxCostPerReqUsd: v }));
+                  },
+                  style: {
+                    backgroundColor: "var(--surface-inset, #101010)",
+                    color: "var(--text-primary, #ffffff)",
+                    border: "1px solid var(--border-primary, #333333)",
+                    borderRadius: "6px",
+                    padding: "4px 8px",
+                    fontSize: "11px"
+                  }
+                },
+                h("option", { value: "" }, "Sem teto"),
+                h("option", { value: "0.005" }, "≤ $0.005"),
+                h("option", { value: "0.02" }, "≤ $0.020"),
+                h("option", { value: "0.05" }, "≤ $0.050")
+              )
+            ),
+            // Toggle Forçar :free (explicitamente pedido)
+            h(
+              "label",
+              {
+                style: {
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  fontSize: "11px",
+                  padding: "4px 9px",
+                  borderRadius: "6px",
+                  cursor: "pointer",
+                  border: `1px solid ${policy.forceFree ? "var(--green-7, #28714f)" : "var(--border-primary, #333333)"}`,
+                  backgroundColor: policy.forceFree ? "var(--green-3, #132d21)" : "transparent",
+                  color: policy.forceFree ? "var(--green-11, #3dd68c)" : "var(--text-secondary, #c7c7c7)",
+                  fontWeight: policy.forceFree ? "600" : "500"
+                }
+              },
+              h("input", {
+                type: "checkbox",
+                checked: policy.forceFree,
+                onChange: (e) => updatePolicy((p) => ({ ...p, forceFree: Boolean(e.target.checked) })),
+                style: { accentColor: "#30a46c" }
+              }),
+              "Forçar modelos :free"
+            ),
+            // Filtro elegíveis para auto-designação
+            h(
+              "label",
+              { style: { display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", cursor: "pointer" } },
+              h("input", {
+                type: "checkbox",
+                checked: onlyAutoEligible,
+                onChange: (e) => setOnlyAutoEligible(Boolean(e.target.checked)),
+                style: { accentColor: "#30a46c" }
+              }),
+              "Só elegíveis (Auto)"
+            )
+          ),
+          h("input", {
+            type: "text",
+            placeholder: "Filtrar modelo...",
+            value: searchFilter,
+            onChange: (e) => setSearchFilter(e.target.value),
+            style: {
+              backgroundColor: "var(--surface-inset, #101010)",
+              border: "1px solid var(--border-primary, #333333)",
+              borderRadius: "6px",
+              padding: "4px 10px",
+              color: "var(--text-primary, #ffffff)",
+              fontSize: "11px",
+              width: "160px",
+              outline: "none"
+            }
+          })
+        )
+      ),
+      // 2. Faixa única do Modelo #1 Eleito + Aplicação Direta (substitui 3 cards + banner azul)
       h(
         "div",
         {
@@ -755,223 +1035,88 @@ function createModelRankingTabComponent(ctx, groups) {
             justifyContent: "space-between",
             flexWrap: "wrap",
             gap: "12px",
-            backgroundColor: "rgba(255, 255, 255, 0.02)",
-            border: "1px solid rgba(255, 255, 255, 0.08)",
-            borderRadius: "14px",
-            padding: "14px 18px"
+            padding: "10px 14px",
+            borderRadius: "10px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)"
           }
         },
         h(
           "div",
-          { style: { display: "flex", flexDirection: "column", gap: "8px" } },
+          { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
           h(
-            "div",
-            { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
-            TIER_OPTIONS.map((t) => {
-              const active = selectedTier === t.id;
-              return h(
-                "button",
-                {
-                  key: t.id,
-                  onClick: () => setSelectedTier(t.id),
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "5px 12px",
-                    border: `1px solid ${active ? "#10b981" : "rgba(255,255,255,0.1)"}`,
-                    backgroundColor: active ? "rgba(16,185,129,0.18)" : "transparent",
-                    color: active ? "#34d399" : "#9ca3af",
-                    fontSize: "11px",
-                    fontWeight: active ? "700" : "500",
-                    cursor: "pointer"
-                  }
-                },
-                t.label
-              );
-            })
+            "span",
+            { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", fontWeight: "600", textTransform: "uppercase" } },
+            (activeWinner == null ? void 0 : activeWinner.pinned) ? "Fixado:" : "Auto #1:"
           ),
           h(
-            "div",
-            { style: { fontSize: "11px", color: "#9ca3af" } },
-            `${activeTierInfo.hint} · Telemetria: ${usageSampleSize.toLocaleString("pt-BR")} chamadas reais do Gateway${lastSavedAt ? ` · Sincronizado para OrgFy às ${lastSavedAt}` : ""}`
+            "span",
+            { style: { fontSize: "13px", fontWeight: "700", color: "var(--text-primary, #ffffff)", fontFamily: "monospace" } },
+            activeWinner ? activeWinner.model : "Nenhum elegível"
+          ),
+          activeWinner && h(
+            "span",
+            { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace" } },
+            `score ${activeWinner.score} · ${activeWinner.calls.toLocaleString("pt-BR")} reqs · ${fmtCost(activeWinner.avgCostUsd)}`
+          ),
+          h(
+            "span",
+            { style: { fontSize: "11px", color: "var(--text-tertiary, #808080)" } },
+            `(${usageSampleSize.toLocaleString("pt-BR")} chamadas no Gateway · ${policy.autoAssignBlocked.length} bloqueados p/ auto)`
           )
         ),
-        h(
+        agentsList.length > 0 && h(
           "div",
-          { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
-          h(
-            "label",
-            {
-              style: {
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "6px",
-                fontSize: "11px",
-                color: "#d1d5db",
-                cursor: "pointer"
-              }
-            },
-            h("input", {
-              type: "checkbox",
-              checked: hideFree,
-              onChange: (e) => setHideFree(Boolean(e.target.checked)),
-              style: { accentColor: "#10b981" }
-            }),
-            "Ocultar :free (429)"
-          ),
-          h(
-            "button",
-            {
-              onClick: handleProbeTopCandidates,
-              disabled: probingTop,
-              style: {
-                borderRadius: "9999px",
-                padding: "7px 16px",
-                backgroundColor: "#10b981",
-                color: "#000000",
-                border: "none",
-                cursor: probingTop ? "wait" : "pointer",
-                fontSize: "12px",
-                fontWeight: "700"
-              }
-            },
-            probingTop ? "Testando Top 6 ao vivo..." : "⚡ Testar Saúde & Atualizar Ranking"
-          )
-        )
-      ),
-      // Pódio Top 3
-      h(
-        "div",
-        { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "14px" } },
-        [
-          {
-            title: `#1 MELHOR PARA ${activeTierInfo.label.toUpperCase()}`,
-            accent: "#10b981",
-            row: topOverall,
-            detail: topOverall ? `Score ${topOverall.score}/100 · ${topOverall.calls.toLocaleString("pt-BR")} chamadas` : "Sem dados"
-          },
-          {
-            title: "MAIS RÁPIDO (LATÊNCIA REAL)",
-            accent: "#38bdf8",
-            row: topFastest,
-            detail: topFastest ? topFastest.pingLatencyMs !== null ? `Ping ao vivo: ${fmtMs(topFastest.pingLatencyMs)}` : `TTFT/Média Gateway: ${fmtMs(topFastest.avgFirstTokenMs ?? topFastest.avgDurationMs)}` : "Sem medições"
-          },
-          {
-            title: "MAIS VALIDADO EM PRODUÇÃO",
-            accent: "#c084fc",
-            row: topMostUsed,
-            detail: topMostUsed ? `${topMostUsed.calls.toLocaleString("pt-BR")} chamadas · Cache ${topMostUsed.cacheHitPct ?? "—"}%` : "Sem histórico"
-          }
-        ].map(
-          (card) => {
-            var _a;
-            return h(
-              "div",
-              {
-                key: card.title,
-                style: {
-                  backgroundColor: "rgba(255, 255, 255, 0.03)",
-                  border: `1px solid ${card.accent}44`,
-                  borderRadius: "14px",
-                  padding: "16px 18px",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "6px"
-                }
-              },
-              h("div", { style: { fontSize: "10px", fontWeight: "700", color: card.accent, letterSpacing: "0.05em" } }, card.title),
-              h(
-                "div",
-                {
-                  style: {
-                    fontSize: "15px",
-                    fontWeight: "700",
-                    color: "#ffffff",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap"
-                  },
-                  title: ((_a = card.row) == null ? void 0 : _a.model) || ""
-                },
-                card.row ? card.row.model : "—"
-              ),
-              h("div", { style: { fontSize: "11px", color: "#9ca3af", fontFamily: "monospace" } }, card.detail)
-            );
-          }
-        )
-      ),
-      // Barra de Aplicação Direta em Agente
-      agentsList.length > 0 && h(
-        "div",
-        {
-          style: {
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: "10px",
-            padding: "10px 16px",
-            borderRadius: "12px",
-            backgroundColor: "rgba(56, 189, 248, 0.06)",
-            border: "1px solid rgba(56, 189, 248, 0.22)"
-          }
-        },
-        h(
-          "div",
-          { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
-          h("span", { style: { fontSize: "12px", fontWeight: "600", color: "#38bdf8" } }, "Aplicar modelo do ranking no agente:"),
+          { style: { display: "flex", alignItems: "center", gap: "8px" } },
           h(
             "select",
             {
               value: selectedAgentKey,
               onChange: (e) => setSelectedAgentKey(e.target.value),
               style: {
-                backgroundColor: "rgba(0,0,0,0.45)",
-                color: "#ffffff",
-                border: "1px solid rgba(255,255,255,0.16)",
-                borderRadius: "8px",
-                padding: "5px 10px",
-                fontSize: "12px"
+                backgroundColor: "var(--surface-inset, #101010)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
+                borderRadius: "6px",
+                padding: "4px 8px",
+                fontSize: "11px"
               }
             },
             agentsList.map(
               (a) => {
                 var _a;
-                return h(
-                  "option",
-                  { key: a.key, value: a.key },
-                  `${a.name || a.key} (atual: ${((_a = a.config) == null ? void 0 : _a.model) || "padrão"})`
-                );
+                return h("option", { key: a.key, value: a.key }, `${a.name || a.key} (${((_a = a.config) == null ? void 0 : _a.model) || "padrão"})`);
               }
             )
+          ),
+          activeWinner && h(
+            "button",
+            {
+              onClick: () => handleApplyModel(activeWinner.model, activeWinner.group),
+              disabled: applyingModel !== null,
+              style: {
+                borderRadius: "6px",
+                padding: "5px 10px",
+                backgroundColor: "var(--affordance-subtle, #282828)",
+                border: "1px solid var(--border-primary, #3a3a3a)",
+                color: "var(--text-primary, #ffffff)",
+                fontSize: "11px",
+                fontWeight: "600",
+                cursor: "pointer"
+              }
+            },
+            "Aplicar #1"
           )
-        ),
-        topOverall && h(
-          "button",
-          {
-            onClick: () => handleApplyModelToSelectedAgent(topOverall),
-            disabled: applyingModel !== null,
-            style: {
-              borderRadius: "9999px",
-              padding: "6px 14px",
-              backgroundColor: "rgba(56, 189, 248, 0.18)",
-              border: "1px solid rgba(56, 189, 248, 0.45)",
-              color: "#7dd3fc",
-              fontSize: "11px",
-              fontWeight: "700",
-              cursor: "pointer"
-            }
-          },
-          `Aplicar #1 (${topOverall.model})`
         )
       ),
-      // Tabela Completa de Ranking
+      // 3. Tabela minimalista de Ranking + Controle de Auto-Designação por Modelo
       h(
         "div",
         {
           style: {
-            backgroundColor: "rgba(255, 255, 255, 0.02)",
-            border: "1px solid rgba(255, 255, 255, 0.07)",
-            borderRadius: "14px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+            borderRadius: "10px",
             overflowX: "auto"
           }
         },
@@ -983,65 +1128,127 @@ function createModelRankingTabComponent(ctx, groups) {
             null,
             h(
               "tr",
-              { style: { borderBottom: "1px solid rgba(255,255,255,0.08)", textAlign: "left", color: "#9ca3af", fontSize: "10px", textTransform: "uppercase" } },
-              ["#", "Modelo", "Grupo", "Score", "Saúde / Ping", "Chamadas", "Latência Média", "Cache Hit", "Custo", "Ação"].map(
-                (col) => h("th", { key: col, style: { padding: "10px 12px", fontWeight: "700" } }, col)
+              {
+                style: {
+                  borderBottom: "1px solid var(--border-primary, #2e2e2e)",
+                  textAlign: "left",
+                  color: "var(--text-tertiary, #808080)",
+                  fontSize: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em"
+                }
+              },
+              ["#", "Modelo", "Auto-Designação", "Score", "Saúde", "Chamadas", "Latência", "Custo", "Ações"].map(
+                (col) => h("th", { key: col, style: { padding: "9px 12px", fontWeight: "600" } }, col)
               )
             )
           ),
           h(
             "tbody",
             null,
-            visibleRows.map((row, idx) => {
-              const healthLabel = row.online === true ? `HTTP 200 · ${fmtMs(row.pingLatencyMs)}` : row.online === false ? `Erro · ${row.pingError || "Falha"}` : "Não testado";
-              const healthColor = row.online === true ? "#10b981" : row.online === false ? "#f87171" : "#9ca3af";
+            visibleRows.length === 0 ? h(
+              "tr",
+              null,
+              h(
+                "td",
+                { colSpan: 9, style: { padding: "24px", textAlign: "center", color: "var(--text-tertiary, #808080)" } },
+                "Nenhum modelo corresponde aos critérios atuais."
+              )
+            ) : visibleRows.map((row, idx) => {
+              const isPinned = pinnedForTier === row.model;
+              const healthLabel = row.online === true ? `OK · ${fmtMs(row.pingLatencyMs)}` : row.online === false ? `Erro` : "—";
+              const healthColor = row.online === true ? "var(--green-11, #3dd68c)" : row.online === false ? "var(--red-11, #ff9592)" : "var(--text-tertiary, #808080)";
               return h(
                 "tr",
                 {
                   key: row.model,
                   style: {
                     borderBottom: "1px solid rgba(255,255,255,0.04)",
-                    backgroundColor: idx === 0 ? "rgba(16, 185, 129, 0.05)" : "transparent"
+                    opacity: row.autoAssignBlocked ? 0.65 : 1
                   }
                 },
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontWeight: "700", color: idx < 3 ? "#10b981" : "#9ca3af" } }, `#${idx + 1}`),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #808080)" } }, `${idx + 1}`),
                 h(
                   "td",
-                  { style: { padding: "10px 12px", fontWeight: "600", color: "#ffffff" } },
-                  row.model,
+                  { style: { padding: "8px 12px", fontWeight: "500", color: "var(--text-primary, #ffffff)" } },
+                  h("span", null, row.model),
+                  h(
+                    "span",
+                    { style: { marginLeft: "6px", fontSize: "10px", color: "var(--text-tertiary, #808080)", fontFamily: "monospace" } },
+                    row.group.replace("nexusmind_", "")
+                  ),
                   row.isFree && h(
                     "span",
-                    { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "rgba(245,158,11,0.2)", color: "#fbbf24" } },
+                    { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "var(--affordance-subtle, #282828)", color: "var(--text-secondary, #c7c7c7)" } },
                     "FREE"
+                  ),
+                  isPinned && h(
+                    "span",
+                    { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "var(--green-3, #132d21)", color: "var(--green-11, #3dd68c)" } },
+                    "FIXADO"
                   )
                 ),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontSize: "11px", color: "#9ca3af" } }, row.group.replace("nexusmind_", "")),
+                // Toggle 1-clique Auto vs Manual (Proibido p/ auto-designação)
                 h(
                   "td",
-                  { style: { padding: "10px 12px", fontFamily: "monospace", fontWeight: "700", color: row.score >= 75 ? "#34d399" : row.score >= 55 ? "#fbbf24" : "#f87171" } },
-                  `${row.score}`
+                  { style: { padding: "8px 12px" } },
+                  h(
+                    "button",
+                    {
+                      onClick: () => toggleAutoAssignBlock(row.model),
+                      title: row.autoAssignBlocked ? "Bloqueado para designação automática (clique para liberar)" : "Permitido para designação automática (clique para restringir a uso manual)",
+                      style: {
+                        padding: "3px 8px",
+                        borderRadius: "5px",
+                        border: `1px solid ${row.autoAssignBlocked ? "var(--amber-7, #714f19)" : "var(--border-primary, #333333)"}`,
+                        backgroundColor: row.autoAssignBlocked ? "var(--amber-3, #302008)" : "transparent",
+                        color: row.autoAssignBlocked ? "var(--amber-11, #ffca16)" : "var(--text-secondary, #c7c7c7)",
+                        fontSize: "11px",
+                        fontWeight: "500",
+                        cursor: "pointer"
+                      }
+                    },
+                    row.autoAssignBlocked ? "Manual (Bloq.)" : "Auto ✓"
+                  )
                 ),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontSize: "11px", color: healthColor } }, healthLabel),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#e4e4e7" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, fmtMs(row.avgDurationMs)),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, row.cacheHitPct !== null ? `${row.cacheHitPct}%` : "—"),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, fmtCost(row.avgCostUsd)),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, `${row.score}`),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", fontSize: "11px", color: healthColor } }, healthLabel),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-secondary, #c7c7c7)" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs)),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd)),
                 h(
                   "td",
-                  { style: { padding: "10px 12px", whiteSpace: "nowrap" } },
+                  { style: { padding: "8px 12px", whiteSpace: "nowrap" } },
                   h(
                     "div",
-                    { style: { display: "flex", gap: "6px" } },
+                    { style: { display: "flex", gap: "5px" } },
+                    h(
+                      "button",
+                      {
+                        onClick: () => togglePinForTier(row.model),
+                        title: isPinned ? "Desafixar deste tier" : `Fixar como padrão para ${selectedTier}`,
+                        style: {
+                          padding: "3px 7px",
+                          borderRadius: "5px",
+                          border: "1px solid var(--border-primary, #333333)",
+                          backgroundColor: isPinned ? "var(--affordance-selected, #333333)" : "transparent",
+                          color: "var(--text-secondary, #c7c7c7)",
+                          fontSize: "10px",
+                          cursor: "pointer"
+                        }
+                      },
+                      isPinned ? "Desafixar" : "Fixar"
+                    ),
                     h(
                       "button",
                       {
                         onClick: () => onTestSingleModel(row.model),
                         style: {
-                          padding: "4px 8px",
-                          borderRadius: "6px",
-                          border: "1px solid rgba(255,255,255,0.12)",
-                          backgroundColor: "rgba(255,255,255,0.06)",
-                          color: "#e4e4e7",
+                          padding: "3px 7px",
+                          borderRadius: "5px",
+                          border: "1px solid var(--border-primary, #333333)",
+                          backgroundColor: "transparent",
+                          color: "var(--text-secondary, #c7c7c7)",
                           fontSize: "10px",
                           cursor: "pointer"
                         }
@@ -1051,16 +1258,16 @@ function createModelRankingTabComponent(ctx, groups) {
                     agentsList.length > 0 && h(
                       "button",
                       {
-                        onClick: () => handleApplyModelToSelectedAgent(row),
+                        onClick: () => handleApplyModel(row.model, row.group),
                         disabled: applyingModel === row.model,
                         style: {
-                          padding: "4px 9px",
-                          borderRadius: "6px",
-                          border: "1px solid rgba(56,189,248,0.4)",
-                          backgroundColor: "rgba(56,189,248,0.14)",
-                          color: "#38bdf8",
+                          padding: "3px 8px",
+                          borderRadius: "5px",
+                          border: "none",
+                          backgroundColor: "var(--affordance-subtle, #282828)",
+                          color: "var(--text-primary, #ffffff)",
                           fontSize: "10px",
-                          fontWeight: "700",
+                          fontWeight: "600",
                           cursor: "pointer"
                         }
                       },
@@ -1213,7 +1420,7 @@ const SVG_ICONS = {
 };
 const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions"];
 const ICON = "data:image/svg+xml;base64," + btoa(
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="nm" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#nm)"/><circle cx="32" cy="32" r="19" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="2.5"/><path d="M21 42V22l22 20V22" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="21" cy="22" r="3.5" fill="#ffffff"/><circle cx="43" cy="42" r="3.5" fill="#ffffff"/><circle cx="43" cy="22" r="3.5" fill="#d1fae5"/><circle cx="21" cy="42" r="3.5" fill="#d1fae5"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#e6e6e6" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M5 18V6l14 12V6"/><circle cx="5" cy="6" r="1.5" fill="#e6e6e6" stroke="none"/><circle cx="19" cy="18" r="1.5" fill="#e6e6e6" stroke="none"/></svg>'
 );
 const CANONICAL_GROUPS = {
   nexusmind_openai: {
@@ -1477,6 +1684,7 @@ function apply(ctx) {
     });
     const [modelTests, setModelTests] = React.useState({});
     const [activeSection, setActiveSection] = React.useState("catalog");
+    const [showGatewayDetails, setShowGatewayDetails] = React.useState(false);
     const ModelRankingTab = React.useMemo(
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS),
       []
@@ -1939,6 +2147,38 @@ subprocess.run([sys.executable, script_path])
       }
       setDisabledModels(next);
       localStorage.setItem("nexusmind_disabled_models", JSON.stringify(next));
+    };
+    const handleEnableFilteredBulk = () => {
+      const idsToEnable = new Set(filteredModels.map((m) => m.id));
+      if (idsToEnable.size === 0) return;
+      const next = disabledModels.filter((id) => !idsToEnable.has(id));
+      setDisabledModels(next);
+      localStorage.setItem("nexusmind_disabled_models", JSON.stringify(next));
+      setStatusMessage({ type: "success", text: `${idsToEnable.size} modelo(s) filtrado(s) ativados em massa.` });
+    };
+    const handleDisableFilteredBulk = () => {
+      const idsToDisable = filteredModels.map((m) => m.id).filter(Boolean);
+      if (idsToDisable.length === 0) return;
+      const next = Array.from(/* @__PURE__ */ new Set([...disabledModels, ...idsToDisable]));
+      setDisabledModels(next);
+      localStorage.setItem("nexusmind_disabled_models", JSON.stringify(next));
+      setStatusMessage({ type: "info", text: `${idsToDisable.length} modelo(s) filtrado(s) desativados em massa.` });
+    };
+    const handleDisableFreeBulk = () => {
+      const freeIds = models.map((m) => m.id).filter((id) => {
+        const low = String(id || "").toLowerCase();
+        return low.includes(":free") || low.includes("-free") || low.endsWith("free");
+      });
+      if (freeIds.length === 0) return;
+      const next = Array.from(/* @__PURE__ */ new Set([...disabledModels, ...freeIds]));
+      setDisabledModels(next);
+      localStorage.setItem("nexusmind_disabled_models", JSON.stringify(next));
+      setStatusMessage({ type: "info", text: `${freeIds.length} modelo(s) :free desativados em massa.` });
+    };
+    const handleToggleAllFiltered = () => {
+      const allActive = filteredModels.length > 0 && filteredModels.every((m) => !disabledModels.includes(m.id));
+      if (allActive) handleDisableFilteredBulk();
+      else handleEnableFilteredBulk();
     };
     const handleSyncModelsToBuzz = async () => {
       setLoadingSync(true);
@@ -2634,7 +2874,7 @@ print("SYNC_SUCCESS")
             paddingBottom: "48px"
           }
         },
-        // 1. TOP HEADER & IDENTITY BAR
+        // 1. BUZZ-NATIVE MINIMALIST HEADER (SEM CARD DENTRO DE CARD, SEM NEON)
         h(
           "div",
           {
@@ -2643,123 +2883,106 @@ print("SYNC_SUCCESS")
               alignItems: "center",
               justifyContent: "space-between",
               flexWrap: "wrap",
-              gap: "16px",
-              paddingBottom: "20px",
-              borderBottom: "1px solid rgba(255, 255, 255, 0.08)"
+              gap: "12px",
+              paddingBottom: "14px",
+              borderBottom: "1px solid var(--border-primary, #333333)"
             }
           },
-          // Header Brand & Title
+          // Left: Title + Primary Tabs inline
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "14px" } },
+            { style: { display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" } },
+            h(
+              "div",
+              { style: { display: "flex", alignItems: "center", gap: "8px" } },
+              h(
+                "h1",
+                {
+                  style: {
+                    fontSize: "16px",
+                    fontWeight: "600",
+                    margin: 0,
+                    color: "var(--text-primary, #ffffff)",
+                    letterSpacing: "-0.01em"
+                  }
+                },
+                "NexusMind"
+              ),
+              h("span", {
+                title: "Conectado",
+                style: {
+                  width: "7px",
+                  height: "7px",
+                  borderRadius: "50%",
+                  backgroundColor: "var(--green-11, #3dd68c)",
+                  display: "inline-block"
+                }
+              })
+            ),
             h(
               "div",
               {
                 style: {
-                  width: "44px",
-                  height: "44px",
-                  borderRadius: "14px",
-                  background: "linear-gradient(135deg, #10b981 0%, #06b6d4 100%)",
-                  display: "flex",
+                  display: "inline-flex",
                   alignItems: "center",
-                  justifyContent: "center",
-                  color: "#000000",
-                  boxShadow: "0 4px 16px rgba(16, 185, 129, 0.25)"
+                  gap: "2px",
+                  backgroundColor: "var(--bg-panel, #1a1a1a)",
+                  border: "1px solid var(--border-primary, #333333)",
+                  borderRadius: "8px",
+                  padding: "2px"
                 }
               },
-              SVG_ICONS.dashboard({ h, width: 22, height: 22 })
-            ),
-            h(
-              "div",
-              null,
-              h(
-                "div",
-                { style: { display: "flex", alignItems: "center", gap: "8px" } },
-                h(
-                  "h1",
+              [
+                { id: "catalog", label: "Modelos" },
+                { id: "ranking", label: "Ranking & Roteamento" }
+              ].map((tab) => {
+                const active = activeSection === tab.id;
+                return h(
+                  "button",
                   {
+                    key: tab.id,
+                    onClick: () => setActiveSection(tab.id),
                     style: {
-                      fontSize: "18px",
-                      fontWeight: "700",
-                      margin: 0,
-                      color: "#ffffff",
-                      letterSpacing: "-0.01em"
+                      borderRadius: "6px",
+                      padding: "5px 12px",
+                      border: "none",
+                      backgroundColor: active ? "var(--affordance-selected, #333333)" : "transparent",
+                      color: active ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
+                      fontSize: "12px",
+                      fontWeight: active ? "600" : "500",
+                      cursor: "pointer"
                     }
                   },
-                  "NexusMind Gateway"
-                ),
-                h(
-                  "span",
-                  {
-                    style: {
-                      fontSize: "11px",
-                      padding: "2px 8px",
-                      borderRadius: "9999px",
-                      backgroundColor: "rgba(16, 185, 129, 0.15)",
-                      color: "#10b981",
-                      fontWeight: "600",
-                      border: "1px solid rgba(16, 185, 129, 0.3)"
-                    }
-                  },
-                  "v2.3 OFICIAL"
-                ),
-                h(
-                  "span",
-                  {
-                    style: {
-                      fontSize: "11px",
-                      padding: "2px 8px",
-                      borderRadius: "9999px",
-                      backgroundColor: "rgba(59, 130, 246, 0.15)",
-                      color: "#60a5fa",
-                      fontWeight: "500",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "5px"
-                    }
-                  },
-                  h("span", { style: { width: "6px", height: "6px", borderRadius: "50%", backgroundColor: "#10b981" } }),
-                  "Conectado"
-                )
-              ),
-              h(
-                "p",
-                {
-                  style: {
-                    fontSize: "12px",
-                    color: "var(--text-subtle, #8e8e96)",
-                    margin: "3px 0 0"
-                  }
-                },
-                "Gateway corporativo com healthcheck live, governança e sincronização nativa para Goose e Pi."
-              )
+                  tab.label
+                );
+              })
             )
           ),
-          // Action Buttons & User Badge
+          // Right: Compact Actions & Account
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+            { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
             h(
               "button",
               {
                 onClick: handlePullModelsFromNexusMind,
                 disabled: loadingPull,
                 style: {
-                  borderRadius: "9999px",
-                  padding: "8px 18px",
-                  backgroundColor: "rgba(255, 255, 255, 0.08)",
-                  color: "#ffffff",
-                  border: "1px solid rgba(255, 255, 255, 0.12)",
+                  borderRadius: "8px",
+                  padding: "6px 12px",
+                  backgroundColor: "var(--affordance-subtle, #232323)",
+                  color: "var(--text-primary, #ffffff)",
+                  border: "1px solid var(--border-primary, #333333)",
                   cursor: loadingPull ? "not-allowed" : "pointer",
                   fontWeight: "500",
-                  fontSize: "13px",
+                  fontSize: "12px",
                   display: "flex",
                   alignItems: "center",
-                  gap: "8px"
+                  gap: "6px"
                 }
               },
-              SVG_ICONS.pull({ h, width: 14, height: 14 }),
-              loadingPull ? "Buscando..." : "1. Puxar do NexusMind"
+              SVG_ICONS.pull({ h, width: 13, height: 13 }),
+              loadingPull ? "Buscando..." : "Puxar"
             ),
             h(
               "button",
@@ -2767,43 +2990,40 @@ print("SYNC_SUCCESS")
                 onClick: handleSyncModelsToBuzz,
                 disabled: loadingSync,
                 style: {
-                  borderRadius: "9999px",
-                  padding: "8px 22px",
-                  backgroundColor: "#10b981",
-                  color: "#000000",
+                  borderRadius: "8px",
+                  padding: "6px 14px",
+                  backgroundColor: "var(--affordance-prominent, #ffffff)",
+                  color: "var(--text-on-prominent, #000000)",
                   border: "none",
                   cursor: loadingSync ? "not-allowed" : "pointer",
                   fontWeight: "600",
-                  fontSize: "13px",
+                  fontSize: "12px",
                   display: "flex",
                   alignItems: "center",
-                  gap: "8px",
-                  boxShadow: "0 2px 10px rgba(16, 185, 129, 0.3)"
+                  gap: "6px"
                 }
               },
-              SVG_ICONS.sync({ h, width: 14, height: 14 }),
-              loadingSync ? "Sincronizando..." : "2. Sincronizar no Buzz"
+              SVG_ICONS.sync({ h, width: 13, height: 13 }),
+              loadingSync ? "Sincronizando..." : "Sincronizar"
             ),
-            // User Chip
             h(
               "div",
               {
                 style: {
                   display: "flex",
                   alignItems: "center",
-                  gap: "8px",
-                  backgroundColor: "rgba(255, 255, 255, 0.05)",
-                  border: "1px solid rgba(255, 255, 255, 0.1)",
-                  borderRadius: "9999px",
-                  padding: "5px 14px",
-                  marginLeft: "6px"
+                  gap: "6px",
+                  backgroundColor: "var(--bg-panel, #1a1a1a)",
+                  border: "1px solid var(--border-primary, #333333)",
+                  borderRadius: "8px",
+                  padding: "5px 10px",
+                  fontSize: "12px"
                 }
               },
-              SVG_ICONS.user({ h, width: 14, height: 14, color: "#10b981" }),
-              h("span", { style: { fontSize: "12px", fontWeight: "600" } }, profileData.username),
+              h("span", { style: { color: "var(--text-secondary, #c7c7c7)" } }, profileData.username),
               h(
                 "span",
-                { style: { fontSize: "12px", color: "#10b981", fontWeight: "600" } },
+                { style: { color: "var(--green-11, #3dd68c)", fontWeight: "600", fontFamily: "monospace" } },
                 `$${(profileData.balance || 0).toFixed(2)}`
               ),
               h(
@@ -2814,11 +3034,11 @@ print("SYNC_SUCCESS")
                   style: {
                     background: "none",
                     border: "none",
-                    color: "#ef4444",
+                    color: "var(--text-tertiary, #a4a4a4)",
                     cursor: "pointer",
                     fontSize: "11px",
-                    padding: "2px 4px",
-                    marginLeft: "4px"
+                    padding: "0 2px",
+                    marginLeft: "2px"
                   }
                 },
                 "✕"
@@ -2826,42 +3046,38 @@ print("SYNC_SUCCESS")
             )
           )
         ),
-        // PRIMARY NAVIGATION TABS (Catálogo & Gateway | Ranking de Modelos)
-        h(
+        // 2. STATUS TOAST BANNER (COMPACT & FLAT)
+        statusMessage && h(
           "div",
           {
             style: {
+              padding: "9px 14px",
+              borderRadius: "8px",
+              fontSize: "12px",
+              fontWeight: "500",
               display: "flex",
               alignItems: "center",
-              gap: "8px",
-              borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
-              paddingBottom: "10px"
+              justifyContent: "space-between",
+              backgroundColor: "var(--bg-panel, #1a1a1a)",
+              border: `1px solid ${statusMessage.type === "success" ? "var(--green-11, #3dd68c)" : statusMessage.type === "error" ? "var(--red-11, #ff9592)" : "var(--border-primary, #333333)"}`,
+              color: statusMessage.type === "success" ? "var(--green-11, #3dd68c)" : statusMessage.type === "error" ? "var(--red-11, #ff9592)" : "var(--text-secondary, #c7c7c7)"
             }
           },
-          [
-            { id: "catalog", label: "Catálogo & Gateway" },
-            { id: "ranking", label: "Ranking de Modelos (Telemetria Real)" }
-          ].map((tab) => {
-            const active = activeSection === tab.id;
-            return h(
-              "button",
-              {
-                key: tab.id,
-                onClick: () => setActiveSection(tab.id),
-                style: {
-                  borderRadius: "9999px",
-                  padding: "7px 16px",
-                  border: active ? "1px solid rgba(16, 185, 129, 0.45)" : "1px solid rgba(255, 255, 255, 0.08)",
-                  backgroundColor: active ? "rgba(16, 185, 129, 0.16)" : "rgba(255, 255, 255, 0.03)",
-                  color: active ? "#34d399" : "#a1a1aa",
-                  fontSize: "12px",
-                  fontWeight: active ? "700" : "500",
-                  cursor: "pointer"
-                }
-              },
-              tab.label
-            );
-          })
+          h("span", null, statusMessage.text),
+          h(
+            "button",
+            {
+              onClick: () => setStatusMessage(null),
+              style: {
+                background: "none",
+                border: "none",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: "12px"
+              }
+            },
+            "✕"
+          )
         ),
         activeSection === "ranking" ? h(ModelRankingTab, {
           models,
@@ -2872,441 +3088,150 @@ print("SYNC_SUCCESS")
         }) : h(
           React.Fragment,
           null,
-          // OFFICIAL NEXUSMIND GATEWAY ENDPOINTS BAR (Matching Official Dashboard)
+          // 3. ONE-LINE SUMMARY STRIP + COLLAPSIBLE GATEWAY & ENDPOINTS
           h(
             "div",
             {
               style: {
-                display: "flex",
-                alignItems: "center",
-                gap: "10px",
-                overflowX: "auto",
-                padding: "4px 2px 8px",
-                scrollbarWidth: "none"
-              }
-            },
-            OFFICIAL_ENDPOINTS.map((ep) => {
-              const isCopied = copiedEndpoint === ep.url;
-              return h(
-                "div",
-                {
-                  key: ep.id,
-                  onClick: () => handleCopyEndpoint(ep.url, ep.label),
-                  title: `${ep.desc} — Clique para copiar (${ep.url})`,
-                  style: {
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    backgroundColor: isCopied ? "rgba(16, 185, 129, 0.15)" : "rgba(255, 255, 255, 0.04)",
-                    border: isCopied ? "1px solid rgba(16, 185, 129, 0.4)" : "1px solid rgba(255, 255, 255, 0.08)",
-                    borderRadius: "9999px",
-                    padding: "6px 14px",
-                    cursor: "pointer",
-                    fontSize: "12px",
-                    color: isCopied ? "#10b981" : "var(--text-normal, #e4e4e7)",
-                    whiteSpace: "nowrap",
-                    transition: "all 0.15s ease",
-                    flexShrink: 0
-                  }
-                },
-                h("span", { style: { fontWeight: "600", fontSize: "11px", color: "#f4f4f5" } }, ep.label),
-                h(
-                  "span",
-                  {
-                    style: {
-                      fontSize: "10px",
-                      padding: "1px 6px",
-                      borderRadius: "4px",
-                      backgroundColor: `${ep.tagColor}22`,
-                      color: ep.tagColor,
-                      fontWeight: "600",
-                      border: `1px solid ${ep.tagColor}44`
-                    }
-                  },
-                  ep.tag
-                ),
-                h("span", { style: { opacity: 0.3 } }, "|"),
-                h(
-                  "code",
-                  {
-                    style: {
-                      fontFamily: "monospace",
-                      fontSize: "11px",
-                      color: isCopied ? "#10b981" : "var(--text-subtle, #a1a1aa)"
-                    }
-                  },
-                  ep.url
-                ),
-                h(
-                  "span",
-                  {
-                    style: {
-                      display: "inline-flex",
-                      alignItems: "center",
-                      marginLeft: "2px",
-                      color: isCopied ? "#10b981" : "var(--text-subtle, #71717a)"
-                    }
-                  },
-                  isCopied ? SVG_ICONS.check({ h, width: 12, height: 12 }) : SVG_ICONS.copy({ h, width: 12, height: 12 })
-                )
-              );
-            })
-          ),
-          // 2. STATUS TOAST BANNER (IF ACTIVE)
-          statusMessage && h(
-            "div",
-            {
-              style: {
-                padding: "12px 18px",
-                borderRadius: "12px",
-                fontSize: "13px",
-                fontWeight: "500",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
-                backgroundColor: statusMessage.type === "success" ? "rgba(16, 185, 129, 0.12)" : statusMessage.type === "error" ? "rgba(239, 68, 68, 0.12)" : "rgba(59, 130, 246, 0.12)",
-                border: `1px solid ${statusMessage.type === "success" ? "rgba(16, 185, 129, 0.3)" : statusMessage.type === "error" ? "rgba(239, 68, 68, 0.3)" : "rgba(59, 130, 246, 0.3)"}`,
-                color: statusMessage.type === "success" ? "#10b981" : statusMessage.type === "error" ? "#ef4444" : "#60a5fa"
+                flexWrap: "wrap",
+                gap: "12px",
+                padding: "8px 12px",
+                backgroundColor: "var(--bg-panel, #1a1a1a)",
+                border: "1px solid var(--border-primary, #333333)",
+                borderRadius: "8px",
+                fontSize: "12px",
+                color: "var(--text-secondary, #c7c7c7)"
               }
             },
-            h("span", null, statusMessage.text),
+            h(
+              "div",
+              { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" } },
+              h(
+                "span",
+                null,
+                "Ativos: ",
+                h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, `${models.length - disabledModels.length}`),
+                h("span", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, ` / ${models.length}`)
+              ),
+              h(
+                "span",
+                null,
+                "Hoje: ",
+                h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, formatTokens(dashboardMetrics.today_tokens)),
+                ` (${formatNumber(dashboardMetrics.today_requests)} reqs)`
+              ),
+              lastSyncTime && h("span", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, `Sync: ${lastSyncTime}`)
+            ),
             h(
               "button",
               {
-                onClick: () => setStatusMessage(null),
+                onClick: () => setShowGatewayDetails((v) => !v),
                 style: {
                   background: "none",
                   border: "none",
-                  color: "inherit",
+                  color: "var(--text-secondary, #c7c7c7)",
                   cursor: "pointer",
-                  fontSize: "14px"
+                  fontSize: "11px",
+                  fontWeight: "500",
+                  padding: "2px 6px"
                 }
               },
-              "✕"
+              showGatewayDetails ? "Ocultar Gateway & Endpoints ▾" : "Gateway & Endpoints ▸"
             )
           ),
-          // 3. MICRO DASHBOARD (4 METRIC CARDS IN A BALANCED 4-COLUMN ROW)
-          h(
+          showGatewayDetails && h(
             "div",
             {
               style: {
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                gap: "16px"
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+                padding: "12px",
+                backgroundColor: "var(--bg-panel, #1a1a1a)",
+                border: "1px solid var(--border-primary, #333333)",
+                borderRadius: "8px"
               }
             },
-            // Card 1: Saldo Disponível
             h(
               "div",
-              {
-                style: {
-                  backgroundColor: "rgba(16, 185, 129, 0.04)",
-                  border: "1px solid rgba(16, 185, 129, 0.18)",
-                  borderRadius: "14px",
-                  padding: "16px 20px"
-                }
-              },
-              h(
-                "div",
-                {
-                  style: {
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    color: "#10b981",
-                    fontSize: "11px",
-                    fontWeight: "600",
-                    letterSpacing: "0.04em",
-                    marginBottom: "6px"
-                  }
-                },
-                SVG_ICONS.wallet({ h, width: 14, height: 14 }),
-                "SALDO DISPONÍVEL"
-              ),
-              h(
-                "div",
-                { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-                `$${(profileData.balance || 0).toFixed(2)} USD`
-              ),
-              h(
-                "div",
-                { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                "Recarga Total: $2,000.00 • 13 Grupos Ativos"
-              )
-            ),
-            // Card 2: Consumo Hoje
-            h(
-              "div",
-              {
-                style: {
-                  backgroundColor: "rgba(59, 130, 246, 0.04)",
-                  border: "1px solid rgba(59, 130, 246, 0.18)",
-                  borderRadius: "14px",
-                  padding: "16px 20px"
-                }
-              },
-              h(
-                "div",
-                {
-                  style: {
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    color: "#60a5fa",
-                    fontSize: "11px",
-                    fontWeight: "600",
-                    letterSpacing: "0.04em",
-                    marginBottom: "6px"
-                  }
-                },
-                SVG_ICONS.pulse({ h, width: 14, height: 14 }),
-                "CONSUMO HOJE"
-              ),
-              h(
-                "div",
-                { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-                `${formatTokens(dashboardMetrics.today_tokens)} tokens`
-              ),
-              h(
-                "div",
-                { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                `${formatNumber(dashboardMetrics.today_requests)} requisições ($${dashboardMetrics.today_cost.toFixed(2)})`
-              )
-            ),
-            // Card 3: Histórico Acumulado
-            h(
-              "div",
-              {
-                style: {
-                  backgroundColor: "rgba(168, 85, 247, 0.04)",
-                  border: "1px solid rgba(168, 85, 247, 0.18)",
-                  borderRadius: "14px",
-                  padding: "16px 20px"
-                }
-              },
-              h(
-                "div",
-                {
-                  style: {
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    color: "#c084fc",
-                    fontSize: "11px",
-                    fontWeight: "600",
-                    letterSpacing: "0.04em",
-                    marginBottom: "6px"
-                  }
-                },
-                SVG_ICONS.dashboard({ h, width: 14, height: 14 }),
-                "HISTÓRICO ACUMULADO"
-              ),
-              h(
-                "div",
-                { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-                `${formatTokens(dashboardMetrics.total_tokens)} tokens`
-              ),
-              h(
-                "div",
-                { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                `${formatNumber(dashboardMetrics.total_requests)} requisições ($${dashboardMetrics.total_cost.toFixed(2)})`
-              )
-            ),
-            // Card 4: Governança & Harness
-            h(
-              "div",
-              {
-                style: {
-                  backgroundColor: "rgba(255, 255, 255, 0.03)",
-                  border: "1px solid rgba(255, 255, 255, 0.08)",
-                  borderRadius: "14px",
-                  padding: "16px 20px"
-                }
-              },
-              h(
-                "div",
-                {
-                  style: {
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    color: "#e2e8f0",
-                    fontSize: "11px",
-                    fontWeight: "600",
-                    letterSpacing: "0.04em",
-                    marginBottom: "6px"
-                  }
-                },
-                SVG_ICONS.shield({ h, width: 14, height: 14 }),
-                "GOVERNANÇA & HARNESS"
-              ),
-              h(
-                "div",
-                { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-                `${models.length - disabledModels.length} Ativos / ${disabledModels.length} Inativos`
-              ),
-              h(
-                "div",
-                { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                lastSyncTime ? `Sincronizado: ${lastSyncTime}` : "Pronto para Goose & Pi"
-              )
-            )
-          ),
-          // 4. OS 4 GRUPOS CANÔNICOS (GRID PERFEITO DE 4 COLUNAS, ZERO "3 E 1", ZERO POLUIÇÃO)
-          h(
-            "div",
-            {
-              style: {
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
-                gap: "16px"
-              }
-            },
-            Object.entries(CANONICAL_GROUPS).map(([pid, group]) => {
-              var _a2;
-              const isSelected = selectedGroupTab === pid;
-              const getLiveSummary = (groupId, staticSummary) => {
-                const platformMap = {
-                  nexusmind_openai: "openai",
-                  nexusmind_anthropic: "anthropic",
-                  nexusmind_antigravity: "antigravity",
-                  nexusmind_grok: "grok"
-                };
-                const platform = platformMap[groupId];
-                if (!platform || !(dashboardMetrics == null ? void 0 : dashboardMetrics.by_platform)) return staticSummary;
-                const p = dashboardMetrics.by_platform.find((x) => x.platform === platform);
-                if (!p) return staticSummary;
-                const tokens = p.today_tokens || 0;
-                const reqs = p.today_requests || 0;
-                const fmtTokens = tokens >= 1e9 ? `${(tokens / 1e9).toFixed(1)}B` : tokens >= 1e6 ? `${(tokens / 1e6).toFixed(1)}M` : tokens >= 1e3 ? `${(tokens / 1e3).toFixed(1)}k` : `${tokens}`;
-                return `Hoje: ${fmtTokens} tokens • ${reqs.toLocaleString()} reqs`;
-              };
-              return h(
-                "div",
-                {
-                  key: pid,
-                  style: {
-                    backgroundColor: isSelected ? "rgba(255, 255, 255, 0.05)" : "rgba(255, 255, 255, 0.02)",
-                    border: `1px solid ${isSelected ? group.accentColor : "rgba(255, 255, 255, 0.08)"}`,
-                    borderRadius: "14px",
-                    padding: "16px 18px",
-                    display: "flex",
-                    flexDirection: "column",
-                    justifyContent: "space-between",
-                    gap: "10px",
-                    transition: "all 0.15s ease"
-                  }
-                },
-                // Group Header (Official SVG Logo + Name + Status)
-                h(
-                  "div",
+              { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
+              OFFICIAL_ENDPOINTS.map((ep) => {
+                const isCopied = copiedEndpoint === ep.url;
+                return h(
+                  "button",
                   {
+                    key: ep.id,
+                    onClick: () => handleCopyEndpoint(ep.url, ep.label),
+                    title: `${ep.desc} — Clique para copiar`,
                     style: {
-                      display: "flex",
+                      display: "inline-flex",
                       alignItems: "center",
-                      justifyContent: "space-between"
+                      gap: "6px",
+                      backgroundColor: "var(--affordance-subtle, #232323)",
+                      border: `1px solid ${isCopied ? "var(--green-11, #3dd68c)" : "var(--border-primary, #333333)"}`,
+                      borderRadius: "6px",
+                      padding: "4px 10px",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      color: isCopied ? "var(--green-11, #3dd68c)" : "var(--text-secondary, #c7c7c7)"
                     }
                   },
-                  h(
-                    "div",
-                    { style: { display: "flex", alignItems: "center", gap: "10px" } },
-                    h(
-                      "div",
-                      {
-                        style: {
-                          width: "34px",
-                          height: "34px",
-                          borderRadius: "10px",
-                          backgroundColor: "rgba(255, 255, 255, 0.06)",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          color: group.accentColor
-                        }
-                      },
-                      (_a2 = SVG_ICONS[group.logoKey]) == null ? void 0 : _a2.call(SVG_ICONS, { h, width: 20, height: 20 })
-                    ),
-                    h(
-                      "div",
-                      null,
-                      h("div", { style: { fontWeight: "600", fontSize: "14px", color: "#ffffff" } }, group.groupName),
-                      h("div", { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } }, pid)
-                    )
-                  ),
-                  h(
-                    "span",
-                    {
-                      style: {
-                        fontSize: "10px",
-                        padding: "2px 7px",
-                        borderRadius: "9999px",
-                        backgroundColor: "rgba(16, 185, 129, 0.15)",
-                        color: "#10b981",
-                        fontWeight: "600"
-                      }
-                    },
-                    "Ativo"
-                  )
-                ),
-                // Middle Telemetry Metric (Clean & Concise)
-                h(
-                  "div",
-                  { style: { fontSize: "12px", color: "#d1d5db", fontWeight: "500" } },
-                  getLiveSummary(group.id, group.telemetrySummary)
-                ),
-                // Bottom Filter Pill (Quick Filter to view models in this group)
-                h(
+                  h("span", { style: { fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, ep.label),
+                  h("code", { style: { fontFamily: "monospace", fontSize: "11px" } }, ep.url)
+                );
+              })
+            ),
+            h(
+              "div",
+              {
+                style: {
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+                  gap: "8px"
+                }
+              },
+              Object.entries(CANONICAL_GROUPS).map(
+                ([pid, group]) => h(
                   "div",
                   {
+                    key: pid,
                     style: {
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "space-between",
-                      paddingTop: "8px",
-                      borderTop: "1px solid rgba(255, 255, 255, 0.06)"
+                      padding: "8px 10px",
+                      backgroundColor: "var(--bg-app, #101010)",
+                      border: "1px solid var(--border-primary, #333333)",
+                      borderRadius: "6px",
+                      fontSize: "11px"
                     }
                   },
                   h(
-                    "span",
-                    { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                    `Padrão: ${group.defaultModel.split("/").pop()}`
+                    "div",
+                    null,
+                    h("div", { style: { fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, group.groupName),
+                    h("div", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, `Padrão: ${group.defaultModel.split("/").pop()}`)
                   ),
                   h(
-                    "button",
-                    {
-                      onClick: () => {
-                        setSelectedGroupTab(isSelected ? "all" : pid);
-                        setCurrentPage(1);
-                      },
-                      style: {
-                        borderRadius: "9999px",
-                        padding: "3px 10px",
-                        backgroundColor: isSelected ? group.accentColor : "rgba(255, 255, 255, 0.08)",
-                        color: isSelected ? "#000000" : "#ffffff",
-                        border: "none",
-                        fontSize: "11px",
-                        fontWeight: "600",
-                        cursor: "pointer"
-                      }
-                    },
-                    `${groupCounts[pid] ?? group.modelsCount} modelos`
+                    "span",
+                    { style: { color: "var(--text-secondary, #c7c7c7)", fontFamily: "monospace" } },
+                    `${groupCounts[pid] ?? group.modelsCount}`
                   )
                 )
-              );
-            })
+              )
+            )
           ),
-          // 5. CATALOG WORKSPACE & MODEL MANAGEMENT
+          // 5. CATALOG WORKSPACE & MODEL MANAGEMENT (FLAT, SEM BONECA RUSSA)
           h(
             "div",
             {
               style: {
-                backgroundColor: "rgba(255, 255, 255, 0.02)",
-                border: "1px solid rgba(255, 255, 255, 0.07)",
-                borderRadius: "16px",
-                padding: "22px 24px",
                 display: "flex",
                 flexDirection: "column",
-                gap: "18px"
+                gap: "12px"
               }
             },
             // Header Controls (Filter Tabs + Search Bar)
@@ -3527,71 +3452,92 @@ print("SYNC_SUCCESS")
                 );
               })
             ),
-            // Batch Action Bar
-            h(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  backgroundColor: "rgba(0, 0, 0, 0.2)",
-                  borderRadius: "10px",
-                  padding: "8px 14px"
-                }
-              },
-              h(
+            // Batch Action Bar (Seleção & Gestão em Massa — Padrão Buzz)
+            (() => {
+              const allFilteredActive = filteredModels.length > 0 && filteredModels.every((m) => !disabledModels.includes(m.id));
+              const btnNeutral = {
+                borderRadius: "6px",
+                padding: "4px 10px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                color: "var(--text-secondary, #c7c7c7)",
+                border: "1px solid var(--border-primary, #333333)",
+                cursor: "pointer",
+                fontSize: "11px",
+                fontWeight: "500",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "5px"
+              };
+              return h(
                 "div",
-                { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
-                disabledModels.length > 0 ? `${disabledModels.length} modelo(s) desativado(s) serão expurgados do Buzz.` : "Todos os modelos listados estão ativos para sincronização."
-              ),
-              h(
-                "div",
-                { style: { display: "flex", gap: "8px" } },
+                {
+                  style: {
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    flexWrap: "wrap",
+                    gap: "10px",
+                    backgroundColor: "var(--bg-panel, #1a1a1a)",
+                    border: "1px solid var(--border-primary, #333333)",
+                    borderRadius: "8px",
+                    padding: "8px 12px"
+                  }
+                },
                 h(
-                  "button",
+                  "label",
                   {
-                    onClick: handleBatchTestVisible,
                     style: {
-                      borderRadius: "9999px",
-                      padding: "5px 12px",
-                      backgroundColor: "rgba(59, 130, 246, 0.12)",
-                      color: "#60a5fa",
-                      border: "1px solid rgba(59, 130, 246, 0.25)",
-                      cursor: "pointer",
-                      fontSize: "11px",
-                      fontWeight: "600",
-                      display: "flex",
+                      display: "inline-flex",
                       alignItems: "center",
-                      gap: "5px"
+                      gap: "8px",
+                      fontSize: "12px",
+                      color: "var(--text-secondary, #c7c7c7)",
+                      cursor: "pointer"
                     }
                   },
-                  SVG_ICONS.sparkles({ h, width: 12, height: 12 }),
-                  "Testar Visíveis"
+                  h("input", {
+                    type: "checkbox",
+                    checked: allFilteredActive,
+                    onChange: handleToggleAllFiltered,
+                    style: { cursor: "pointer", accentColor: "#ffffff", width: "14px", height: "14px" }
+                  }),
+                  h(
+                    "span",
+                    null,
+                    allFilteredActive ? `Todos os ${filteredModels.length} filtrados ativos` : `Selecionar todos os ${filteredModels.length} filtrados`
+                  ),
+                  disabledModels.length > 0 && h(
+                    "span",
+                    { style: { color: "var(--text-tertiary, #a4a4a4)", fontSize: "11px" } },
+                    `· ${disabledModels.length} desativados`
+                  )
                 ),
                 h(
-                  "button",
-                  {
-                    onClick: handleBatchDisableUnavailable,
-                    style: {
-                      borderRadius: "9999px",
-                      padding: "5px 12px",
-                      backgroundColor: "rgba(239, 68, 68, 0.12)",
-                      color: "#f87171",
-                      border: "1px solid rgba(239, 68, 68, 0.25)",
-                      cursor: "pointer",
-                      fontSize: "11px",
-                      fontWeight: "600",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "5px"
-                    }
-                  },
-                  SVG_ICONS.shield({ h, width: 12, height: 12 }),
-                  "Desativar Indisponíveis"
+                  "div",
+                  { style: { display: "flex", gap: "6px", flexWrap: "wrap" } },
+                  h("button", { onClick: handleEnableFilteredBulk, style: btnNeutral }, "Ativar filtrados"),
+                  h("button", { onClick: handleDisableFilteredBulk, style: btnNeutral }, "Desativar filtrados"),
+                  h("button", { onClick: handleDisableFreeBulk, style: btnNeutral }, "Desativar :free"),
+                  h(
+                    "button",
+                    { onClick: handleBatchTestVisible, style: btnNeutral },
+                    SVG_ICONS.sparkles({ h, width: 12, height: 12 }),
+                    "Testar visíveis"
+                  ),
+                  h(
+                    "button",
+                    {
+                      onClick: handleBatchDisableUnavailable,
+                      style: {
+                        ...btnNeutral,
+                        color: "var(--red-11, #ff9592)"
+                      }
+                    },
+                    "Desativar c/ erro"
+                  )
                 )
-              )
-            ),
+              );
+            })(),
             // Ranking Rápido de Healthcheck (apenas quando há modelos testados ao vivo)
             (() => {
               const tested = Object.entries(modelTests).filter(([, t]) => t.status === "ok" || t.status === "error");
@@ -4515,6 +4461,7 @@ Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model 
             if (raw) cachedModels = JSON.parse(raw);
           } catch {
           }
+          const savedPolicy = loadSavedRoutingPolicy();
           const snap = buildModelRankingSnapshot({
             catalogModels: cachedModels,
             groups: CANONICAL_GROUPS,
@@ -4522,7 +4469,8 @@ Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model 
             usageSampleSize: usage.sampleSize,
             liveProbes,
             tier,
-            avoidFree
+            avoidFree: savedPolicy.forceFree ? false : avoidFree,
+            policy: savedPolicy
           });
           await persistModelRankingSnapshot(ctx, snap);
           return JSON.stringify(

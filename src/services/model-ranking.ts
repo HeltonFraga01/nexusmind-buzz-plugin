@@ -1,9 +1,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXUSMIND MODEL RANKING ENGINE (v2.5)
-// Combina telemetria real do Gateway (~/.buzz/.scratch/nm_usage.json),
-// healthcheck ao vivo (ctx.host.request) e capacidade por tier para gerar
-// um ranking transparente e compartilhado (~/.buzz/.scratch/nexusmind-model-ranking.json)
-// consumido tanto pela aba "Ranking" do NexusMind quanto pelo plugin OrgFy e agentes.
+// NEXUSMIND MODEL RANKING & POLICY ROUTING ENGINE (v2.6)
+// Combina telemetria real do Gateway (~/.buzz/.scratch/nm_usage_summary.json),
+// healthcheck ao vivo (ctx.host.request), capacidade por tier e políticas do usuário:
+//   - strategy: balanced | speed | quality | cost
+//   - forceFree: forçar modelos :free na seleção automática
+//   - maxCostPerReqUsd: teto de custo por requisição (evita modelos caros em tarefas simples)
+//   - autoAssignBlocked: modelos proibidos para designação automática (uso apenas manual)
+//   - tierPins: modelo fixado manualmente por tier
+// Persiste snapshot em ~/.buzz/.scratch/nexusmind-model-ranking.json para OrgFy e agentes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { Context } from "@buzz/author";
@@ -15,6 +19,23 @@ import {
 } from "./smart-router";
 
 export type RankingTier = "geral" | NexusTier;
+export type RoutingStrategy = "balanced" | "speed" | "quality" | "cost";
+
+export interface RoutingPolicy {
+  strategy: RoutingStrategy;
+  forceFree: boolean;
+  maxCostPerReqUsd: number | null;
+  autoAssignBlocked: string[];
+  tierPins: Partial<Record<RankingTier, string>>;
+}
+
+export const DEFAULT_ROUTING_POLICY: RoutingPolicy = {
+  strategy: "balanced",
+  forceFree: false,
+  maxCostPerReqUsd: null,
+  autoAssignBlocked: [],
+  tierPins: {},
+};
 
 export interface GatewayUsageMetrics {
   calls: number;
@@ -39,12 +60,14 @@ export interface RankedGatewayModel {
   platform: string;
   isFree: boolean;
   isDisabled: boolean;
+  autoAssignBlocked: boolean;
+  eligibleForAuto: boolean;
   score: number;
   capabilityScore: number;
   tierMatchScore: number;
   adoptionScore: number;
   speedScore: number;
-  online: boolean | null; // true=HTTP 200, false=HTTP error, null=não testado ainda
+  online: boolean | null;
   pingLatencyMs: number | null;
   pingError?: string;
   calls: number;
@@ -65,24 +88,54 @@ export interface BestTierSummary {
   online: boolean | null;
   avgCostUsd: number;
   cacheHitPct: number | null;
+  pinned?: boolean;
 }
 
 export interface ModelRankingSnapshot {
-  version: 1;
+  version: 2;
   generatedAt: string;
   source: "gateway_usage+live_probe" | "gateway_usage" | "live_probe" | "catalog";
   usageSampleSize: number;
   tier: RankingTier;
+  policy: RoutingPolicy;
   bestByTier: Record<RankingTier, BestTierSummary | null>;
   models: RankedGatewayModel[];
 }
 
 export const SHARED_RANKING_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-model-ranking.json";
+export const SHARED_USAGE_SUMMARY_PATHS = [
+  "/Users/heltonfraga/.buzz/.scratch/nm_usage_summary.json",
+  "~/.buzz/.scratch/nm_usage_summary.json",
+];
 export const SHARED_USAGE_PATHS = [
   "/Users/heltonfraga/.buzz/.scratch/nm_usage.json",
   "~/.buzz/.scratch/nm_usage.json",
 ];
 export const LOCAL_STORAGE_RANKING_KEY = "nexusmind_model_ranking";
+export const LOCAL_STORAGE_POLICY_KEY = "nexusmind_routing_policy";
+
+export function loadSavedRoutingPolicy(): RoutingPolicy {
+  try {
+    const raw = (globalThis as any)?.localStorage?.getItem?.(LOCAL_STORAGE_POLICY_KEY);
+    if (!raw) return { ...DEFAULT_ROUTING_POLICY };
+    const p = JSON.parse(raw);
+    return {
+      strategy: ["balanced", "speed", "quality", "cost"].includes(p?.strategy) ? p.strategy : "balanced",
+      forceFree: Boolean(p?.forceFree),
+      maxCostPerReqUsd: typeof p?.maxCostPerReqUsd === "number" && p.maxCostPerReqUsd > 0 ? p.maxCostPerReqUsd : null,
+      autoAssignBlocked: Array.isArray(p?.autoAssignBlocked) ? p.autoAssignBlocked.map(String) : [],
+      tierPins: p?.tierPins && typeof p.tierPins === "object" ? { ...p.tierPins } : {},
+    };
+  } catch {
+    return { ...DEFAULT_ROUTING_POLICY };
+  }
+}
+
+export function saveRoutingPolicy(policy: RoutingPolicy): void {
+  try {
+    (globalThis as any)?.localStorage?.setItem?.(LOCAL_STORAGE_POLICY_KEY, JSON.stringify(policy));
+  } catch {}
+}
 
 function decodeFileContent(raw: unknown): string {
   if (typeof raw === "string") return raw;
@@ -112,8 +165,9 @@ export function inferCanonicalGroupForModel(
 }
 
 /**
- * Lê telemetria real de uso do Gateway NexusMind (~/.buzz/.scratch/nm_usage.json)
- * agregando chamadas, duração média, TTFT, cache hit % e custo por modelo.
+ * Lê telemetria real de uso do Gateway NexusMind:
+ * 1. Prioriza ~/.buzz/.scratch/nm_usage_summary.json (~42 KB, instantâneo na WebView)
+ * 2. Fallback para ~/.buzz/.scratch/nm_usage.json (para execução em Node/testes)
  */
 export async function loadGatewayUsageByModel(
   ctx: Context
@@ -123,12 +177,27 @@ export async function loadGatewayUsageByModel(
     return { sampleSize: 0, byModel: {} };
   }
 
+  // 1. Leitura ultrarrápida do resumo pré-agregado (~42 KB)
+  for (const path of SHARED_USAGE_SUMMARY_PATHS) {
+    try {
+      const raw = await host.readFile(path);
+      if (!raw) continue;
+      const parsed = JSON.parse(decodeFileContent(raw));
+      if (parsed && typeof parsed.byModel === "object" && parsed.sampleSize > 0) {
+        return {
+          sampleSize: Number(parsed.sampleSize || 0),
+          byModel: parsed.byModel as Record<string, GatewayUsageMetrics>,
+        };
+      }
+    } catch {}
+  }
+
+  // 2. Fallback para arquivo bruto (funciona em Node / testes)
   for (const path of SHARED_USAGE_PATHS) {
     try {
       const raw = await host.readFile(path);
       if (!raw) continue;
-      const text = decodeFileContent(raw);
-      const parsed = JSON.parse(text);
+      const parsed = JSON.parse(decodeFileContent(raw));
       const items: any[] = Array.isArray(parsed?.data?.items)
         ? parsed.data.items
         : Array.isArray(parsed?.items)
@@ -136,6 +205,7 @@ export async function loadGatewayUsageByModel(
         : Array.isArray(parsed)
         ? parsed
         : [];
+      if (items.length === 0) continue;
 
       const acc = new Map<
         string,
@@ -157,17 +227,7 @@ export async function loadGatewayUsageByModel(
         if (!mid) continue;
         let cur = acc.get(mid);
         if (!cur) {
-          cur = {
-            calls: 0,
-            durSum: 0,
-            durN: 0,
-            ttftSum: 0,
-            ttftN: 0,
-            cost: 0,
-            inputTok: 0,
-            cacheReadTok: 0,
-            lastSeen: null,
-          };
+          cur = { calls: 0, durSum: 0, durN: 0, ttftSum: 0, ttftN: 0, cost: 0, inputTok: 0, cacheReadTok: 0, lastSeen: null };
           acc.set(mid, cur);
         }
         cur.calls += 1;
@@ -206,9 +266,7 @@ export async function loadGatewayUsageByModel(
         };
       }
       return { sampleSize: items.length, byModel };
-    } catch {
-      // Tenta próximo caminho
-    }
+    } catch {}
   }
 
   return { sampleSize: 0, byModel: {} };
@@ -219,7 +277,7 @@ function computeModelRowScore(
   tier: RankingTier,
   usage: GatewayUsageMetrics | undefined,
   probe: LiveProbeState | undefined,
-  avoidFree: boolean
+  policy: RoutingPolicy
 ): {
   score: number;
   capabilityScore: number;
@@ -229,12 +287,9 @@ function computeModelRowScore(
 } {
   const effectiveTier: NexusTier = tier === "geral" ? "tier2_balanced" : tier;
   const { capability, tierMatch } = scoreModelForTier(modelId, effectiveTier);
-
   const calls = usage?.calls ?? 0;
-  // Adoção real no Gateway em escala log10 (10 reqs ~= 27, 100 ~= 52, 1000 ~= 78, 7000 ~= 100)
   const adoptionScore = calls > 0 ? Math.min(100, Math.round(Math.log10(calls + 1) * 26)) : 0;
 
-  // Velocidade real: prioriza ping ao vivo; senão TTFT; senão duração média
   let speedScore = 60;
   if (probe?.status === "ok" && typeof probe.latency === "number") {
     speedScore = Math.max(15, Math.min(100, Math.round(100 - (probe.latency / 1000) * 12)));
@@ -244,25 +299,31 @@ function computeModelRowScore(
     speedScore = Math.max(20, Math.min(95, Math.round(100 - (usage.avgDurationMs / 1000) * 1.4)));
   }
 
-  // Ponderação equilibrada conforme o tier
-  let rawScore =
-    tier === "tier1_fast" || tier === "decision"
-      ? tierMatch * 0.35 + speedScore * 0.35 + capability * 0.15 + adoptionScore * 0.15
-      : tier === "tier3_frontier" || tier === "reasoning"
-      ? capability * 0.45 + tierMatch * 0.35 + adoptionScore * 0.1 + speedScore * 0.1
-      : capability * 0.35 + tierMatch * 0.3 + adoptionScore * 0.2 + speedScore * 0.15;
+  const avgCost = usage?.avgCostUsd ?? 0;
+  const costScore = avgCost <= 0 ? 100 : Math.max(10, Math.round(100 - Math.min(90, avgCost * 1800)));
 
-  // Bônus de prompt cache real (até +5 pts)
+  let rawScore: number;
+  if (policy.strategy === "speed" || tier === "tier1_fast" || tier === "decision") {
+    rawScore = speedScore * 0.4 + tierMatch * 0.3 + adoptionScore * 0.15 + capability * 0.15;
+  } else if (policy.strategy === "quality" || tier === "tier3_frontier" || tier === "reasoning") {
+    rawScore = capability * 0.48 + tierMatch * 0.32 + adoptionScore * 0.1 + speedScore * 0.1;
+  } else if (policy.strategy === "cost") {
+    rawScore = costScore * 0.4 + tierMatch * 0.25 + adoptionScore * 0.2 + capability * 0.15;
+  } else {
+    rawScore = capability * 0.32 + tierMatch * 0.28 + adoptionScore * 0.22 + speedScore * 0.18;
+  }
+
   if (usage?.cacheHitPct && usage.cacheHitPct >= 50) {
     rawScore += Math.min(5, (usage.cacheHitPct - 40) / 12);
   }
 
-  // Penalidade para modelos :free (propensos a HTTP 429) quando avoidFree=true
-  if (avoidFree && isFreeModel(modelId)) {
+  const free = isFreeModel(modelId);
+  if (policy.forceFree) {
+    rawScore += free ? 18 : -25;
+  } else if (free) {
     rawScore -= 20;
   }
 
-  // Saúde ao vivo verificada
   if (probe?.status === "ok") {
     rawScore += 8;
   } else if (probe?.status === "error") {
@@ -279,8 +340,7 @@ function computeModelRowScore(
 }
 
 /**
- * Monta o ranking completo de modelos combinando catálogo do Gateway, uso real
- * (nm_usage.json) e resultados de ping ao vivo.
+ * Monta o ranking completo combinando catálogo, uso real, ping ao vivo e política do usuário.
  */
 export function buildModelRankingSnapshot(params: {
   catalogModels: Array<{ id: string; primaryGroup?: string; groups?: string[] }>;
@@ -291,13 +351,21 @@ export function buildModelRankingSnapshot(params: {
   disabledModels?: string[];
   tier?: RankingTier;
   avoidFree?: boolean;
+  policy?: Partial<RoutingPolicy>;
 }): ModelRankingSnapshot {
   const tier: RankingTier = params.tier || "geral";
-  const avoidFree = params.avoidFree !== false;
+  const policy: RoutingPolicy = {
+    ...DEFAULT_ROUTING_POLICY,
+    ...(params.policy || {}),
+    forceFree: params.policy?.forceFree ?? (params.avoidFree === false ? true : false),
+    autoAssignBlocked: Array.isArray(params.policy?.autoAssignBlocked) ? params.policy!.autoAssignBlocked : [],
+    tierPins: params.policy?.tierPins ? { ...params.policy.tierPins } : {},
+  };
+
   const disabledSet = new Set(params.disabledModels || []);
+  const blockedSet = new Set(policy.autoAssignBlocked.map((m) => m.toLowerCase()));
   const liveProbes = params.liveProbes || {};
 
-  // União do catálogo com modelos presentes na telemetria real e nos grupos padrão
   const pool = new Map<string, { id: string; group: CanonicalGroupDef }>();
   for (const m of params.catalogModels || []) {
     const mid = String(m?.id || "").trim();
@@ -325,14 +393,24 @@ export function buildModelRankingSnapshot(params: {
       const usage = params.usageByModel[item.id];
       const probe = liveProbes[item.id];
       const isDisabled = disabledSet.has(item.id);
-      const scored = computeModelRowScore(item.id, targetTier, usage, probe, avoidFree);
+      const isBlocked = blockedSet.has(item.id.toLowerCase());
+      const free = isFreeModel(item.id);
+      const avgCost = usage?.avgCostUsd ?? 0;
+      const exceedsCostCap =
+        policy.maxCostPerReqUsd !== null && avgCost > 0 && avgCost > policy.maxCostPerReqUsd;
+      const freeMismatch = policy.forceFree ? !free : false;
+      const eligibleForAuto = !isDisabled && !isBlocked && probe?.status !== "error" && !exceedsCostCap && !freeMismatch;
+
+      const scored = computeModelRowScore(item.id, targetTier, usage, probe, policy);
       rows.push({
         rank: 0,
         model: item.id,
         group: item.group.id,
         platform: item.group.platformKey,
-        isFree: isFreeModel(item.id),
+        isFree: free,
         isDisabled,
+        autoAssignBlocked: isBlocked,
+        eligibleForAuto,
         score: isDisabled ? -1 : scored.score,
         capabilityScore: scored.capabilityScore,
         tierMatchScore: scored.tierMatchScore,
@@ -345,7 +423,7 @@ export function buildModelRankingSnapshot(params: {
         avgDurationMs: usage?.avgDurationMs ?? null,
         avgFirstTokenMs: usage?.avgFirstTokenMs ?? null,
         cacheHitPct: usage?.cacheHitPct ?? null,
-        avgCostUsd: usage?.avgCostUsd ?? 0,
+        avgCostUsd: avgCost,
         totalCostUsd: usage?.totalCostUsd ?? 0,
       });
     }
@@ -371,7 +449,13 @@ export function buildModelRankingSnapshot(params: {
   for (const t of tiers) {
     const ranked = rankForTier(t);
     if (t === tier) selectedRows = ranked;
-    const winner = ranked.find((r) => !r.isDisabled && r.online !== false) || null;
+
+    const pinnedModel = policy.tierPins[t];
+    const pinnedRow = pinnedModel
+      ? ranked.find((r) => r.model === pinnedModel && !r.isDisabled && !r.autoAssignBlocked && r.online !== false)
+      : undefined;
+    const winner = pinnedRow || ranked.find((r) => r.eligibleForAuto) || ranked.find((r) => !r.isDisabled && !r.autoAssignBlocked && r.online !== false) || null;
+
     bestByTier[t] = winner
       ? {
           model: winner.model,
@@ -383,6 +467,7 @@ export function buildModelRankingSnapshot(params: {
           online: winner.online,
           avgCostUsd: winner.avgCostUsd,
           cacheHitPct: winner.cacheHitPct,
+          pinned: Boolean(pinnedRow),
         }
       : null;
   }
@@ -399,20 +484,17 @@ export function buildModelRankingSnapshot(params: {
       : "catalog";
 
   return {
-    version: 1,
+    version: 2,
     generatedAt: new Date().toISOString(),
     source,
     usageSampleSize: params.usageSampleSize,
     tier,
+    policy,
     bestByTier,
     models: selectedRows,
   };
 }
 
-/**
- * Persiste o snapshot de ranking em localStorage e em disco (~/.buzz/.scratch/nexusmind-model-ranking.json)
- * para consumo imediato pelo plugin OrgFy e por todos os agentes sem depender de CORS/CSP.
- */
 export async function persistModelRankingSnapshot(
   ctx: Context,
   snapshot: ModelRankingSnapshot
@@ -420,8 +502,7 @@ export async function persistModelRankingSnapshot(
   const payload = JSON.stringify(
     {
       ...snapshot,
-      // Limita lista salva em disco aos top 60 para leitura ultrarrápida
-      models: snapshot.models.slice(0, 60),
+      models: snapshot.models.slice(0, 80),
     },
     null,
     2

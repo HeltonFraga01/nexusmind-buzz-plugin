@@ -1,10 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXUSMIND MODEL RANKING TAB (v2.5)
-// Aba dedicada de Ranking Real de Modelos dentro do NexusMind Gateway:
-// - Pódio Top 3 (Melhor Geral, Mais Rápido Online, Melhor Custo-Benefício)
-// - Seletor de Tier (Geral, Tier 1 Rápido, Tier 2 Equilibrado, Tier 3 Frontier, Raciocínio, Decision)
-// - Telemetria real do Gateway (nm_usage.json) + Ping HTTP 200 ao vivo
-// - Aplicação em 1 clique do modelo escolhido direto em qualquer agente do Buzz
+// NEXUSMIND RANKING & ROTEAMENTO TAB (v2.6 — Buzz Native Minimalist Design)
+// Visual limpo seguindo os tokens nativos do Buzz (--bg-panel, --border-primary,
+// --text-primary, --affordance-subtle), zero "boneca russa":
+//   1. Barra compacta de critérios de roteamento (Tier, Estratégia, Teto de Custo, Forçar :free)
+//   2. Faixa única do modelo #1 eleito + aplicação direta em agente
+//   3. Tabela limpa com toggle 1-clique "Auto ✓ / Manual 🔒" (proibir auto-designação) e Fixar Tier
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { Context } from "@buzz/author";
@@ -15,18 +15,29 @@ import {
   type ModelRankingSnapshot,
   type RankedGatewayModel,
   type RankingTier,
+  type RoutingPolicy,
+  type RoutingStrategy,
   buildModelRankingSnapshot,
   loadGatewayUsageByModel,
+  loadSavedRoutingPolicy,
   persistModelRankingSnapshot,
+  saveRoutingPolicy,
 } from "../services/model-ranking";
 
-const TIER_OPTIONS: Array<{ id: RankingTier; label: string; hint: string }> = [
-  { id: "geral", label: "Geral", hint: "Equilíbrio entre qualidade, adoção real e velocidade" },
-  { id: "tier1_fast", label: "Tier 1 · Rápido", hint: "Triagem, tarefas simples e baixa latência" },
-  { id: "tier2_balanced", label: "Tier 2 · Equilibrado", hint: "Execução padrão de cards e código" },
-  { id: "tier3_frontier", label: "Tier 3 · Frontier", hint: "Arquitetura, revisão crítica e alto rigor" },
-  { id: "reasoning", label: "Raciocínio", hint: "Debugging complexo e planejamento profundo" },
-  { id: "decision", label: "Decision API", hint: "Classificadores yes_no / choice / score" },
+const TIER_OPTIONS: Array<{ id: RankingTier; label: string }> = [
+  { id: "geral", label: "Geral" },
+  { id: "tier1_fast", label: "Tier 1 · Rápido" },
+  { id: "tier2_balanced", label: "Tier 2 · Código" },
+  { id: "tier3_frontier", label: "Tier 3 · Frontier" },
+  { id: "reasoning", label: "Raciocínio" },
+  { id: "decision", label: "Decision" },
+];
+
+const STRATEGY_OPTIONS: Array<{ id: RoutingStrategy; label: string }> = [
+  { id: "balanced", label: "Balanceado" },
+  { id: "speed", label: "Velocidade" },
+  { id: "quality", label: "Máxima Qualidade" },
+  { id: "cost", label: "Menor Custo" },
 ];
 
 function fmtMs(ms: number | null | undefined): string {
@@ -36,9 +47,9 @@ function fmtMs(ms: number | null | undefined): string {
 }
 
 function fmtCost(usd: number): string {
-  if (!Number.isFinite(usd) || usd <= 0) return "$0.00";
-  if (usd < 0.001) return `$${(usd * 1000).toFixed(3)}/1k`;
-  return `$${usd.toFixed(4)}/req`;
+  if (!Number.isFinite(usd) || usd <= 0) return "$0";
+  if (usd < 0.001) return `$${(usd * 1000).toFixed(2)}/1k`;
+  return `$${usd.toFixed(4)}`;
 }
 
 export function createModelRankingTabComponent(
@@ -62,13 +73,22 @@ export function createModelRankingTabComponent(
     onNotify: (msg: { type: "success" | "error" | "info"; text: string }) => void;
   }) {
     const [selectedTier, setSelectedTier] = React.useState<RankingTier>("geral");
-    const [hideFree, setHideFree] = React.useState<boolean>(true);
+    const [policy, setPolicy] = React.useState<RoutingPolicy>(() => loadSavedRoutingPolicy());
     const [usageByModel, setUsageByModel] = React.useState<Record<string, GatewayUsageMetrics>>({});
     const [usageSampleSize, setUsageSampleSize] = React.useState<number>(0);
     const [probingTop, setProbingTop] = React.useState<boolean>(false);
     const [selectedAgentKey, setSelectedAgentKey] = React.useState<string>("");
     const [applyingModel, setApplyingModel] = React.useState<string | null>(null);
-    const [lastSavedAt, setLastSavedAt] = React.useState<string>("");
+    const [onlyAutoEligible, setOnlyAutoEligible] = React.useState<boolean>(false);
+    const [searchFilter, setSearchFilter] = React.useState<string>("");
+
+    const updatePolicy = (updater: (prev: RoutingPolicy) => RoutingPolicy) => {
+      setPolicy((prev: RoutingPolicy) => {
+        const next = updater(prev);
+        saveRoutingPolicy(next);
+        return next;
+      });
+    };
 
     const agentsList = React.useMemo(() => {
       try {
@@ -95,7 +115,6 @@ export function createModelRankingTabComponent(
       }
     }, [agentsList, selectedAgentKey]);
 
-    // Carrega telemetria real de ~/.buzz/.scratch/nm_usage.json ao montar
     const refreshUsageTelemetry = React.useCallback(async () => {
       const loaded = await loadGatewayUsageByModel(ctx);
       setUsageByModel(loaded.byModel);
@@ -115,120 +134,116 @@ export function createModelRankingTabComponent(
         liveProbes: modelTests,
         disabledModels,
         tier: selectedTier,
-        avoidFree: hideFree,
+        policy,
       });
-    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, hideFree]);
+    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy]);
 
-    // Persiste automaticamente o ranking atualizado para o OrgFy e agentes
     React.useEffect(() => {
       if (snapshot.models.length === 0) return;
-      persistModelRankingSnapshot(ctx, snapshot).then((ok) => {
-        if (ok) {
-          setLastSavedAt(
-            new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-          );
-        }
-      });
+      persistModelRankingSnapshot(ctx, snapshot);
     }, [snapshot]);
 
     const visibleRows: RankedGatewayModel[] = React.useMemo(() => {
+      const q = searchFilter.trim().toLowerCase();
       return snapshot.models
-        .filter((r) => !r.isDisabled && (!hideFree || !r.isFree))
-        .slice(0, 30);
-    }, [snapshot, hideFree]);
+        .filter((r) => {
+          if (r.isDisabled) return false;
+          if (policy.forceFree && !r.isFree) return false;
+          if (onlyAutoEligible && !r.eligibleForAuto) return false;
+          if (q && !r.model.toLowerCase().includes(q)) return false;
+          return true;
+        })
+        .slice(0, 40);
+    }, [snapshot, policy.forceFree, onlyAutoEligible, searchFilter]);
 
-    const topOverall = visibleRows[0] || null;
-    const topFastest = React.useMemo(() => {
-      const candidates = visibleRows.filter((r) => r.online !== false && (r.pingLatencyMs !== null || r.avgFirstTokenMs !== null || r.avgDurationMs !== null));
-      return [...candidates].sort((a, b) => {
-        const la = a.pingLatencyMs ?? a.avgFirstTokenMs ?? a.avgDurationMs ?? 999999;
-        const lb = b.pingLatencyMs ?? b.avgFirstTokenMs ?? b.avgDurationMs ?? 999999;
-        return la - lb;
-      })[0] || null;
-    }, [visibleRows]);
+    const activeWinner = snapshot.bestByTier[selectedTier] || null;
+    const pinnedForTier = policy.tierPins[selectedTier] || null;
 
-    const topMostUsed = React.useMemo(() => {
-      const candidates = visibleRows.filter((r) => r.calls > 0);
-      return [...candidates].sort((a, b) => b.calls - a.calls)[0] || null;
-    }, [visibleRows]);
+    const toggleAutoAssignBlock = (modelId: string) => {
+      updatePolicy((prev) => {
+        const lower = modelId.toLowerCase();
+        const exists = prev.autoAssignBlocked.some((m) => m.toLowerCase() === lower);
+        const nextBlocked = exists
+          ? prev.autoAssignBlocked.filter((m) => m.toLowerCase() !== lower)
+          : [...prev.autoAssignBlocked, modelId];
+        return { ...prev, autoAssignBlocked: nextBlocked };
+      });
+    };
+
+    const togglePinForTier = (modelId: string) => {
+      updatePolicy((prev) => {
+        const nextPins = { ...prev.tierPins };
+        if (nextPins[selectedTier] === modelId) {
+          delete nextPins[selectedTier];
+        } else {
+          nextPins[selectedTier] = modelId;
+        }
+        return { ...prev, tierPins: nextPins };
+      });
+    };
 
     const handleProbeTopCandidates = async () => {
       const topToTest = visibleRows.slice(0, 6);
       if (topToTest.length === 0) return;
       setProbingTop(true);
-      onNotify({
-        type: "info",
-        text: `Testando saúde HTTP 200 ao vivo nos ${topToTest.length} melhores modelos de '${selectedTier}'...`,
-      });
+      onNotify({ type: "info", text: `Testando saúde HTTP 200 dos top ${topToTest.length} modelos...` });
       try {
         await Promise.all(topToTest.map((row) => onTestSingleModel(row.model)));
         await refreshUsageTelemetry();
-        onNotify({
-          type: "success",
-          text: `Ranking atualizado e salvo em nexusmind-model-ranking.json para o OrgFy e agentes.`,
-        });
+        onNotify({ type: "success", text: `Ranking e políticas sincronizados com o OrgFy e agentes.` });
       } finally {
         setProbingTop(false);
       }
     };
 
-    const handleApplyModelToSelectedAgent = async (row: RankedGatewayModel) => {
+    const handleApplyModel = async (modelId: string, groupId: string) => {
       const agentsApi = (ctx as any)?.agents;
       const target = agentsList.find((a) => a.key === selectedAgentKey);
       if (!target || typeof agentsApi?.save !== "function") {
-        onNotify({ type: "error", text: "Selecione um agente válido para aplicar o modelo." });
+        onNotify({ type: "error", text: "Selecione um agente para aplicar o modelo." });
         return;
       }
-      setApplyingModel(row.model);
+      setApplyingModel(modelId);
       try {
         const nextCfg = {
           ...(target.config && typeof target.config === "object" ? target.config : {}),
-          model: row.model,
-          provider: row.group,
+          model: modelId,
+          provider: groupId,
         };
         await agentsApi.save(target.key, { config: nextCfg });
-        onNotify({
-          type: "success",
-          text: `Agente '${target.name || target.key}' atualizado para '${row.model}' (${row.group}, score ${row.score}).`,
-        });
+        onNotify({ type: "success", text: `${target.name || target.key} atualizado para ${modelId}.` });
       } catch (err: any) {
-        onNotify({
-          type: "error",
-          text: `Erro ao aplicar modelo em ${target.name || target.key}: ${err?.message || err}`,
-        });
+        onNotify({ type: "error", text: `Falha ao aplicar: ${err?.message || err}` });
       } finally {
         setApplyingModel(null);
       }
     };
 
-    const activeTierInfo = TIER_OPTIONS.find((t) => t.id === selectedTier) || TIER_OPTIONS[0];
-
     return h(
       "div",
-      { style: { display: "flex", flexDirection: "column", gap: "18px" } },
+      { style: { display: "flex", flexDirection: "column", gap: "14px" } },
 
-      // Barra de Controles do Ranking
+      // 1. Barra compacta de Tier + Critérios de Roteamento (flat, estilo Buzz)
       h(
         "div",
         {
           style: {
             display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: "12px",
-            backgroundColor: "rgba(255, 255, 255, 0.02)",
-            border: "1px solid rgba(255, 255, 255, 0.08)",
-            borderRadius: "14px",
-            padding: "14px 18px",
+            flexDirection: "column",
+            gap: "10px",
+            padding: "12px 14px",
+            borderRadius: "10px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
           },
         },
+        // Linha 1: Tiers + Ação de Healthcheck
         h(
           "div",
-          { style: { display: "flex", flexDirection: "column", gap: "8px" } },
+          { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
+            { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" } },
             TIER_OPTIONS.map((t) => {
               const active = selectedTier === t.id;
               return h(
@@ -237,13 +252,13 @@ export function createModelRankingTabComponent(
                   key: t.id,
                   onClick: () => setSelectedTier(t.id),
                   style: {
-                    borderRadius: "9999px",
-                    padding: "5px 12px",
-                    border: `1px solid ${active ? "#10b981" : "rgba(255,255,255,0.1)"}`,
-                    backgroundColor: active ? "rgba(16,185,129,0.18)" : "transparent",
-                    color: active ? "#34d399" : "#9ca3af",
-                    fontSize: "11px",
-                    fontWeight: active ? "700" : "500",
+                    borderRadius: "6px",
+                    padding: "5px 10px",
+                    border: "none",
+                    backgroundColor: active ? "var(--affordance-selected, #333333)" : "transparent",
+                    color: active ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
+                    fontSize: "12px",
+                    fontWeight: active ? "600" : "500",
                     cursor: "pointer",
                   },
                 },
@@ -252,122 +267,26 @@ export function createModelRankingTabComponent(
             })
           ),
           h(
-            "div",
-            { style: { fontSize: "11px", color: "#9ca3af" } },
-            `${activeTierInfo.hint} · Telemetria: ${usageSampleSize.toLocaleString("pt-BR")} chamadas reais do Gateway${lastSavedAt ? ` · Sincronizado para OrgFy às ${lastSavedAt}` : ""}`
-          )
-        ),
-        h(
-          "div",
-          { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
-          h(
-            "label",
-            {
-              style: {
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "6px",
-                fontSize: "11px",
-                color: "#d1d5db",
-                cursor: "pointer",
-              },
-            },
-            h("input", {
-              type: "checkbox",
-              checked: hideFree,
-              onChange: (e: any) => setHideFree(Boolean(e.target.checked)),
-              style: { accentColor: "#10b981" },
-            }),
-            "Ocultar :free (429)"
-          ),
-          h(
             "button",
             {
               onClick: handleProbeTopCandidates,
               disabled: probingTop,
               style: {
-                borderRadius: "9999px",
-                padding: "7px 16px",
-                backgroundColor: "#10b981",
-                color: "#000000",
+                borderRadius: "6px",
+                padding: "6px 12px",
+                backgroundColor: "var(--affordance-prominent, #ffffff)",
+                color: "var(--text-on-prominent, #000000)",
                 border: "none",
-                cursor: probingTop ? "wait" : "pointer",
                 fontSize: "12px",
-                fontWeight: "700",
+                fontWeight: "600",
+                cursor: probingTop ? "wait" : "pointer",
               },
             },
-            probingTop ? "Testando Top 6 ao vivo..." : "⚡ Testar Saúde & Atualizar Ranking"
+            probingTop ? "Testando..." : "Testar Top 6"
           )
-        )
-      ),
+        ),
 
-      // Pódio Top 3
-      h(
-        "div",
-        { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "14px" } },
-        [
-          {
-            title: `#1 MELHOR PARA ${activeTierInfo.label.toUpperCase()}`,
-            accent: "#10b981",
-            row: topOverall,
-            detail: topOverall ? `Score ${topOverall.score}/100 · ${topOverall.calls.toLocaleString("pt-BR")} chamadas` : "Sem dados",
-          },
-          {
-            title: "MAIS RÁPIDO (LATÊNCIA REAL)",
-            accent: "#38bdf8",
-            row: topFastest,
-            detail: topFastest
-              ? topFastest.pingLatencyMs !== null
-                ? `Ping ao vivo: ${fmtMs(topFastest.pingLatencyMs)}`
-                : `TTFT/Média Gateway: ${fmtMs(topFastest.avgFirstTokenMs ?? topFastest.avgDurationMs)}`
-              : "Sem medições",
-          },
-          {
-            title: "MAIS VALIDADO EM PRODUÇÃO",
-            accent: "#c084fc",
-            row: topMostUsed,
-            detail: topMostUsed
-              ? `${topMostUsed.calls.toLocaleString("pt-BR")} chamadas · Cache ${topMostUsed.cacheHitPct ?? "—"}%`
-              : "Sem histórico",
-          },
-        ].map((card) =>
-          h(
-            "div",
-            {
-              key: card.title,
-              style: {
-                backgroundColor: "rgba(255, 255, 255, 0.03)",
-                border: `1px solid ${card.accent}44`,
-                borderRadius: "14px",
-                padding: "16px 18px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "6px",
-              },
-            },
-            h("div", { style: { fontSize: "10px", fontWeight: "700", color: card.accent, letterSpacing: "0.05em" } }, card.title),
-            h(
-              "div",
-              {
-                style: {
-                  fontSize: "15px",
-                  fontWeight: "700",
-                  color: "#ffffff",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                },
-                title: card.row?.model || "",
-              },
-              card.row ? card.row.model : "—"
-            ),
-            h("div", { style: { fontSize: "11px", color: "#9ca3af", fontFamily: "monospace" } }, card.detail)
-          )
-        )
-      ),
-
-      // Barra de Aplicação Direta em Agente
-      agentsList.length > 0 &&
+        // Linha 2: Critérios de Política (Estratégia, Teto de Custo, Forçar :free, Busca)
         h(
           "div",
           {
@@ -377,68 +296,214 @@ export function createModelRankingTabComponent(
               justifyContent: "space-between",
               flexWrap: "wrap",
               gap: "10px",
-              padding: "10px 16px",
-              borderRadius: "12px",
-              backgroundColor: "rgba(56, 189, 248, 0.06)",
-              border: "1px solid rgba(56, 189, 248, 0.22)",
+              paddingTop: "8px",
+              borderTop: "1px solid var(--border-primary, #2a2a2a)",
             },
           },
           h(
             "div",
             { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
-            h("span", { style: { fontSize: "12px", fontWeight: "600", color: "#38bdf8" } }, "Aplicar modelo do ranking no agente:"),
+            // Estratégia
+            h(
+              "label",
+              { style: { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
+              "Critério:",
+              h(
+                "select",
+                {
+                  value: policy.strategy,
+                  onChange: (e: any) => updatePolicy((p) => ({ ...p, strategy: e.target.value as RoutingStrategy })),
+                  style: {
+                    backgroundColor: "var(--surface-inset, #101010)",
+                    color: "var(--text-primary, #ffffff)",
+                    border: "1px solid var(--border-primary, #333333)",
+                    borderRadius: "6px",
+                    padding: "4px 8px",
+                    fontSize: "11px",
+                  },
+                },
+                STRATEGY_OPTIONS.map((s) => h("option", { key: s.id, value: s.id }, s.label))
+              )
+            ),
+            // Teto de custo por requisição
+            h(
+              "label",
+              { style: { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
+              "Teto custo/req:",
+              h(
+                "select",
+                {
+                  value: policy.maxCostPerReqUsd === null ? "" : String(policy.maxCostPerReqUsd),
+                  onChange: (e: any) => {
+                    const v = e.target.value ? Number(e.target.value) : null;
+                    updatePolicy((p) => ({ ...p, maxCostPerReqUsd: v }));
+                  },
+                  style: {
+                    backgroundColor: "var(--surface-inset, #101010)",
+                    color: "var(--text-primary, #ffffff)",
+                    border: "1px solid var(--border-primary, #333333)",
+                    borderRadius: "6px",
+                    padding: "4px 8px",
+                    fontSize: "11px",
+                  },
+                },
+                h("option", { value: "" }, "Sem teto"),
+                h("option", { value: "0.005" }, "≤ $0.005"),
+                h("option", { value: "0.02" }, "≤ $0.020"),
+                h("option", { value: "0.05" }, "≤ $0.050")
+              )
+            ),
+            // Toggle Forçar :free (explicitamente pedido)
+            h(
+              "label",
+              {
+                style: {
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  fontSize: "11px",
+                  padding: "4px 9px",
+                  borderRadius: "6px",
+                  cursor: "pointer",
+                  border: `1px solid ${policy.forceFree ? "var(--green-7, #28714f)" : "var(--border-primary, #333333)"}`,
+                  backgroundColor: policy.forceFree ? "var(--green-3, #132d21)" : "transparent",
+                  color: policy.forceFree ? "var(--green-11, #3dd68c)" : "var(--text-secondary, #c7c7c7)",
+                  fontWeight: policy.forceFree ? "600" : "500",
+                },
+              },
+              h("input", {
+                type: "checkbox",
+                checked: policy.forceFree,
+                onChange: (e: any) => updatePolicy((p) => ({ ...p, forceFree: Boolean(e.target.checked) })),
+                style: { accentColor: "#30a46c" },
+              }),
+              "Forçar modelos :free"
+            ),
+            // Filtro elegíveis para auto-designação
+            h(
+              "label",
+              { style: { display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", cursor: "pointer" } },
+              h("input", {
+                type: "checkbox",
+                checked: onlyAutoEligible,
+                onChange: (e: any) => setOnlyAutoEligible(Boolean(e.target.checked)),
+                style: { accentColor: "#30a46c" },
+              }),
+              "Só elegíveis (Auto)"
+            )
+          ),
+          h("input", {
+            type: "text",
+            placeholder: "Filtrar modelo...",
+            value: searchFilter,
+            onChange: (e: any) => setSearchFilter(e.target.value),
+            style: {
+              backgroundColor: "var(--surface-inset, #101010)",
+              border: "1px solid var(--border-primary, #333333)",
+              borderRadius: "6px",
+              padding: "4px 10px",
+              color: "var(--text-primary, #ffffff)",
+              fontSize: "11px",
+              width: "160px",
+              outline: "none",
+            },
+          })
+        )
+      ),
+
+      // 2. Faixa única do Modelo #1 Eleito + Aplicação Direta (substitui 3 cards + banner azul)
+      h(
+        "div",
+        {
+          style: {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "12px",
+            padding: "10px 14px",
+            borderRadius: "10px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+          },
+        },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+          h(
+            "span",
+            { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", fontWeight: "600", textTransform: "uppercase" } },
+            activeWinner?.pinned ? "Fixado:" : "Auto #1:"
+          ),
+          h(
+            "span",
+            { style: { fontSize: "13px", fontWeight: "700", color: "var(--text-primary, #ffffff)", fontFamily: "monospace" } },
+            activeWinner ? activeWinner.model : "Nenhum elegível"
+          ),
+          activeWinner &&
+            h(
+              "span",
+              { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace" } },
+              `score ${activeWinner.score} · ${activeWinner.calls.toLocaleString("pt-BR")} reqs · ${fmtCost(activeWinner.avgCostUsd)}`
+            ),
+          h(
+            "span",
+            { style: { fontSize: "11px", color: "var(--text-tertiary, #808080)" } },
+            `(${usageSampleSize.toLocaleString("pt-BR")} chamadas no Gateway · ${policy.autoAssignBlocked.length} bloqueados p/ auto)`
+          )
+        ),
+        agentsList.length > 0 &&
+          h(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "8px" } },
             h(
               "select",
               {
                 value: selectedAgentKey,
                 onChange: (e: any) => setSelectedAgentKey(e.target.value),
                 style: {
-                  backgroundColor: "rgba(0,0,0,0.45)",
-                  color: "#ffffff",
-                  border: "1px solid rgba(255,255,255,0.16)",
-                  borderRadius: "8px",
-                  padding: "5px 10px",
-                  fontSize: "12px",
+                  backgroundColor: "var(--surface-inset, #101010)",
+                  color: "var(--text-primary, #ffffff)",
+                  border: "1px solid var(--border-primary, #333333)",
+                  borderRadius: "6px",
+                  padding: "4px 8px",
+                  fontSize: "11px",
                 },
               },
               agentsList.map((a) =>
-                h(
-                  "option",
-                  { key: a.key, value: a.key },
-                  `${a.name || a.key} (atual: ${a.config?.model || "padrão"})`
-                )
+                h("option", { key: a.key, value: a.key }, `${a.name || a.key} (${a.config?.model || "padrão"})`)
               )
-            )
-          ),
-          topOverall &&
-            h(
-              "button",
-              {
-                onClick: () => handleApplyModelToSelectedAgent(topOverall),
-                disabled: applyingModel !== null,
-                style: {
-                  borderRadius: "9999px",
-                  padding: "6px 14px",
-                  backgroundColor: "rgba(56, 189, 248, 0.18)",
-                  border: "1px solid rgba(56, 189, 248, 0.45)",
-                  color: "#7dd3fc",
-                  fontSize: "11px",
-                  fontWeight: "700",
-                  cursor: "pointer",
+            ),
+            activeWinner &&
+              h(
+                "button",
+                {
+                  onClick: () => handleApplyModel(activeWinner.model, activeWinner.group),
+                  disabled: applyingModel !== null,
+                  style: {
+                    borderRadius: "6px",
+                    padding: "5px 10px",
+                    backgroundColor: "var(--affordance-subtle, #282828)",
+                    border: "1px solid var(--border-primary, #3a3a3a)",
+                    color: "var(--text-primary, #ffffff)",
+                    fontSize: "11px",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                  },
                 },
-              },
-              `Aplicar #1 (${topOverall.model})`
-            )
-        ),
+                "Aplicar #1"
+              )
+          )
+      ),
 
-      // Tabela Completa de Ranking
+      // 3. Tabela minimalista de Ranking + Controle de Auto-Designação por Modelo
       h(
         "div",
         {
           style: {
-            backgroundColor: "rgba(255, 255, 255, 0.02)",
-            border: "1px solid rgba(255, 255, 255, 0.07)",
-            borderRadius: "14px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+            borderRadius: "10px",
             overflowX: "auto",
           },
         },
@@ -450,102 +515,169 @@ export function createModelRankingTabComponent(
             null,
             h(
               "tr",
-              { style: { borderBottom: "1px solid rgba(255,255,255,0.08)", textAlign: "left", color: "#9ca3af", fontSize: "10px", textTransform: "uppercase" } },
-              ["#", "Modelo", "Grupo", "Score", "Saúde / Ping", "Chamadas", "Latência Média", "Cache Hit", "Custo", "Ação"].map((col) =>
-                h("th", { key: col, style: { padding: "10px 12px", fontWeight: "700" } }, col)
+              {
+                style: {
+                  borderBottom: "1px solid var(--border-primary, #2e2e2e)",
+                  textAlign: "left",
+                  color: "var(--text-tertiary, #808080)",
+                  fontSize: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                },
+              },
+              ["#", "Modelo", "Auto-Designação", "Score", "Saúde", "Chamadas", "Latência", "Custo", "Ações"].map((col) =>
+                h("th", { key: col, style: { padding: "9px 12px", fontWeight: "600" } }, col)
               )
             )
           ),
           h(
             "tbody",
             null,
-            visibleRows.map((row, idx) => {
-              const healthLabel =
-                row.online === true
-                  ? `HTTP 200 · ${fmtMs(row.pingLatencyMs)}`
-                  : row.online === false
-                  ? `Erro · ${row.pingError || "Falha"}`
-                  : "Não testado";
-              const healthColor =
-                row.online === true ? "#10b981" : row.online === false ? "#f87171" : "#9ca3af";
-
-              return h(
-                "tr",
-                {
-                  key: row.model,
-                  style: {
-                    borderBottom: "1px solid rgba(255,255,255,0.04)",
-                    backgroundColor: idx === 0 ? "rgba(16, 185, 129, 0.05)" : "transparent",
-                  },
-                },
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontWeight: "700", color: idx < 3 ? "#10b981" : "#9ca3af" } }, `#${idx + 1}`),
-                h(
-                  "td",
-                  { style: { padding: "10px 12px", fontWeight: "600", color: "#ffffff" } },
-                  row.model,
-                  row.isFree &&
-                    h(
-                      "span",
-                      { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "rgba(245,158,11,0.2)", color: "#fbbf24" } },
-                      "FREE"
-                    )
-                ),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontSize: "11px", color: "#9ca3af" } }, row.group.replace("nexusmind_", "")),
-                h(
-                  "td",
-                  { style: { padding: "10px 12px", fontFamily: "monospace", fontWeight: "700", color: row.score >= 75 ? "#34d399" : row.score >= 55 ? "#fbbf24" : "#f87171" } },
-                  `${row.score}`
-                ),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontSize: "11px", color: healthColor } }, healthLabel),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#e4e4e7" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, fmtMs(row.avgDurationMs)),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, row.cacheHitPct !== null ? `${row.cacheHitPct}%` : "—"),
-                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, fmtCost(row.avgCostUsd)),
-                h(
-                  "td",
-                  { style: { padding: "10px 12px", whiteSpace: "nowrap" } },
+            visibleRows.length === 0
+              ? h(
+                  "tr",
+                  null,
                   h(
-                    "div",
-                    { style: { display: "flex", gap: "6px" } },
-                    h(
-                      "button",
-                      {
-                        onClick: () => onTestSingleModel(row.model),
-                        style: {
-                          padding: "4px 8px",
-                          borderRadius: "6px",
-                          border: "1px solid rgba(255,255,255,0.12)",
-                          backgroundColor: "rgba(255,255,255,0.06)",
-                          color: "#e4e4e7",
-                          fontSize: "10px",
-                          cursor: "pointer",
-                        },
+                    "td",
+                    { colSpan: 9, style: { padding: "24px", textAlign: "center", color: "var(--text-tertiary, #808080)" } },
+                    "Nenhum modelo corresponde aos critérios atuais."
+                  )
+                )
+              : visibleRows.map((row, idx) => {
+                  const isPinned = pinnedForTier === row.model;
+                  const healthLabel =
+                    row.online === true
+                      ? `OK · ${fmtMs(row.pingLatencyMs)}`
+                      : row.online === false
+                      ? `Erro`
+                      : "—";
+                  const healthColor =
+                    row.online === true ? "var(--green-11, #3dd68c)" : row.online === false ? "var(--red-11, #ff9592)" : "var(--text-tertiary, #808080)";
+
+                  return h(
+                    "tr",
+                    {
+                      key: row.model,
+                      style: {
+                        borderBottom: "1px solid rgba(255,255,255,0.04)",
+                        opacity: row.autoAssignBlocked ? 0.65 : 1,
                       },
-                      "Testar"
+                    },
+                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #808080)" } }, `${idx + 1}`),
+                    h(
+                      "td",
+                      { style: { padding: "8px 12px", fontWeight: "500", color: "var(--text-primary, #ffffff)" } },
+                      h("span", null, row.model),
+                      h(
+                        "span",
+                        { style: { marginLeft: "6px", fontSize: "10px", color: "var(--text-tertiary, #808080)", fontFamily: "monospace" } },
+                        row.group.replace("nexusmind_", "")
+                      ),
+                      row.isFree &&
+                        h(
+                          "span",
+                          { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "var(--affordance-subtle, #282828)", color: "var(--text-secondary, #c7c7c7)" } },
+                          "FREE"
+                        ),
+                      isPinned &&
+                        h(
+                          "span",
+                          { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "var(--green-3, #132d21)", color: "var(--green-11, #3dd68c)" } },
+                          "FIXADO"
+                        )
                     ),
-                    agentsList.length > 0 &&
+                    // Toggle 1-clique Auto vs Manual (Proibido p/ auto-designação)
+                    h(
+                      "td",
+                      { style: { padding: "8px 12px" } },
                       h(
                         "button",
                         {
-                          onClick: () => handleApplyModelToSelectedAgent(row),
-                          disabled: applyingModel === row.model,
+                          onClick: () => toggleAutoAssignBlock(row.model),
+                          title: row.autoAssignBlocked
+                            ? "Bloqueado para designação automática (clique para liberar)"
+                            : "Permitido para designação automática (clique para restringir a uso manual)",
                           style: {
-                            padding: "4px 9px",
-                            borderRadius: "6px",
-                            border: "1px solid rgba(56,189,248,0.4)",
-                            backgroundColor: "rgba(56,189,248,0.14)",
-                            color: "#38bdf8",
-                            fontSize: "10px",
-                            fontWeight: "700",
+                            padding: "3px 8px",
+                            borderRadius: "5px",
+                            border: `1px solid ${row.autoAssignBlocked ? "var(--amber-7, #714f19)" : "var(--border-primary, #333333)"}`,
+                            backgroundColor: row.autoAssignBlocked ? "var(--amber-3, #302008)" : "transparent",
+                            color: row.autoAssignBlocked ? "var(--amber-11, #ffca16)" : "var(--text-secondary, #c7c7c7)",
+                            fontSize: "11px",
+                            fontWeight: "500",
                             cursor: "pointer",
                           },
                         },
-                        applyingModel === row.model ? "..." : "Aplicar"
+                        row.autoAssignBlocked ? "Manual (Bloq.)" : "Auto ✓"
                       )
-                  )
-                )
-              );
-            })
+                    ),
+                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, `${row.score}`),
+                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", fontSize: "11px", color: healthColor } }, healthLabel),
+                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-secondary, #c7c7c7)" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
+                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs)),
+                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd)),
+                    h(
+                      "td",
+                      { style: { padding: "8px 12px", whiteSpace: "nowrap" } },
+                      h(
+                        "div",
+                        { style: { display: "flex", gap: "5px" } },
+                        h(
+                          "button",
+                          {
+                            onClick: () => togglePinForTier(row.model),
+                            title: isPinned ? "Desafixar deste tier" : `Fixar como padrão para ${selectedTier}`,
+                            style: {
+                              padding: "3px 7px",
+                              borderRadius: "5px",
+                              border: "1px solid var(--border-primary, #333333)",
+                              backgroundColor: isPinned ? "var(--affordance-selected, #333333)" : "transparent",
+                              color: "var(--text-secondary, #c7c7c7)",
+                              fontSize: "10px",
+                              cursor: "pointer",
+                            },
+                          },
+                          isPinned ? "Desafixar" : "Fixar"
+                        ),
+                        h(
+                          "button",
+                          {
+                            onClick: () => onTestSingleModel(row.model),
+                            style: {
+                              padding: "3px 7px",
+                              borderRadius: "5px",
+                              border: "1px solid var(--border-primary, #333333)",
+                              backgroundColor: "transparent",
+                              color: "var(--text-secondary, #c7c7c7)",
+                              fontSize: "10px",
+                              cursor: "pointer",
+                            },
+                          },
+                          "Testar"
+                        ),
+                        agentsList.length > 0 &&
+                          h(
+                            "button",
+                            {
+                              onClick: () => handleApplyModel(row.model, row.group),
+                              disabled: applyingModel === row.model,
+                              style: {
+                                padding: "3px 8px",
+                                borderRadius: "5px",
+                                border: "none",
+                                backgroundColor: "var(--affordance-subtle, #282828)",
+                                color: "var(--text-primary, #ffffff)",
+                                fontSize: "10px",
+                                fontWeight: "600",
+                                cursor: "pointer",
+                              },
+                            },
+                            applyingModel === row.model ? "..." : "Aplicar"
+                          )
+                      )
+                    )
+                  );
+                })
           )
         )
       )
