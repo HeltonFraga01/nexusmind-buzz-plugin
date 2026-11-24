@@ -110,8 +110,8 @@ async function pingModel(
   modelId: string,
   group: CanonicalGroupDef
 ): Promise<{ online: boolean; latencyMs: number | null; error?: string }> {
-  const hostReq = (ctx as any)?.host?.request;
-  if (typeof hostReq !== "function") {
+  const host = (ctx as any)?.host;
+  if (typeof host?.request !== "function") {
     return { online: false, latencyMs: null, error: "ctx.host.request indisponível" };
   }
   const isAnthropic = group.id === "nexusmind_anthropic";
@@ -134,7 +134,7 @@ async function pingModel(
 
   const t0 = Date.now();
   try {
-    const res = await hostReq({
+    const res = await host.request({
       url,
       method: "POST",
       headers,
@@ -170,14 +170,14 @@ export async function selectBestModelByTier(
   const maxProbes = Math.max(1, Math.min(8, Number(input.max_probes || 5)));
   const disabled = getDisabledModels();
   const excluded = new Set((input.exclude_models || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
-  const hostReq = (ctx as any)?.host?.request;
+  const host = (ctx as any)?.host;
 
   const catalog = new Map<string, { id: string; group: CanonicalGroupDef }>();
-  if (typeof hostReq === "function") {
+  if (typeof host?.request === "function") {
     await Promise.all(
       Object.values(groups).map(async (grp) => {
         try {
-          const res = await hostReq({
+          const res = await host.request({
             url: "https://api.nexusmind.digital/v1/models",
             method: "GET",
             headers: {
@@ -344,8 +344,8 @@ export function createNexusMindDecisionProvider(
     status: () => (fastGroup?.defaultKey ? "ready" : "needs-setup") as "ready" | "needs-setup",
     subscribe: () => () => {},
     decide: async (request: any, options: { signal: AbortSignal }) => {
-      const hostReq = (ctx as any)?.host?.request;
-      if (typeof hostReq !== "function") {
+      const host = (ctx as any)?.host;
+      if (typeof host?.request !== "function") {
         return { outcome: "failed" as const, reason: "unavailable" as const };
       }
 
@@ -372,7 +372,7 @@ export function createNexusMindDecisionProvider(
         if (options?.signal?.aborted) {
           return { outcome: "failed" as const, reason: "timeout" as const };
         }
-        const res = await hostReq({
+        const res = await host.request({
           url: "https://api.nexusmind.digital/v1/chat/completions",
           method: "POST",
           headers: {

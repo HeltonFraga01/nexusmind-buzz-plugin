@@ -44,9 +44,8 @@ function getDisabledModels() {
   }
 }
 async function pingModel(ctx, modelId, group) {
-  var _a;
-  const hostReq = (_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request;
-  if (typeof hostReq !== "function") {
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.request) !== "function") {
     return { online: false, latencyMs: null, error: "ctx.host.request indisponível" };
   }
   const isAnthropic = group.id === "nexusmind_anthropic";
@@ -64,7 +63,7 @@ async function pingModel(ctx, modelId, group) {
   };
   const t0 = Date.now();
   try {
-    const res = await hostReq({
+    const res = await host.request({
       url,
       method: "POST",
       headers,
@@ -85,20 +84,19 @@ async function pingModel(ctx, modelId, group) {
   }
 }
 async function selectBestModelByTier(ctx, groups, input = {}) {
-  var _a;
   const tier = input.tier || "tier2_balanced";
   const preferFree = Boolean(input.prefer_free);
   const avoidFree = input.avoid_free !== false && !preferFree;
   const maxProbes = Math.max(1, Math.min(8, Number(input.max_probes || 5)));
   const disabled = getDisabledModels();
   const excluded = new Set((input.exclude_models || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
-  const hostReq = (_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request;
+  const host = ctx == null ? void 0 : ctx.host;
   const catalog = /* @__PURE__ */ new Map();
-  if (typeof hostReq === "function") {
+  if (typeof (host == null ? void 0 : host.request) === "function") {
     await Promise.all(
       Object.values(groups).map(async (grp) => {
         try {
-          const res = await hostReq({
+          const res = await host.request({
             url: "https://api.nexusmind.digital/v1/models",
             method: "GET",
             headers: {
@@ -229,20 +227,19 @@ function createNexusMindDecisionProvider(ctx, groups) {
     subscribe: () => () => {
     },
     decide: async (request, options) => {
-      var _a;
-      const hostReq = (_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request;
-      if (typeof hostReq !== "function") {
+      const host = ctx == null ? void 0 : ctx.host;
+      if (typeof (host == null ? void 0 : host.request) !== "function") {
         return { outcome: "failed", reason: "unavailable" };
       }
       const questionsSpec = Object.entries(request.questions || {}).map(([key, q]) => {
-        var _a2;
+        var _a;
         if (q.type === "yes_no") {
           return `- "${key}" (yes_no): ${q.instructions} -> retorne {"type":"yes_no","probability": <numero 0..1>}`;
         }
         if (q.type === "choice") {
           return `- "${key}" (choice): ${q.instructions} | opcoes: ${JSON.stringify(q.options)} -> retorne {"type":"choice","choice":"<uma das chaves>","confidence":<0..1>,"probabilities":{}}`;
         }
-        return `- "${key}" (score): ${q.instructions} | niveis 0..${(((_a2 = q.levels) == null ? void 0 : _a2.length) || 2) - 1}: ${JSON.stringify(q.levels)} -> retorne {"type":"score","score":<numero 0..N-1>,"confidence":<0..1>,"probabilities":{}}`;
+        return `- "${key}" (score): ${q.instructions} | niveis 0..${(((_a = q.levels) == null ? void 0 : _a.length) || 2) - 1}: ${JSON.stringify(q.levels)} -> retorne {"type":"score","score":<numero 0..N-1>,"confidence":<0..1>,"probabilities":{}}`;
       });
       const prompt = [
         "Você é um motor de decisão determinístico ultrarrápido. Responda APENAS um objeto JSON válido (sem markdown, sem comentários) mapeando cada chave de pergunta para sua resposta exata.",
@@ -253,11 +250,11 @@ function createNexusMindDecisionProvider(ctx, groups) {
         String(request.state || "").slice(0, 6e3)
       ].join("\n");
       const tryCall = async (grp, mdl) => {
-        var _a2, _b, _c, _d, _e;
-        if ((_a2 = options == null ? void 0 : options.signal) == null ? void 0 : _a2.aborted) {
+        var _a, _b, _c, _d, _e;
+        if ((_a = options == null ? void 0 : options.signal) == null ? void 0 : _a.aborted) {
           return { outcome: "failed", reason: "timeout" };
         }
-        const res = await hostReq({
+        const res = await host.request({
           url: "https://api.nexusmind.digital/v1/chat/completions",
           method: "POST",
           headers: {
