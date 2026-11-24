@@ -1,4 +1,17 @@
 import type { Context } from "@buzz/author";
+import {
+  selectBestModelByTier,
+  applyBestModelToAgent,
+  createNexusMindDecisionProvider,
+  scoreModelForTier,
+} from "./services/smart-router";
+
+export {
+  selectBestModelByTier,
+  applyBestModelToAgent,
+  createNexusMindDecisionProvider,
+  scoreModelForTier,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OFFICIAL BRAND SVGS & MINIMALIST BUZZ UI ICONS (ZERO EMOJIS)
@@ -118,7 +131,7 @@ const SVG_ICONS = {
     ),
 };
 
-export const inject = ["react", "pages", "settingsCards", "host", "agents"];
+export const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions"];
 
 const ICON =
   "data:image/svg+xml;base64," +
@@ -3354,12 +3367,31 @@ print("SYNC_SUCCESS")
   };
 
   // ── INJEÇÃO DE INSTRUÇÕES DE AGENTE (<plugin-instructions>) ──
+  // ── REGISTRO DE DECISION PROVIDER NATIVO DO NEXUSMIND (Settings > Decisions API) ──
+  if ((ctx as any).decisions?.registerProvider) {
+    try {
+      const disposeDecisionProvider = (ctx as any).decisions.registerProvider(
+        createNexusMindDecisionProvider(ctx, CANONICAL_GROUPS as any)
+      );
+      if ((ctx as any).on && typeof disposeDecisionProvider === "function") {
+        (ctx as any).on("dispose", () => {
+          try {
+            disposeDecisionProvider();
+          } catch {}
+        });
+      }
+      console.log("[NEXUSMIND] DecisionProvider 'nexusmind-fast' registrado em ctx.decisions.");
+    } catch (err) {
+      console.warn("[NEXUSMIND] Falha ao registrar DecisionProvider:", err);
+    }
+  }
+
   if ((ctx.agents as any)?.addInstructions) {
     try {
       (ctx.agents as any).addInstructions({
-        id: "nexusmind-gateway-v1",
-        text: `NexusMind AI Gateway (Cortexx Platform) — Roteamento Unificado de Modelos:
-Acesso aos catálogos de modelos LLM gerenciados com roteamento de alta disponibilidade via ctx.host.request.
+        id: "nexusmind-gateway-v2",
+        text: `NexusMind AI Gateway (Cortexx Platform) — Roteamento Unificado & Melhor Modelo por Tier:
+Acesso aos catálogos de modelos LLM gerenciados com roteamento inteligente, ping real e DecisionProvider nativo.
 Grupos Canônicos:
 - nexusmind_openai: padrão mistralai/mistral-large-4-1t-a52b (OpenAI-compatible /v1)
 - nexusmind_anthropic: padrão claude-sonnet-4-6 (/v1/messages)
@@ -3368,7 +3400,9 @@ Grupos Canônicos:
 Ferramentas nativas do Gateway:
 1. nexusmind_models({ group? }): Consulta modelos disponíveis em tempo real (/v1/models) via host bridge com latência real.
 2. nexusmind_status(): Ping HTTP real nos 4 grupos canônicos e consulta ao vivo de saldo/perfil (/api/v1/user/profile).
-Use nexusmind_models para inspecionar modelos suportados e latências antes de configurar sub-harnesses.`
+3. nexusmind_best_model({ tier?, exclude_models?, prefer_free?, avoid_free?, max_probes? }): Faz ping real em paralelo e elege o melhor modelo saudável para o tier ('tier1_fast' | 'tier2_balanced' | 'tier3_frontier' | 'reasoning' | 'decision'), evitando modelos :free com rate limit por padrão.
+4. nexusmind_apply_best_model({ agente, tier?, exclude_models?, prefer_free? }): Seleciona o melhor modelo saudável para o tier e já aplica diretamente no agente via ctx.agents.save().
+Use nexusmind_best_model ou nexusmind_apply_best_model sempre que precisar garantir o melhor modelo online para um card ou recuperar de erro 429/502.`
       });
       console.log("[NEXUSMIND] ctx.agents.addInstructions registrado com sucesso.");
     } catch (err) {
@@ -3561,7 +3595,87 @@ Use nexusmind_models para inspecionar modelos suportados e latências antes de c
         },
       });
 
-      console.log("[NEXUSMIND] 2 agentTools registradas com sucesso no harness do Buzz.");
+      (ctx.agents as any).addTool({
+        name: "nexusmind_best_model",
+        description: "Faz ping real em paralelo nos melhores candidatos do NexusMind para o tier solicitado ('tier1_fast' | 'tier2_balanced' | 'tier3_frontier' | 'reasoning' | 'decision') e retorna o melhor modelo online (capacidade + menor latência), evitando modelos :free instáveis por padrão.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tier: {
+              type: "string",
+              enum: ["tier1_fast", "tier2_balanced", "tier3_frontier", "reasoning", "decision"],
+              description: "Tier desejado para a tarefa (default: 'tier2_balanced')",
+            },
+            exclude_models: {
+              type: "array",
+              items: { type: "string" },
+              description: "Lista de modelos em erro/rate-limit a excluir do ranking",
+            },
+            prefer_free: {
+              type: "boolean",
+              description: "Se true, restringe a candidatos FREE (default: false)",
+            },
+            avoid_free: {
+              type: "boolean",
+              description: "Se true (padrão), evita modelos :free propensos a HTTP 429",
+            },
+            max_probes: {
+              type: "number",
+              description: "Quantidade máxima de modelos testados ao vivo (1..8, default: 5)",
+            },
+          },
+        },
+        call: async (_client: any, _context: any, args: any) => {
+          const res = await selectBestModelByTier(ctx, CANONICAL_GROUPS as any, {
+            tier: args?.tier,
+            exclude_models: Array.isArray(args?.exclude_models) ? args.exclude_models : undefined,
+            prefer_free: Boolean(args?.prefer_free),
+            avoid_free: args?.avoid_free !== false,
+            max_probes: typeof args?.max_probes === "number" ? args.max_probes : undefined,
+          });
+          return JSON.stringify(res, null, 2);
+        },
+      });
+
+      (ctx.agents as any).addTool({
+        name: "nexusmind_apply_best_model",
+        description: "Elege ao vivo o melhor modelo saudável no NexusMind para o tier solicitado e atualiza automaticamente a configuração do agente alvo no Buzz Desktop via ctx.agents.save().",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agente: {
+              type: "string",
+              description: "Nome ou key do agente alvo no Buzz (ex: 'OrgFy Teo', 'OrgFy Val')",
+            },
+            tier: {
+              type: "string",
+              enum: ["tier1_fast", "tier2_balanced", "tier3_frontier", "reasoning", "decision"],
+              description: "Tier desejado (default: 'tier2_balanced')",
+            },
+            exclude_models: {
+              type: "array",
+              items: { type: "string" },
+              description: "Modelos a excluir do ranking (ex: modelo com 429)",
+            },
+            prefer_free: {
+              type: "boolean",
+              description: "Se true, prioriza modelos FREE (default: false)",
+            },
+          },
+          required: ["agente"],
+        },
+        call: async (_client: any, _context: any, args: any) => {
+          const res = await applyBestModelToAgent(ctx, CANONICAL_GROUPS as any, {
+            agente: String(args?.agente || ""),
+            tier: args?.tier,
+            exclude_models: Array.isArray(args?.exclude_models) ? args.exclude_models : undefined,
+            prefer_free: Boolean(args?.prefer_free),
+          });
+          return JSON.stringify(res, null, 2);
+        },
+      });
+
+      console.log("[NEXUSMIND] 4 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar agentTools:", err);
     }

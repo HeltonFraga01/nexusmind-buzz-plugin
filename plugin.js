@@ -1,3 +1,335 @@
+function isFreeModel(modelId) {
+  const m = String(modelId || "").toLowerCase();
+  return m.includes(":free") || m.includes("-free") || m.includes("/free") || m.endsWith("free");
+}
+function scoreModelForTier(modelId, tier) {
+  const m = String(modelId || "").toLowerCase();
+  let capability = 55;
+  let tierMatch = 50;
+  if (/(opus|gpt-5|gpt-6|claude-sonnet-5|claude-opus-5|gemini-3\.?5?-pro|gemini-2\.5-pro|grok-4\.5)/.test(m)) {
+    capability = 92;
+  } else if (/(claude-sonnet-4-6|sonnet|deepseek-r1|deepseek-v3|qwen3-coder|mistral-large|grok-4|codestral)/.test(m)) {
+    capability = 84;
+  } else if (/(gemini-3\.8-flash|gemini-2\.5-flash|haiku|flash|devstral|nemotron|kimi)/.test(m)) {
+    capability = 74;
+  } else if (/(mini|lite|nano|8b|7b|3b)/.test(m)) {
+    capability = 58;
+  }
+  if (tier === "decision" || tier === "tier1_fast") {
+    if (/(flash|haiku|mini|fast|lite|gemma|devstral)/.test(m)) tierMatch = 95;
+    else if (/(sonnet|mistral-large)/.test(m)) tierMatch = 70;
+    else if (/(opus|thinking|r1)/.test(m)) tierMatch = 35;
+  } else if (tier === "tier2_balanced") {
+    if (/(claude-sonnet-4-6|sonnet|mistral-large|gemini-3\.8-flash-medium|grok-4|qwen3-coder)/.test(m)) tierMatch = 95;
+    else if (/(pro|opus|flash)/.test(m)) tierMatch = 75;
+  } else if (tier === "tier3_frontier") {
+    if (/(opus|gpt-5|gpt-6|claude-sonnet-5|gemini-3\.?5?-pro|grok-4\.5)/.test(m)) tierMatch = 98;
+    else if (/(sonnet-4-6|thinking|reasoning|mistral-large)/.test(m)) tierMatch = 82;
+    else if (/(nano|tiny|mini|lite)/.test(m)) tierMatch = 25;
+  } else if (tier === "reasoning") {
+    if (/(thinking|reasoning|r1|opus-4-6|opus-5|o3|gpt-5)/.test(m)) tierMatch = 98;
+    else if (/(sonnet|pro|grok-4)/.test(m)) tierMatch = 75;
+  }
+  return { capability, tierMatch };
+}
+function getDisabledModels() {
+  var _a, _b;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, "nexusmind_disabled_models");
+    if (!raw) return /* @__PURE__ */ new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.map((x) => String(x))) : /* @__PURE__ */ new Set();
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
+async function pingModel(ctx, modelId, group) {
+  var _a;
+  const hostReq = (_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request;
+  if (typeof hostReq !== "function") {
+    return { online: false, latencyMs: null, error: "ctx.host.request indisponível" };
+  }
+  const isAnthropic = group.id === "nexusmind_anthropic";
+  const url = isAnthropic ? "https://api.nexusmind.digital/v1/messages" : "https://api.nexusmind.digital/v1/chat/completions";
+  const headers = isAnthropic ? {
+    "x-api-key": group.defaultKey,
+    Authorization: `Bearer ${group.defaultKey}`,
+    "anthropic-version": "2023-06-01",
+    "Content-Type": "application/json",
+    "User-Agent": "BuzzDesktop/NexusMindRouter"
+  } : {
+    Authorization: `Bearer ${group.defaultKey}`,
+    "Content-Type": "application/json",
+    "User-Agent": "BuzzDesktop/NexusMindRouter"
+  };
+  const t0 = Date.now();
+  try {
+    const res = await hostReq({
+      url,
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: "user", content: "ok" }],
+        max_tokens: isAnthropic ? 16 : 5
+      }),
+      timeoutMs: 9e3
+    });
+    const latencyMs = Date.now() - t0;
+    if ((res == null ? void 0 : res.status) >= 200 && (res == null ? void 0 : res.status) < 300) {
+      return { online: true, latencyMs };
+    }
+    return { online: false, latencyMs, error: `HTTP ${(res == null ? void 0 : res.status) ?? "err"}` };
+  } catch (err) {
+    return { online: false, latencyMs: Date.now() - t0, error: String((err == null ? void 0 : err.message) || err).slice(0, 100) };
+  }
+}
+async function selectBestModelByTier(ctx, groups, input = {}) {
+  var _a;
+  const tier = input.tier || "tier2_balanced";
+  const preferFree = Boolean(input.prefer_free);
+  const avoidFree = input.avoid_free !== false && !preferFree;
+  const maxProbes = Math.max(1, Math.min(8, Number(input.max_probes || 5)));
+  const disabled = getDisabledModels();
+  const excluded = new Set((input.exclude_models || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
+  const hostReq = (_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request;
+  const catalog = /* @__PURE__ */ new Map();
+  if (typeof hostReq === "function") {
+    await Promise.all(
+      Object.values(groups).map(async (grp) => {
+        try {
+          const res = await hostReq({
+            url: "https://api.nexusmind.digital/v1/models",
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${grp.defaultKey}`,
+              "User-Agent": "BuzzDesktop/NexusMindRouter"
+            },
+            timeoutMs: 8e3
+          });
+          if ((res == null ? void 0 : res.status) >= 200 && (res == null ? void 0 : res.status) < 300 && (res == null ? void 0 : res.body)) {
+            const parsed = JSON.parse(res.body);
+            for (const m of Array.isArray(parsed == null ? void 0 : parsed.data) ? parsed.data : []) {
+              const mid = String((m == null ? void 0 : m.id) || "").trim();
+              if (!mid || disabled.has(mid) || excluded.has(mid.toLowerCase()) || catalog.has(mid)) continue;
+              catalog.set(mid, { id: mid, group: grp });
+            }
+          }
+        } catch {
+        }
+      })
+    );
+  }
+  if (catalog.size === 0) {
+    for (const grp of Object.values(groups)) {
+      if (!disabled.has(grp.defaultModel) && !excluded.has(grp.defaultModel.toLowerCase())) {
+        catalog.set(grp.defaultModel, { id: grp.defaultModel, group: grp });
+      }
+    }
+  }
+  let pool = Array.from(catalog.values());
+  if (preferFree) {
+    const freeOnly = pool.filter((c) => isFreeModel(c.id));
+    if (freeOnly.length > 0) pool = freeOnly;
+  } else if (avoidFree) {
+    const paidOnly = pool.filter((c) => !isFreeModel(c.id));
+    if (paidOnly.length > 0) pool = paidOnly;
+  }
+  const preRanked = pool.map((item) => {
+    const { capability, tierMatch } = scoreModelForTier(item.id, tier);
+    const preScore = tierMatch * 0.65 + capability * 0.35;
+    return { ...item, capability, tierMatch, preScore };
+  }).sort((a, b) => b.preScore - a.preScore).slice(0, maxProbes);
+  const probed = await Promise.all(
+    preRanked.map(async (cand) => {
+      const ping = await pingModel(ctx, cand.id, cand.group);
+      const latencyWeight = tier === "decision" || tier === "tier1_fast" ? 8 : 3.5;
+      const latencyPenalty = ping.latencyMs !== null ? Math.min(35, ping.latencyMs / 1e3 * latencyWeight) : 35;
+      const combinedScore = ping.online ? Number((cand.preScore - latencyPenalty).toFixed(2)) : -1;
+      return {
+        model: cand.id,
+        group: cand.group.id,
+        platform: cand.group.platformKey,
+        tierMatch: cand.tierMatch,
+        capabilityScore: cand.capability,
+        latencyMs: ping.latencyMs,
+        combinedScore,
+        online: ping.online,
+        isFree: isFreeModel(cand.id),
+        error: ping.error
+      };
+    })
+  );
+  probed.sort((a, b) => {
+    if (a.online !== b.online) return a.online ? -1 : 1;
+    if (b.combinedScore !== a.combinedScore) return b.combinedScore - a.combinedScore;
+    return (a.latencyMs ?? 999999) - (b.latencyMs ?? 999999);
+  });
+  const winner = probed.find((p) => p.online) || null;
+  return {
+    ok: Boolean(winner),
+    tier,
+    selectedModel: (winner == null ? void 0 : winner.model) || null,
+    selectedGroup: (winner == null ? void 0 : winner.group) || null,
+    selectedPlatform: (winner == null ? void 0 : winner.platform) || null,
+    selectedLatencyMs: (winner == null ? void 0 : winner.latencyMs) ?? null,
+    selectedScore: (winner == null ? void 0 : winner.combinedScore) ?? null,
+    candidatesTested: probed.length,
+    ranking: probed,
+    message: winner ? `Melhor modelo para '${tier}': ${winner.model} (${winner.group}, ${winner.latencyMs}ms, score ${winner.combinedScore}).` : `Nenhum dos ${probed.length} modelos testados respondeu HTTP 200 para '${tier}'.`
+  };
+}
+async function applyBestModelToAgent(ctx, groups, input) {
+  var _a, _b, _c;
+  const selection = await selectBestModelByTier(ctx, groups, input);
+  if (!selection.ok || !selection.selectedModel) {
+    return { ...selection, applied: false, agentKey: null, previousModel: null };
+  }
+  const agentsApi = ctx == null ? void 0 : ctx.agents;
+  const snap = ((_a = agentsApi == null ? void 0 : agentsApi.snapshot) == null ? void 0 : _a.call(agentsApi)) || {};
+  const allAgents = [...snap.running || [], ...snap.agents || []];
+  const q = String(input.agente || "").trim().toLowerCase();
+  const target = allAgents.find(
+    (a) => String((a == null ? void 0 : a.key) || "").toLowerCase() === q || String((a == null ? void 0 : a.name) || "").toLowerCase() === q || String((a == null ? void 0 : a.name) || "").toLowerCase().includes(q)
+  );
+  if (!target || typeof (agentsApi == null ? void 0 : agentsApi.save) !== "function") {
+    return {
+      ...selection,
+      applied: false,
+      agentKey: (target == null ? void 0 : target.key) || null,
+      previousModel: ((_b = target == null ? void 0 : target.config) == null ? void 0 : _b.model) || null,
+      message: `${selection.message} (Agente '${input.agente}' não encontrado ou ctx.agents.save indisponível).`
+    };
+  }
+  const previousModel = ((_c = target == null ? void 0 : target.config) == null ? void 0 : _c.model) || null;
+  const nextCfg = {
+    ...target.config && typeof target.config === "object" ? target.config : {},
+    model: selection.selectedModel,
+    provider: selection.selectedGroup || "nexusmind_antigravity"
+  };
+  await agentsApi.save(target.key, { config: nextCfg });
+  return {
+    ...selection,
+    applied: true,
+    agentKey: target.key,
+    previousModel,
+    message: `Agente '${target.name || target.key}' atualizado de '${previousModel || "padrão"}' para '${selection.selectedModel}' (${selection.selectedGroup}, ${selection.selectedLatencyMs}ms).`
+  };
+}
+function createNexusMindDecisionProvider(ctx, groups) {
+  const fastGroup = groups.nexusmind_antigravity || Object.values(groups)[0];
+  const fallbackGroup = groups.nexusmind_openai || fastGroup;
+  const decisionModel = (fastGroup == null ? void 0 : fastGroup.defaultModel) || "gemini-3.8-flash-medium";
+  return {
+    id: "nexusmind-fast",
+    label: "NexusMind Fast Decisions",
+    description: `Modelo rápido via NexusMind Gateway (${decisionModel}) para classificadores Attention e roteamento OrgFy.`,
+    order: 5,
+    status: () => (fastGroup == null ? void 0 : fastGroup.defaultKey) ? "ready" : "needs-setup",
+    subscribe: () => () => {
+    },
+    decide: async (request, options) => {
+      var _a;
+      const hostReq = (_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request;
+      if (typeof hostReq !== "function") {
+        return { outcome: "failed", reason: "unavailable" };
+      }
+      const questionsSpec = Object.entries(request.questions || {}).map(([key, q]) => {
+        var _a2;
+        if (q.type === "yes_no") {
+          return `- "${key}" (yes_no): ${q.instructions} -> retorne {"type":"yes_no","probability": <numero 0..1>}`;
+        }
+        if (q.type === "choice") {
+          return `- "${key}" (choice): ${q.instructions} | opcoes: ${JSON.stringify(q.options)} -> retorne {"type":"choice","choice":"<uma das chaves>","confidence":<0..1>,"probabilities":{}}`;
+        }
+        return `- "${key}" (score): ${q.instructions} | niveis 0..${(((_a2 = q.levels) == null ? void 0 : _a2.length) || 2) - 1}: ${JSON.stringify(q.levels)} -> retorne {"type":"score","score":<numero 0..N-1>,"confidence":<0..1>,"probabilities":{}}`;
+      });
+      const prompt = [
+        "Você é um motor de decisão determinístico ultrarrápido. Responda APENAS um objeto JSON válido (sem markdown, sem comentários) mapeando cada chave de pergunta para sua resposta exata.",
+        "Perguntas:",
+        ...questionsSpec,
+        "",
+        "Texto para julgar (state):",
+        String(request.state || "").slice(0, 6e3)
+      ].join("\n");
+      const tryCall = async (grp, mdl) => {
+        var _a2, _b, _c, _d, _e;
+        if ((_a2 = options == null ? void 0 : options.signal) == null ? void 0 : _a2.aborted) {
+          return { outcome: "failed", reason: "timeout" };
+        }
+        const res = await hostReq({
+          url: "https://api.nexusmind.digital/v1/chat/completions",
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${grp.defaultKey}`,
+            "Content-Type": "application/json",
+            "User-Agent": "BuzzDesktop/NexusMindDecisions"
+          },
+          body: JSON.stringify({
+            model: mdl,
+            temperature: 0,
+            max_tokens: 600,
+            response_format: { type: "json_object" },
+            messages: [
+              { role: "system", content: "Retorne estritamente JSON válido seguindo o schema solicitado." },
+              { role: "user", content: prompt }
+            ]
+          }),
+          timeoutMs: Math.min(25e3, Math.max(2e3, Number(request.timeoutMs || 1e4)))
+        });
+        if (!res || res.status < 200 || res.status >= 300 || !res.body) {
+          return null;
+        }
+        const outer = JSON.parse(res.body);
+        const rawText = String(((_d = (_c = (_b = outer == null ? void 0 : outer.choices) == null ? void 0 : _b[0]) == null ? void 0 : _c.message) == null ? void 0 : _d.content) || "").trim();
+        const cleaned = rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+        const parsed = JSON.parse(cleaned);
+        if (!parsed || typeof parsed !== "object") return null;
+        const answers = {};
+        for (const [k, q] of Object.entries(request.questions || {})) {
+          const raw = parsed[k];
+          if (!raw || typeof raw !== "object") return null;
+          if (q.type === "yes_no") {
+            const p = Math.max(0, Math.min(1, Number(raw.probability ?? (raw.answer ? 1 : 0))));
+            answers[k] = { type: "yes_no", probability: Number.isFinite(p) ? p : 0.5 };
+          } else if (q.type === "choice") {
+            const keys = Object.keys(q.options || {});
+            const ch = keys.includes(String(raw.choice)) ? String(raw.choice) : keys[0];
+            const conf = Math.max(0, Math.min(1, Number(raw.confidence ?? 0.8)));
+            answers[k] = {
+              type: "choice",
+              choice: ch,
+              confidence: Number.isFinite(conf) ? conf : 0.8,
+              probabilities: raw.probabilities && typeof raw.probabilities === "object" ? raw.probabilities : { [ch]: conf }
+            };
+          } else if (q.type === "score") {
+            const maxIdx = Math.max(1, (((_e = q.levels) == null ? void 0 : _e.length) || 2) - 1);
+            const sc = Math.max(0, Math.min(maxIdx, Number(raw.score ?? 0)));
+            const conf = Math.max(0, Math.min(1, Number(raw.confidence ?? 0.8)));
+            answers[k] = {
+              type: "score",
+              score: Number.isFinite(sc) ? sc : 0,
+              confidence: Number.isFinite(conf) ? conf : 0.8,
+              probabilities: raw.probabilities && typeof raw.probabilities === "object" ? raw.probabilities : {}
+            };
+          }
+        }
+        return { outcome: "answered", model: mdl, answers };
+      };
+      try {
+        const primary = await tryCall(fastGroup, decisionModel);
+        if (primary) return primary;
+        if (fallbackGroup && fallbackGroup.defaultModel !== decisionModel) {
+          const secondary = await tryCall(fallbackGroup, fallbackGroup.defaultModel);
+          if (secondary) return secondary;
+        }
+        return { outcome: "failed", reason: "service_error" };
+      } catch {
+        return { outcome: "failed", reason: "invalid_response" };
+      }
+    }
+  };
+}
 const SVG_ICONS = {
   // Official Brand Logos
   openai: (props = {}) => props.h(
@@ -133,7 +465,7 @@ const SVG_ICONS = {
     props.h("line", { x1: 12, y1: 2, x2: 12, y2: 12 })
   )
 };
-const inject = ["react", "pages", "settingsCards", "host", "agents"];
+const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions"];
 const ICON = "data:image/svg+xml;base64," + btoa(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="nm" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#nm)"/><circle cx="32" cy="32" r="19" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="2.5"/><path d="M21 42V22l22 20V22" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="21" cy="22" r="3.5" fill="#ffffff"/><circle cx="43" cy="42" r="3.5" fill="#ffffff"/><circle cx="43" cy="22" r="3.5" fill="#d1fae5"/><circle cx="21" cy="42" r="3.5" fill="#d1fae5"/></svg>'
 );
@@ -342,7 +674,7 @@ function formatNumber(n = 0) {
   return new Intl.NumberFormat("pt-BR").format(n);
 }
 function apply(ctx) {
-  var _a, _b;
+  var _a, _b, _c;
   const React = ctx.react;
   const h = React.createElement;
   function NexusMindComponent({ isSettingsCard = false }) {
@@ -433,7 +765,7 @@ function apply(ctx) {
       }, 2500);
     };
     const fetchTelemetry = async (tokenToUse) => {
-      var _a2, _b2, _c, _d;
+      var _a2, _b2, _c2, _d;
       const token = tokenToUse.trim();
       if (!token) return;
       try {
@@ -471,7 +803,7 @@ function apply(ctx) {
             });
             if (mcpRes.status === 200 && mcpRes.body) {
               const mcpData = JSON.parse(mcpRes.body);
-              const innerText = (_c = (_b2 = (_a2 = mcpData.result) == null ? void 0 : _a2.content) == null ? void 0 : _b2[0]) == null ? void 0 : _c.text;
+              const innerText = (_c2 = (_b2 = (_a2 = mcpData.result) == null ? void 0 : _a2.content) == null ? void 0 : _b2[0]) == null ? void 0 : _c2.text;
               if (innerText) {
                 const inner = JSON.parse(innerText);
                 u = ((_d = inner.result) == null ? void 0 : _d.data) || inner.data || inner;
@@ -2916,7 +3248,7 @@ print("SYNC_SUCCESS")
     return null;
   };
   const resolveLiveAccountToken = async (forceRefresh = false) => {
-    var _a2, _b2, _c, _d;
+    var _a2, _b2, _c2, _d;
     let sessionObj = null;
     const sessResult = await readSessionFile();
     if (sessResult) {
@@ -2931,7 +3263,7 @@ print("SYNC_SUCCESS")
         const renewed = await refreshOAuthSession(sessionObj);
         if (renewed) return renewed;
       }
-      const tok = sessionObj.access_token || sessionObj.token || ((_c = sessionObj.token_data) == null ? void 0 : _c.access_token);
+      const tok = sessionObj.access_token || sessionObj.token || ((_c2 = sessionObj.token_data) == null ? void 0 : _c2.access_token);
       if (typeof tok === "string" && tok.trim().length > 0) {
         return tok.trim();
       }
@@ -2956,7 +3288,7 @@ print("SYNC_SUCCESS")
       };
     }
     const queryQuota = async (tok) => {
-      var _a2, _b2, _c, _d;
+      var _a2, _b2, _c2, _d;
       try {
         const resProf = await hostGetJson("https://nexusmind.digital/api/v1/user/profile", tok, 8e3);
         if (resProf.status >= 200 && resProf.status < 300 && resProf.json) {
@@ -2997,7 +3329,7 @@ print("SYNC_SUCCESS")
         const latencyMs = Math.round(performance.now() - t0);
         if (mcpReq.status === 200 && mcpReq.body) {
           const mcpData = JSON.parse(mcpReq.body);
-          const innerText = (_c = (_b2 = (_a2 = mcpData.result) == null ? void 0 : _a2.content) == null ? void 0 : _b2[0]) == null ? void 0 : _c.text;
+          const innerText = (_c2 = (_b2 = (_a2 = mcpData.result) == null ? void 0 : _a2.content) == null ? void 0 : _b2[0]) == null ? void 0 : _c2.text;
           if (innerText) {
             const inner = JSON.parse(innerText);
             const u = ((_d = inner.result) == null ? void 0 : _d.data) || inner.data || inner;
@@ -3043,12 +3375,30 @@ print("SYNC_SUCCESS")
       error: "Sessão expirada ou sem permissão de leitura de saldo"
     };
   };
-  if ((_a = ctx.agents) == null ? void 0 : _a.addInstructions) {
+  if ((_a = ctx.decisions) == null ? void 0 : _a.registerProvider) {
+    try {
+      const disposeDecisionProvider = ctx.decisions.registerProvider(
+        createNexusMindDecisionProvider(ctx, CANONICAL_GROUPS)
+      );
+      if (ctx.on && typeof disposeDecisionProvider === "function") {
+        ctx.on("dispose", () => {
+          try {
+            disposeDecisionProvider();
+          } catch {
+          }
+        });
+      }
+      console.log("[NEXUSMIND] DecisionProvider 'nexusmind-fast' registrado em ctx.decisions.");
+    } catch (err) {
+      console.warn("[NEXUSMIND] Falha ao registrar DecisionProvider:", err);
+    }
+  }
+  if ((_b = ctx.agents) == null ? void 0 : _b.addInstructions) {
     try {
       ctx.agents.addInstructions({
-        id: "nexusmind-gateway-v1",
-        text: `NexusMind AI Gateway (Cortexx Platform) — Roteamento Unificado de Modelos:
-Acesso aos catálogos de modelos LLM gerenciados com roteamento de alta disponibilidade via ctx.host.request.
+        id: "nexusmind-gateway-v2",
+        text: `NexusMind AI Gateway (Cortexx Platform) — Roteamento Unificado & Melhor Modelo por Tier:
+Acesso aos catálogos de modelos LLM gerenciados com roteamento inteligente, ping real e DecisionProvider nativo.
 Grupos Canônicos:
 - nexusmind_openai: padrão mistralai/mistral-large-4-1t-a52b (OpenAI-compatible /v1)
 - nexusmind_anthropic: padrão claude-sonnet-4-6 (/v1/messages)
@@ -3057,14 +3407,16 @@ Grupos Canônicos:
 Ferramentas nativas do Gateway:
 1. nexusmind_models({ group? }): Consulta modelos disponíveis em tempo real (/v1/models) via host bridge com latência real.
 2. nexusmind_status(): Ping HTTP real nos 4 grupos canônicos e consulta ao vivo de saldo/perfil (/api/v1/user/profile).
-Use nexusmind_models para inspecionar modelos suportados e latências antes de configurar sub-harnesses.`
+3. nexusmind_best_model({ tier?, exclude_models?, prefer_free?, avoid_free?, max_probes? }): Faz ping real em paralelo e elege o melhor modelo saudável para o tier ('tier1_fast' | 'tier2_balanced' | 'tier3_frontier' | 'reasoning' | 'decision'), evitando modelos :free com rate limit por padrão.
+4. nexusmind_apply_best_model({ agente, tier?, exclude_models?, prefer_free? }): Seleciona o melhor modelo saudável para o tier e já aplica diretamente no agente via ctx.agents.save().
+Use nexusmind_best_model ou nexusmind_apply_best_model sempre que precisar garantir o melhor modelo online para um card ou recuperar de erro 429/502.`
       });
       console.log("[NEXUSMIND] ctx.agents.addInstructions registrado com sucesso.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar addInstructions:", err);
     }
   }
-  if ((_b = ctx.agents) == null ? void 0 : _b.addTool) {
+  if ((_c = ctx.agents) == null ? void 0 : _c.addTool) {
     try {
       ctx.agents.addTool({
         name: "nexusmind_models",
@@ -3088,12 +3440,12 @@ Use nexusmind_models para inspecionar modelos suportados e latências antes de c
           const dedupedModels = /* @__PURE__ */ new Map();
           await Promise.all(
             selectedEntries.map(async ([key, grp]) => {
-              var _a2, _b2, _c, _d;
+              var _a2, _b2, _c2, _d;
               const t0 = performance.now();
               try {
                 const res = await hostGetJson("https://api.nexusmind.digital/v1/models", grp.defaultKey, 1e4);
                 if (res.status < 200 || res.status >= 300) {
-                  const apiErr = ((_b2 = (_a2 = res.json) == null ? void 0 : _a2.error) == null ? void 0 : _b2.message) || ((_c = res.json) == null ? void 0 : _c.message) || `HTTP ${res.status}`;
+                  const apiErr = ((_b2 = (_a2 = res.json) == null ? void 0 : _a2.error) == null ? void 0 : _b2.message) || ((_c2 = res.json) == null ? void 0 : _c2.message) || `HTTP ${res.status}`;
                   groupResults[key] = {
                     status: "error",
                     httpStatus: res.status,
@@ -3174,7 +3526,7 @@ Use nexusmind_models para inspecionar modelos suportados e latências antes de c
           const [, quota] = await Promise.all([
             Promise.all(
               Object.entries(groups).map(async ([key, grp]) => {
-                var _a2, _b2, _c, _d;
+                var _a2, _b2, _c2, _d;
                 const t0 = performance.now();
                 try {
                   const res = await hostGetJson("https://api.nexusmind.digital/v1/models", grp.defaultKey, 1e4);
@@ -3192,7 +3544,7 @@ Use nexusmind_models para inspecionar modelos suportados e latências antes de c
                     totalLatency += res.latencyMs;
                     successfulGroups++;
                   } else {
-                    const apiErr = ((_c = (_b2 = res.json) == null ? void 0 : _b2.error) == null ? void 0 : _c.message) || ((_d = res.json) == null ? void 0 : _d.message) || `HTTP ${res.status}`;
+                    const apiErr = ((_c2 = (_b2 = res.json) == null ? void 0 : _b2.error) == null ? void 0 : _c2.message) || ((_d = res.json) == null ? void 0 : _d.message) || `HTTP ${res.status}`;
                     groupsTelemetry[key] = {
                       groupName: grp.groupName,
                       platform: grp.platformKey,
@@ -3235,7 +3587,85 @@ Use nexusmind_models para inspecionar modelos suportados e latências antes de c
           }, null, 2);
         }
       });
-      console.log("[NEXUSMIND] 2 agentTools registradas com sucesso no harness do Buzz.");
+      ctx.agents.addTool({
+        name: "nexusmind_best_model",
+        description: "Faz ping real em paralelo nos melhores candidatos do NexusMind para o tier solicitado ('tier1_fast' | 'tier2_balanced' | 'tier3_frontier' | 'reasoning' | 'decision') e retorna o melhor modelo online (capacidade + menor latência), evitando modelos :free instáveis por padrão.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tier: {
+              type: "string",
+              enum: ["tier1_fast", "tier2_balanced", "tier3_frontier", "reasoning", "decision"],
+              description: "Tier desejado para a tarefa (default: 'tier2_balanced')"
+            },
+            exclude_models: {
+              type: "array",
+              items: { type: "string" },
+              description: "Lista de modelos em erro/rate-limit a excluir do ranking"
+            },
+            prefer_free: {
+              type: "boolean",
+              description: "Se true, restringe a candidatos FREE (default: false)"
+            },
+            avoid_free: {
+              type: "boolean",
+              description: "Se true (padrão), evita modelos :free propensos a HTTP 429"
+            },
+            max_probes: {
+              type: "number",
+              description: "Quantidade máxima de modelos testados ao vivo (1..8, default: 5)"
+            }
+          }
+        },
+        call: async (_client, _context, args) => {
+          const res = await selectBestModelByTier(ctx, CANONICAL_GROUPS, {
+            tier: args == null ? void 0 : args.tier,
+            exclude_models: Array.isArray(args == null ? void 0 : args.exclude_models) ? args.exclude_models : void 0,
+            prefer_free: Boolean(args == null ? void 0 : args.prefer_free),
+            avoid_free: (args == null ? void 0 : args.avoid_free) !== false,
+            max_probes: typeof (args == null ? void 0 : args.max_probes) === "number" ? args.max_probes : void 0
+          });
+          return JSON.stringify(res, null, 2);
+        }
+      });
+      ctx.agents.addTool({
+        name: "nexusmind_apply_best_model",
+        description: "Elege ao vivo o melhor modelo saudável no NexusMind para o tier solicitado e atualiza automaticamente a configuração do agente alvo no Buzz Desktop via ctx.agents.save().",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agente: {
+              type: "string",
+              description: "Nome ou key do agente alvo no Buzz (ex: 'OrgFy Teo', 'OrgFy Val')"
+            },
+            tier: {
+              type: "string",
+              enum: ["tier1_fast", "tier2_balanced", "tier3_frontier", "reasoning", "decision"],
+              description: "Tier desejado (default: 'tier2_balanced')"
+            },
+            exclude_models: {
+              type: "array",
+              items: { type: "string" },
+              description: "Modelos a excluir do ranking (ex: modelo com 429)"
+            },
+            prefer_free: {
+              type: "boolean",
+              description: "Se true, prioriza modelos FREE (default: false)"
+            }
+          },
+          required: ["agente"]
+        },
+        call: async (_client, _context, args) => {
+          const res = await applyBestModelToAgent(ctx, CANONICAL_GROUPS, {
+            agente: String((args == null ? void 0 : args.agente) || ""),
+            tier: args == null ? void 0 : args.tier,
+            exclude_models: Array.isArray(args == null ? void 0 : args.exclude_models) ? args.exclude_models : void 0,
+            prefer_free: Boolean(args == null ? void 0 : args.prefer_free)
+          });
+          return JSON.stringify(res, null, 2);
+        }
+      });
+      console.log("[NEXUSMIND] 4 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar agentTools:", err);
     }
@@ -3247,6 +3677,10 @@ export {
   CANONICAL_GROUPS,
   OFFICIAL_ENDPOINTS,
   apply,
+  applyBestModelToAgent,
+  createNexusMindDecisionProvider,
   getModelGroups,
-  inject
+  inject,
+  scoreModelForTier,
+  selectBestModelByTier
 };
