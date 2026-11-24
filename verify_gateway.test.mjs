@@ -22,11 +22,12 @@ nmMod.apply({
   host: {},
 });
 
-assert.equal(tools.size, 4, "devem existir exatamente 4 agentTools no NexusMind Gateway");
+assert.equal(tools.size, 5, "devem existir exatamente 5 agentTools no NexusMind Gateway");
 assert.ok(tools.has("nexusmind_models"));
 assert.ok(tools.has("nexusmind_status"));
 assert.ok(tools.has("nexusmind_best_model"));
 assert.ok(tools.has("nexusmind_apply_best_model"));
+assert.ok(tools.has("nexusmind_model_ranking"));
 assert.ok(registeredProvider && registeredProvider.id === "nexusmind-fast", "DecisionProvider 'nexusmind-fast' deve ser registrado");
 
 // 2. Testar selectBestModelByTier evitando :free por padrão e elegendo tier1_fast / tier3_frontier
@@ -126,9 +127,34 @@ assert.equal(dec.outcome, "answered");
 assert.equal(dec.answers.escopo_ok.probability, 0.95);
 assert.equal(dec.answers.tier.choice, "tier2_balanced");
 
-console.log("[NEXUSMIND GATEWAY v2.4 OK]", JSON.stringify({
+// 4. Testar buildModelRankingSnapshot (Ranking Real com telemetria do Gateway + ping)
+const rankingSnap = nmMod.buildModelRankingSnapshot({
+  catalogModels: [
+    { id: "qwen/qwen3:free", primaryGroup: "nexusmind_openai" },
+    { id: "gemini-3.8-flash-medium", primaryGroup: "nexusmind_antigravity" },
+    { id: "claude-sonnet-4-6", primaryGroup: "nexusmind_anthropic" },
+  ],
+  groups,
+  usageByModel: {
+    "gemini-3.8-flash-medium": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
+    "claude-sonnet-4-6": { calls: 159, avgDurationMs: 6760, avgFirstTokenMs: 900, totalCostUsd: 4.0, avgCostUsd: 0.025, cacheHitPct: 91.0, lastSeenAt: "2026-11-24T18:00:00Z" },
+  },
+  usageSampleSize: 1517,
+  liveProbes: {
+    "gemini-3.8-flash-medium": { status: "ok", latency: 650 },
+    "claude-sonnet-4-6": { status: "ok", latency: 820 },
+  },
+  tier: "geral",
+  avoidFree: true,
+});
+assert.equal(rankingSnap.source, "gateway_usage+live_probe");
+assert.ok(rankingSnap.bestByTier.geral && !rankingSnap.bestByTier.geral.model.includes(":free"));
+assert.ok(rankingSnap.bestByTier.tier1_fast?.model === "gemini-3.8-flash-medium");
+
+console.log("[NEXUSMIND GATEWAY v2.5 OK]", JSON.stringify({
   tools: Array.from(tools.keys()),
   decisionProvider: registeredProvider.id,
   bestFast: bestFast.selectedModel,
   appliedFrontier: applied.selectedModel,
+  rankingTopGeral: rankingSnap.bestByTier.geral.model,
 }));

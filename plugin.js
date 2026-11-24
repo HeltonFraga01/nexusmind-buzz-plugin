@@ -327,6 +327,755 @@ function createNexusMindDecisionProvider(ctx, groups) {
     }
   };
 }
+const SHARED_RANKING_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-model-ranking.json";
+const SHARED_USAGE_PATHS = [
+  "/Users/heltonfraga/.buzz/.scratch/nm_usage.json",
+  "~/.buzz/.scratch/nm_usage.json"
+];
+const LOCAL_STORAGE_RANKING_KEY = "nexusmind_model_ranking";
+function decodeFileContent(raw) {
+  if (typeof raw === "string") return raw;
+  if (raw instanceof Uint8Array) return new TextDecoder("utf-8").decode(raw);
+  if (raw instanceof ArrayBuffer) return new TextDecoder("utf-8").decode(new Uint8Array(raw));
+  if (ArrayBuffer.isView(raw)) {
+    return new TextDecoder("utf-8").decode(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength));
+  }
+  return String(raw ?? "");
+}
+function inferCanonicalGroupForModel(modelId, groups) {
+  const m = String(modelId || "").toLowerCase();
+  if (m.includes("grok") && groups.nexusmind_grok) return groups.nexusmind_grok;
+  if ((m.includes("gemini") || m.includes("antigravity") || m.includes("thinking") || m.includes("-high") || m.includes("-medium") || m.includes("-low")) && groups.nexusmind_antigravity) {
+    return groups.nexusmind_antigravity;
+  }
+  if (m.includes("claude") && groups.nexusmind_anthropic) return groups.nexusmind_anthropic;
+  if (groups.nexusmind_openai) return groups.nexusmind_openai;
+  return Object.values(groups)[0];
+}
+async function loadGatewayUsageByModel(ctx) {
+  var _a;
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.readFile) !== "function") {
+    return { sampleSize: 0, byModel: {} };
+  }
+  for (const path of SHARED_USAGE_PATHS) {
+    try {
+      const raw = await host.readFile(path);
+      if (!raw) continue;
+      const text = decodeFileContent(raw);
+      const parsed = JSON.parse(text);
+      const items = Array.isArray((_a = parsed == null ? void 0 : parsed.data) == null ? void 0 : _a.items) ? parsed.data.items : Array.isArray(parsed == null ? void 0 : parsed.items) ? parsed.items : Array.isArray(parsed) ? parsed : [];
+      const acc = /* @__PURE__ */ new Map();
+      for (const it of items) {
+        const mid = String((it == null ? void 0 : it.model) || "").trim();
+        if (!mid) continue;
+        let cur = acc.get(mid);
+        if (!cur) {
+          cur = {
+            calls: 0,
+            durSum: 0,
+            durN: 0,
+            ttftSum: 0,
+            ttftN: 0,
+            cost: 0,
+            inputTok: 0,
+            cacheReadTok: 0,
+            lastSeen: null
+          };
+          acc.set(mid, cur);
+        }
+        cur.calls += 1;
+        const cost = Number((it == null ? void 0 : it.actual_cost) ?? (it == null ? void 0 : it.total_cost) ?? 0);
+        if (Number.isFinite(cost) && cost >= 0) cur.cost += cost;
+        const dur = Number(it == null ? void 0 : it.duration_ms);
+        if (Number.isFinite(dur) && dur > 0 && dur < 6e5) {
+          cur.durSum += dur;
+          cur.durN += 1;
+        }
+        const ttft = Number(it == null ? void 0 : it.first_token_ms);
+        if (Number.isFinite(ttft) && ttft > 0 && ttft < 12e4) {
+          cur.ttftSum += ttft;
+          cur.ttftN += 1;
+        }
+        const inp = Number((it == null ? void 0 : it.input_tokens) ?? 0);
+        const cr = Number((it == null ? void 0 : it.cache_read_tokens) ?? 0);
+        if (Number.isFinite(inp) && inp > 0) cur.inputTok += inp;
+        if (Number.isFinite(cr) && cr > 0) cur.cacheReadTok += cr;
+        if (typeof (it == null ? void 0 : it.created_at) === "string" && (!cur.lastSeen || it.created_at > cur.lastSeen)) {
+          cur.lastSeen = it.created_at;
+        }
+      }
+      const byModel = {};
+      for (const [mid, st] of acc.entries()) {
+        const totalIn = st.inputTok + st.cacheReadTok;
+        byModel[mid] = {
+          calls: st.calls,
+          avgDurationMs: st.durN > 0 ? Math.round(st.durSum / st.durN) : null,
+          avgFirstTokenMs: st.ttftN > 0 ? Math.round(st.ttftSum / st.ttftN) : null,
+          totalCostUsd: Number(st.cost.toFixed(4)),
+          avgCostUsd: st.calls > 0 ? Number((st.cost / st.calls).toFixed(6)) : 0,
+          cacheHitPct: totalIn > 0 ? Number((st.cacheReadTok / totalIn * 100).toFixed(1)) : null,
+          lastSeenAt: st.lastSeen
+        };
+      }
+      return { sampleSize: items.length, byModel };
+    } catch {
+    }
+  }
+  return { sampleSize: 0, byModel: {} };
+}
+function computeModelRowScore(modelId, tier, usage, probe, avoidFree) {
+  const effectiveTier = tier === "geral" ? "tier2_balanced" : tier;
+  const { capability, tierMatch } = scoreModelForTier(modelId, effectiveTier);
+  const calls = (usage == null ? void 0 : usage.calls) ?? 0;
+  const adoptionScore = calls > 0 ? Math.min(100, Math.round(Math.log10(calls + 1) * 26)) : 0;
+  let speedScore = 60;
+  if ((probe == null ? void 0 : probe.status) === "ok" && typeof probe.latency === "number") {
+    speedScore = Math.max(15, Math.min(100, Math.round(100 - probe.latency / 1e3 * 12)));
+  } else if ((usage == null ? void 0 : usage.avgFirstTokenMs) && usage.avgFirstTokenMs > 0) {
+    speedScore = Math.max(20, Math.min(98, Math.round(100 - usage.avgFirstTokenMs / 1e3 * 8)));
+  } else if ((usage == null ? void 0 : usage.avgDurationMs) && usage.avgDurationMs > 0) {
+    speedScore = Math.max(20, Math.min(95, Math.round(100 - usage.avgDurationMs / 1e3 * 1.4)));
+  }
+  let rawScore = tier === "tier1_fast" || tier === "decision" ? tierMatch * 0.35 + speedScore * 0.35 + capability * 0.15 + adoptionScore * 0.15 : tier === "tier3_frontier" || tier === "reasoning" ? capability * 0.45 + tierMatch * 0.35 + adoptionScore * 0.1 + speedScore * 0.1 : capability * 0.35 + tierMatch * 0.3 + adoptionScore * 0.2 + speedScore * 0.15;
+  if ((usage == null ? void 0 : usage.cacheHitPct) && usage.cacheHitPct >= 50) {
+    rawScore += Math.min(5, (usage.cacheHitPct - 40) / 12);
+  }
+  if (avoidFree && isFreeModel(modelId)) {
+    rawScore -= 20;
+  }
+  if ((probe == null ? void 0 : probe.status) === "ok") {
+    rawScore += 8;
+  } else if ((probe == null ? void 0 : probe.status) === "error") {
+    rawScore -= 60;
+  }
+  return {
+    score: Number(Math.max(0, Math.min(100, rawScore)).toFixed(1)),
+    capabilityScore: capability,
+    tierMatchScore: tierMatch,
+    adoptionScore,
+    speedScore
+  };
+}
+function buildModelRankingSnapshot(params) {
+  const tier = params.tier || "geral";
+  const avoidFree = params.avoidFree !== false;
+  const disabledSet = new Set(params.disabledModels || []);
+  const liveProbes = params.liveProbes || {};
+  const pool = /* @__PURE__ */ new Map();
+  for (const m of params.catalogModels || []) {
+    const mid = String((m == null ? void 0 : m.id) || "").trim();
+    if (!mid) continue;
+    const grp = m.primaryGroup && params.groups[m.primaryGroup] || Array.isArray(m.groups) && m.groups[0] && params.groups[m.groups[0]] || inferCanonicalGroupForModel(mid, params.groups);
+    pool.set(mid, { id: mid, group: grp });
+  }
+  for (const mid of Object.keys(params.usageByModel || {})) {
+    if (!pool.has(mid)) {
+      pool.set(mid, { id: mid, group: inferCanonicalGroupForModel(mid, params.groups) });
+    }
+  }
+  for (const grp of Object.values(params.groups)) {
+    if (grp.defaultModel && !pool.has(grp.defaultModel)) {
+      pool.set(grp.defaultModel, { id: grp.defaultModel, group: grp });
+    }
+  }
+  const rankForTier = (targetTier) => {
+    const rows = [];
+    for (const item of pool.values()) {
+      const usage = params.usageByModel[item.id];
+      const probe = liveProbes[item.id];
+      const isDisabled = disabledSet.has(item.id);
+      const scored = computeModelRowScore(item.id, targetTier, usage, probe, avoidFree);
+      rows.push({
+        rank: 0,
+        model: item.id,
+        group: item.group.id,
+        platform: item.group.platformKey,
+        isFree: isFreeModel(item.id),
+        isDisabled,
+        score: isDisabled ? -1 : scored.score,
+        capabilityScore: scored.capabilityScore,
+        tierMatchScore: scored.tierMatchScore,
+        adoptionScore: scored.adoptionScore,
+        speedScore: scored.speedScore,
+        online: (probe == null ? void 0 : probe.status) === "ok" ? true : (probe == null ? void 0 : probe.status) === "error" ? false : null,
+        pingLatencyMs: typeof (probe == null ? void 0 : probe.latency) === "number" ? probe.latency : null,
+        pingError: probe == null ? void 0 : probe.errorMsg,
+        calls: (usage == null ? void 0 : usage.calls) ?? 0,
+        avgDurationMs: (usage == null ? void 0 : usage.avgDurationMs) ?? null,
+        avgFirstTokenMs: (usage == null ? void 0 : usage.avgFirstTokenMs) ?? null,
+        cacheHitPct: (usage == null ? void 0 : usage.cacheHitPct) ?? null,
+        avgCostUsd: (usage == null ? void 0 : usage.avgCostUsd) ?? 0,
+        totalCostUsd: (usage == null ? void 0 : usage.totalCostUsd) ?? 0
+      });
+    }
+    rows.sort((a, b) => {
+      if (a.isDisabled !== b.isDisabled) return a.isDisabled ? 1 : -1;
+      if (a.online === false !== (b.online === false)) return a.online === false ? 1 : -1;
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.calls !== a.calls) return b.calls - a.calls;
+      return (a.pingLatencyMs ?? 999999) - (b.pingLatencyMs ?? 999999);
+    });
+    rows.forEach((r, idx) => {
+      r.rank = idx + 1;
+    });
+    return rows;
+  };
+  const tiers = ["geral", "tier1_fast", "tier2_balanced", "tier3_frontier", "reasoning", "decision"];
+  const bestByTier = {};
+  let selectedRows = [];
+  for (const t of tiers) {
+    const ranked = rankForTier(t);
+    if (t === tier) selectedRows = ranked;
+    const winner = ranked.find((r) => !r.isDisabled && r.online !== false) || null;
+    bestByTier[t] = winner ? {
+      model: winner.model,
+      group: winner.group,
+      platform: winner.platform,
+      score: winner.score,
+      pingLatencyMs: winner.pingLatencyMs,
+      calls: winner.calls,
+      online: winner.online,
+      avgCostUsd: winner.avgCostUsd,
+      cacheHitPct: winner.cacheHitPct
+    } : null;
+  }
+  const hasUsage = params.usageSampleSize > 0;
+  const hasProbes = Object.values(liveProbes).some((p) => p.status === "ok" || p.status === "error");
+  const source = hasUsage && hasProbes ? "gateway_usage+live_probe" : hasUsage ? "gateway_usage" : hasProbes ? "live_probe" : "catalog";
+  return {
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    source,
+    usageSampleSize: params.usageSampleSize,
+    tier,
+    bestByTier,
+    models: selectedRows
+  };
+}
+async function persistModelRankingSnapshot(ctx, snapshot) {
+  var _a, _b;
+  const payload = JSON.stringify(
+    {
+      ...snapshot,
+      // Limita lista salva em disco aos top 60 para leitura ultrarrápida
+      models: snapshot.models.slice(0, 60)
+    },
+    null,
+    2
+  );
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_RANKING_KEY, payload);
+  } catch {
+  }
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.writeFile) === "function") {
+    try {
+      await host.writeFile(SHARED_RANKING_PATH, payload);
+      return true;
+    } catch {
+    }
+  }
+  if (typeof (host == null ? void 0 : host.spawn) === "function") {
+    try {
+      const b64 = btoa(unescape(encodeURIComponent(payload)));
+      const py = `import base64, os; p=${JSON.stringify(SHARED_RANKING_PATH)}; os.makedirs(os.path.dirname(p), exist_ok=True); open(p, 'wb').write(base64.b64decode(${JSON.stringify(b64)}))`;
+      const proc = await host.spawn("python", { args: [py] });
+      await proc.exited;
+      return true;
+    } catch {
+    }
+  }
+  return false;
+}
+const TIER_OPTIONS = [
+  { id: "geral", label: "Geral", hint: "Equilíbrio entre qualidade, adoção real e velocidade" },
+  { id: "tier1_fast", label: "Tier 1 · Rápido", hint: "Triagem, tarefas simples e baixa latência" },
+  { id: "tier2_balanced", label: "Tier 2 · Equilibrado", hint: "Execução padrão de cards e código" },
+  { id: "tier3_frontier", label: "Tier 3 · Frontier", hint: "Arquitetura, revisão crítica e alto rigor" },
+  { id: "reasoning", label: "Raciocínio", hint: "Debugging complexo e planejamento profundo" },
+  { id: "decision", label: "Decision API", hint: "Classificadores yes_no / choice / score" }
+];
+function fmtMs(ms) {
+  if (ms === null || ms === void 0 || !Number.isFinite(ms)) return "—";
+  if (ms >= 1e3) return `${(ms / 1e3).toFixed(1)}s`;
+  return `${Math.round(ms)}ms`;
+}
+function fmtCost(usd) {
+  if (!Number.isFinite(usd) || usd <= 0) return "$0.00";
+  if (usd < 1e-3) return `$${(usd * 1e3).toFixed(3)}/1k`;
+  return `$${usd.toFixed(4)}/req`;
+}
+function createModelRankingTabComponent(ctx, groups) {
+  const React = ctx.react;
+  const h = React.createElement;
+  return function ModelRankingTab({
+    models,
+    disabledModels,
+    modelTests,
+    onTestSingleModel,
+    onNotify
+  }) {
+    const [selectedTier, setSelectedTier] = React.useState("geral");
+    const [hideFree, setHideFree] = React.useState(true);
+    const [usageByModel, setUsageByModel] = React.useState({});
+    const [usageSampleSize, setUsageSampleSize] = React.useState(0);
+    const [probingTop, setProbingTop] = React.useState(false);
+    const [selectedAgentKey, setSelectedAgentKey] = React.useState("");
+    const [applyingModel, setApplyingModel] = React.useState(null);
+    const [lastSavedAt, setLastSavedAt] = React.useState("");
+    const agentsList = React.useMemo(() => {
+      var _a, _b;
+      try {
+        const snap = ((_b = (_a = ctx == null ? void 0 : ctx.agents) == null ? void 0 : _a.snapshot) == null ? void 0 : _b.call(_a)) || {};
+        const pool = [];
+        const seen = /* @__PURE__ */ new Set();
+        for (const list of [snap.running, snap.agents]) {
+          if (!Array.isArray(list)) continue;
+          for (const a of list) {
+            if (!(a == null ? void 0 : a.key) || seen.has(a.key)) continue;
+            seen.add(a.key);
+            pool.push(a);
+          }
+        }
+        return pool.sort((a, b) => String(a.name || a.key).localeCompare(String(b.name || b.key)));
+      } catch {
+        return [];
+      }
+    }, [models.length, applyingModel]);
+    React.useEffect(() => {
+      if (!selectedAgentKey && agentsList.length > 0) {
+        setSelectedAgentKey(agentsList[0].key);
+      }
+    }, [agentsList, selectedAgentKey]);
+    const refreshUsageTelemetry = React.useCallback(async () => {
+      const loaded = await loadGatewayUsageByModel(ctx);
+      setUsageByModel(loaded.byModel);
+      setUsageSampleSize(loaded.sampleSize);
+    }, []);
+    React.useEffect(() => {
+      refreshUsageTelemetry();
+    }, [refreshUsageTelemetry]);
+    const snapshot = React.useMemo(() => {
+      return buildModelRankingSnapshot({
+        catalogModels: models,
+        groups,
+        usageByModel,
+        usageSampleSize,
+        liveProbes: modelTests,
+        disabledModels,
+        tier: selectedTier,
+        avoidFree: hideFree
+      });
+    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, hideFree]);
+    React.useEffect(() => {
+      if (snapshot.models.length === 0) return;
+      persistModelRankingSnapshot(ctx, snapshot).then((ok) => {
+        if (ok) {
+          setLastSavedAt(
+            (/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+          );
+        }
+      });
+    }, [snapshot]);
+    const visibleRows = React.useMemo(() => {
+      return snapshot.models.filter((r) => !r.isDisabled && (!hideFree || !r.isFree)).slice(0, 30);
+    }, [snapshot, hideFree]);
+    const topOverall = visibleRows[0] || null;
+    const topFastest = React.useMemo(() => {
+      const candidates = visibleRows.filter((r) => r.online !== false && (r.pingLatencyMs !== null || r.avgFirstTokenMs !== null || r.avgDurationMs !== null));
+      return [...candidates].sort((a, b) => {
+        const la = a.pingLatencyMs ?? a.avgFirstTokenMs ?? a.avgDurationMs ?? 999999;
+        const lb = b.pingLatencyMs ?? b.avgFirstTokenMs ?? b.avgDurationMs ?? 999999;
+        return la - lb;
+      })[0] || null;
+    }, [visibleRows]);
+    const topMostUsed = React.useMemo(() => {
+      const candidates = visibleRows.filter((r) => r.calls > 0);
+      return [...candidates].sort((a, b) => b.calls - a.calls)[0] || null;
+    }, [visibleRows]);
+    const handleProbeTopCandidates = async () => {
+      const topToTest = visibleRows.slice(0, 6);
+      if (topToTest.length === 0) return;
+      setProbingTop(true);
+      onNotify({
+        type: "info",
+        text: `Testando saúde HTTP 200 ao vivo nos ${topToTest.length} melhores modelos de '${selectedTier}'...`
+      });
+      try {
+        await Promise.all(topToTest.map((row) => onTestSingleModel(row.model)));
+        await refreshUsageTelemetry();
+        onNotify({
+          type: "success",
+          text: `Ranking atualizado e salvo em nexusmind-model-ranking.json para o OrgFy e agentes.`
+        });
+      } finally {
+        setProbingTop(false);
+      }
+    };
+    const handleApplyModelToSelectedAgent = async (row) => {
+      const agentsApi = ctx == null ? void 0 : ctx.agents;
+      const target = agentsList.find((a) => a.key === selectedAgentKey);
+      if (!target || typeof (agentsApi == null ? void 0 : agentsApi.save) !== "function") {
+        onNotify({ type: "error", text: "Selecione um agente válido para aplicar o modelo." });
+        return;
+      }
+      setApplyingModel(row.model);
+      try {
+        const nextCfg = {
+          ...target.config && typeof target.config === "object" ? target.config : {},
+          model: row.model,
+          provider: row.group
+        };
+        await agentsApi.save(target.key, { config: nextCfg });
+        onNotify({
+          type: "success",
+          text: `Agente '${target.name || target.key}' atualizado para '${row.model}' (${row.group}, score ${row.score}).`
+        });
+      } catch (err) {
+        onNotify({
+          type: "error",
+          text: `Erro ao aplicar modelo em ${target.name || target.key}: ${(err == null ? void 0 : err.message) || err}`
+        });
+      } finally {
+        setApplyingModel(null);
+      }
+    };
+    const activeTierInfo = TIER_OPTIONS.find((t) => t.id === selectedTier) || TIER_OPTIONS[0];
+    return h(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: "18px" } },
+      // Barra de Controles do Ranking
+      h(
+        "div",
+        {
+          style: {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "12px",
+            backgroundColor: "rgba(255, 255, 255, 0.02)",
+            border: "1px solid rgba(255, 255, 255, 0.08)",
+            borderRadius: "14px",
+            padding: "14px 18px"
+          }
+        },
+        h(
+          "div",
+          { style: { display: "flex", flexDirection: "column", gap: "8px" } },
+          h(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
+            TIER_OPTIONS.map((t) => {
+              const active = selectedTier === t.id;
+              return h(
+                "button",
+                {
+                  key: t.id,
+                  onClick: () => setSelectedTier(t.id),
+                  style: {
+                    borderRadius: "9999px",
+                    padding: "5px 12px",
+                    border: `1px solid ${active ? "#10b981" : "rgba(255,255,255,0.1)"}`,
+                    backgroundColor: active ? "rgba(16,185,129,0.18)" : "transparent",
+                    color: active ? "#34d399" : "#9ca3af",
+                    fontSize: "11px",
+                    fontWeight: active ? "700" : "500",
+                    cursor: "pointer"
+                  }
+                },
+                t.label
+              );
+            })
+          ),
+          h(
+            "div",
+            { style: { fontSize: "11px", color: "#9ca3af" } },
+            `${activeTierInfo.hint} · Telemetria: ${usageSampleSize.toLocaleString("pt-BR")} chamadas reais do Gateway${lastSavedAt ? ` · Sincronizado para OrgFy às ${lastSavedAt}` : ""}`
+          )
+        ),
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+          h(
+            "label",
+            {
+              style: {
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                fontSize: "11px",
+                color: "#d1d5db",
+                cursor: "pointer"
+              }
+            },
+            h("input", {
+              type: "checkbox",
+              checked: hideFree,
+              onChange: (e) => setHideFree(Boolean(e.target.checked)),
+              style: { accentColor: "#10b981" }
+            }),
+            "Ocultar :free (429)"
+          ),
+          h(
+            "button",
+            {
+              onClick: handleProbeTopCandidates,
+              disabled: probingTop,
+              style: {
+                borderRadius: "9999px",
+                padding: "7px 16px",
+                backgroundColor: "#10b981",
+                color: "#000000",
+                border: "none",
+                cursor: probingTop ? "wait" : "pointer",
+                fontSize: "12px",
+                fontWeight: "700"
+              }
+            },
+            probingTop ? "Testando Top 6 ao vivo..." : "⚡ Testar Saúde & Atualizar Ranking"
+          )
+        )
+      ),
+      // Pódio Top 3
+      h(
+        "div",
+        { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "14px" } },
+        [
+          {
+            title: `#1 MELHOR PARA ${activeTierInfo.label.toUpperCase()}`,
+            accent: "#10b981",
+            row: topOverall,
+            detail: topOverall ? `Score ${topOverall.score}/100 · ${topOverall.calls.toLocaleString("pt-BR")} chamadas` : "Sem dados"
+          },
+          {
+            title: "MAIS RÁPIDO (LATÊNCIA REAL)",
+            accent: "#38bdf8",
+            row: topFastest,
+            detail: topFastest ? topFastest.pingLatencyMs !== null ? `Ping ao vivo: ${fmtMs(topFastest.pingLatencyMs)}` : `TTFT/Média Gateway: ${fmtMs(topFastest.avgFirstTokenMs ?? topFastest.avgDurationMs)}` : "Sem medições"
+          },
+          {
+            title: "MAIS VALIDADO EM PRODUÇÃO",
+            accent: "#c084fc",
+            row: topMostUsed,
+            detail: topMostUsed ? `${topMostUsed.calls.toLocaleString("pt-BR")} chamadas · Cache ${topMostUsed.cacheHitPct ?? "—"}%` : "Sem histórico"
+          }
+        ].map(
+          (card) => {
+            var _a;
+            return h(
+              "div",
+              {
+                key: card.title,
+                style: {
+                  backgroundColor: "rgba(255, 255, 255, 0.03)",
+                  border: `1px solid ${card.accent}44`,
+                  borderRadius: "14px",
+                  padding: "16px 18px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "6px"
+                }
+              },
+              h("div", { style: { fontSize: "10px", fontWeight: "700", color: card.accent, letterSpacing: "0.05em" } }, card.title),
+              h(
+                "div",
+                {
+                  style: {
+                    fontSize: "15px",
+                    fontWeight: "700",
+                    color: "#ffffff",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap"
+                  },
+                  title: ((_a = card.row) == null ? void 0 : _a.model) || ""
+                },
+                card.row ? card.row.model : "—"
+              ),
+              h("div", { style: { fontSize: "11px", color: "#9ca3af", fontFamily: "monospace" } }, card.detail)
+            );
+          }
+        )
+      ),
+      // Barra de Aplicação Direta em Agente
+      agentsList.length > 0 && h(
+        "div",
+        {
+          style: {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "10px",
+            padding: "10px 16px",
+            borderRadius: "12px",
+            backgroundColor: "rgba(56, 189, 248, 0.06)",
+            border: "1px solid rgba(56, 189, 248, 0.22)"
+          }
+        },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+          h("span", { style: { fontSize: "12px", fontWeight: "600", color: "#38bdf8" } }, "Aplicar modelo do ranking no agente:"),
+          h(
+            "select",
+            {
+              value: selectedAgentKey,
+              onChange: (e) => setSelectedAgentKey(e.target.value),
+              style: {
+                backgroundColor: "rgba(0,0,0,0.45)",
+                color: "#ffffff",
+                border: "1px solid rgba(255,255,255,0.16)",
+                borderRadius: "8px",
+                padding: "5px 10px",
+                fontSize: "12px"
+              }
+            },
+            agentsList.map(
+              (a) => {
+                var _a;
+                return h(
+                  "option",
+                  { key: a.key, value: a.key },
+                  `${a.name || a.key} (atual: ${((_a = a.config) == null ? void 0 : _a.model) || "padrão"})`
+                );
+              }
+            )
+          )
+        ),
+        topOverall && h(
+          "button",
+          {
+            onClick: () => handleApplyModelToSelectedAgent(topOverall),
+            disabled: applyingModel !== null,
+            style: {
+              borderRadius: "9999px",
+              padding: "6px 14px",
+              backgroundColor: "rgba(56, 189, 248, 0.18)",
+              border: "1px solid rgba(56, 189, 248, 0.45)",
+              color: "#7dd3fc",
+              fontSize: "11px",
+              fontWeight: "700",
+              cursor: "pointer"
+            }
+          },
+          `Aplicar #1 (${topOverall.model})`
+        )
+      ),
+      // Tabela Completa de Ranking
+      h(
+        "div",
+        {
+          style: {
+            backgroundColor: "rgba(255, 255, 255, 0.02)",
+            border: "1px solid rgba(255, 255, 255, 0.07)",
+            borderRadius: "14px",
+            overflowX: "auto"
+          }
+        },
+        h(
+          "table",
+          { style: { width: "100%", borderCollapse: "collapse", fontSize: "12px" } },
+          h(
+            "thead",
+            null,
+            h(
+              "tr",
+              { style: { borderBottom: "1px solid rgba(255,255,255,0.08)", textAlign: "left", color: "#9ca3af", fontSize: "10px", textTransform: "uppercase" } },
+              ["#", "Modelo", "Grupo", "Score", "Saúde / Ping", "Chamadas", "Latência Média", "Cache Hit", "Custo", "Ação"].map(
+                (col) => h("th", { key: col, style: { padding: "10px 12px", fontWeight: "700" } }, col)
+              )
+            )
+          ),
+          h(
+            "tbody",
+            null,
+            visibleRows.map((row, idx) => {
+              const healthLabel = row.online === true ? `HTTP 200 · ${fmtMs(row.pingLatencyMs)}` : row.online === false ? `Erro · ${row.pingError || "Falha"}` : "Não testado";
+              const healthColor = row.online === true ? "#10b981" : row.online === false ? "#f87171" : "#9ca3af";
+              return h(
+                "tr",
+                {
+                  key: row.model,
+                  style: {
+                    borderBottom: "1px solid rgba(255,255,255,0.04)",
+                    backgroundColor: idx === 0 ? "rgba(16, 185, 129, 0.05)" : "transparent"
+                  }
+                },
+                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontWeight: "700", color: idx < 3 ? "#10b981" : "#9ca3af" } }, `#${idx + 1}`),
+                h(
+                  "td",
+                  { style: { padding: "10px 12px", fontWeight: "600", color: "#ffffff" } },
+                  row.model,
+                  row.isFree && h(
+                    "span",
+                    { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "rgba(245,158,11,0.2)", color: "#fbbf24" } },
+                    "FREE"
+                  )
+                ),
+                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontSize: "11px", color: "#9ca3af" } }, row.group.replace("nexusmind_", "")),
+                h(
+                  "td",
+                  { style: { padding: "10px 12px", fontFamily: "monospace", fontWeight: "700", color: row.score >= 75 ? "#34d399" : row.score >= 55 ? "#fbbf24" : "#f87171" } },
+                  `${row.score}`
+                ),
+                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", fontSize: "11px", color: healthColor } }, healthLabel),
+                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#e4e4e7" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
+                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, fmtMs(row.avgDurationMs)),
+                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, row.cacheHitPct !== null ? `${row.cacheHitPct}%` : "—"),
+                h("td", { style: { padding: "10px 12px", fontFamily: "monospace", color: "#cbd5e1" } }, fmtCost(row.avgCostUsd)),
+                h(
+                  "td",
+                  { style: { padding: "10px 12px", whiteSpace: "nowrap" } },
+                  h(
+                    "div",
+                    { style: { display: "flex", gap: "6px" } },
+                    h(
+                      "button",
+                      {
+                        onClick: () => onTestSingleModel(row.model),
+                        style: {
+                          padding: "4px 8px",
+                          borderRadius: "6px",
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          backgroundColor: "rgba(255,255,255,0.06)",
+                          color: "#e4e4e7",
+                          fontSize: "10px",
+                          cursor: "pointer"
+                        }
+                      },
+                      "Testar"
+                    ),
+                    agentsList.length > 0 && h(
+                      "button",
+                      {
+                        onClick: () => handleApplyModelToSelectedAgent(row),
+                        disabled: applyingModel === row.model,
+                        style: {
+                          padding: "4px 9px",
+                          borderRadius: "6px",
+                          border: "1px solid rgba(56,189,248,0.4)",
+                          backgroundColor: "rgba(56,189,248,0.14)",
+                          color: "#38bdf8",
+                          fontSize: "10px",
+                          fontWeight: "700",
+                          cursor: "pointer"
+                        }
+                      },
+                      applyingModel === row.model ? "..." : "Aplicar"
+                    )
+                  )
+                )
+              );
+            })
+          )
+        )
+      )
+    );
+  };
+}
 const SVG_ICONS = {
   // Official Brand Logos
   openai: (props = {}) => props.h(
@@ -727,6 +1476,11 @@ function apply(ctx) {
       }
     });
     const [modelTests, setModelTests] = React.useState({});
+    const [activeSection, setActiveSection] = React.useState("catalog");
+    const ModelRankingTab = React.useMemo(
+      () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS),
+      []
+    );
     const [selectedGroupTab, setSelectedGroupTab] = React.useState("all");
     const [statusFilter, setStatusFilter] = React.useState("all");
     const [filterFree, setFilterFree] = React.useState(false);
@@ -2072,735 +2826,491 @@ print("SYNC_SUCCESS")
             )
           )
         ),
-        // OFFICIAL NEXUSMIND GATEWAY ENDPOINTS BAR (Matching Official Dashboard)
+        // PRIMARY NAVIGATION TABS (Catálogo & Gateway | Ranking de Modelos)
         h(
           "div",
           {
             style: {
               display: "flex",
               alignItems: "center",
-              gap: "10px",
-              overflowX: "auto",
-              padding: "4px 2px 8px",
-              scrollbarWidth: "none"
+              gap: "8px",
+              borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+              paddingBottom: "10px"
             }
           },
-          OFFICIAL_ENDPOINTS.map((ep) => {
-            const isCopied = copiedEndpoint === ep.url;
+          [
+            { id: "catalog", label: "Catálogo & Gateway" },
+            { id: "ranking", label: "Ranking de Modelos (Telemetria Real)" }
+          ].map((tab) => {
+            const active = activeSection === tab.id;
             return h(
-              "div",
+              "button",
               {
-                key: ep.id,
-                onClick: () => handleCopyEndpoint(ep.url, ep.label),
-                title: `${ep.desc} — Clique para copiar (${ep.url})`,
+                key: tab.id,
+                onClick: () => setActiveSection(tab.id),
                 style: {
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  backgroundColor: isCopied ? "rgba(16, 185, 129, 0.15)" : "rgba(255, 255, 255, 0.04)",
-                  border: isCopied ? "1px solid rgba(16, 185, 129, 0.4)" : "1px solid rgba(255, 255, 255, 0.08)",
                   borderRadius: "9999px",
-                  padding: "6px 14px",
-                  cursor: "pointer",
+                  padding: "7px 16px",
+                  border: active ? "1px solid rgba(16, 185, 129, 0.45)" : "1px solid rgba(255, 255, 255, 0.08)",
+                  backgroundColor: active ? "rgba(16, 185, 129, 0.16)" : "rgba(255, 255, 255, 0.03)",
+                  color: active ? "#34d399" : "#a1a1aa",
                   fontSize: "12px",
-                  color: isCopied ? "#10b981" : "var(--text-normal, #e4e4e7)",
-                  whiteSpace: "nowrap",
-                  transition: "all 0.15s ease",
-                  flexShrink: 0
+                  fontWeight: active ? "700" : "500",
+                  cursor: "pointer"
                 }
               },
-              h("span", { style: { fontWeight: "600", fontSize: "11px", color: "#f4f4f5" } }, ep.label),
-              h(
-                "span",
-                {
-                  style: {
-                    fontSize: "10px",
-                    padding: "1px 6px",
-                    borderRadius: "4px",
-                    backgroundColor: `${ep.tagColor}22`,
-                    color: ep.tagColor,
-                    fontWeight: "600",
-                    border: `1px solid ${ep.tagColor}44`
-                  }
-                },
-                ep.tag
-              ),
-              h("span", { style: { opacity: 0.3 } }, "|"),
-              h(
-                "code",
-                {
-                  style: {
-                    fontFamily: "monospace",
-                    fontSize: "11px",
-                    color: isCopied ? "#10b981" : "var(--text-subtle, #a1a1aa)"
-                  }
-                },
-                ep.url
-              ),
-              h(
-                "span",
-                {
-                  style: {
-                    display: "inline-flex",
-                    alignItems: "center",
-                    marginLeft: "2px",
-                    color: isCopied ? "#10b981" : "var(--text-subtle, #71717a)"
-                  }
-                },
-                isCopied ? SVG_ICONS.check({ h, width: 12, height: 12 }) : SVG_ICONS.copy({ h, width: 12, height: 12 })
-              )
+              tab.label
             );
           })
         ),
-        // 2. STATUS TOAST BANNER (IF ACTIVE)
-        statusMessage && h(
-          "div",
-          {
-            style: {
-              padding: "12px 18px",
-              borderRadius: "12px",
-              fontSize: "13px",
-              fontWeight: "500",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              backgroundColor: statusMessage.type === "success" ? "rgba(16, 185, 129, 0.12)" : statusMessage.type === "error" ? "rgba(239, 68, 68, 0.12)" : "rgba(59, 130, 246, 0.12)",
-              border: `1px solid ${statusMessage.type === "success" ? "rgba(16, 185, 129, 0.3)" : statusMessage.type === "error" ? "rgba(239, 68, 68, 0.3)" : "rgba(59, 130, 246, 0.3)"}`,
-              color: statusMessage.type === "success" ? "#10b981" : statusMessage.type === "error" ? "#ef4444" : "#60a5fa"
-            }
-          },
-          h("span", null, statusMessage.text),
-          h(
-            "button",
-            {
-              onClick: () => setStatusMessage(null),
-              style: {
-                background: "none",
-                border: "none",
-                color: "inherit",
-                cursor: "pointer",
-                fontSize: "14px"
-              }
-            },
-            "✕"
-          )
-        ),
-        // 3. MICRO DASHBOARD (4 METRIC CARDS IN A BALANCED 4-COLUMN ROW)
-        h(
-          "div",
-          {
-            style: {
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-              gap: "16px"
-            }
-          },
-          // Card 1: Saldo Disponível
+        activeSection === "ranking" ? h(ModelRankingTab, {
+          models,
+          disabledModels,
+          modelTests,
+          onTestSingleModel: handleTestSingleModel,
+          onNotify: setStatusMessage
+        }) : h(
+          React.Fragment,
+          null,
+          // OFFICIAL NEXUSMIND GATEWAY ENDPOINTS BAR (Matching Official Dashboard)
           h(
             "div",
             {
               style: {
-                backgroundColor: "rgba(16, 185, 129, 0.04)",
-                border: "1px solid rgba(16, 185, 129, 0.18)",
-                borderRadius: "14px",
-                padding: "16px 20px"
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                overflowX: "auto",
+                padding: "4px 2px 8px",
+                scrollbarWidth: "none"
               }
             },
-            h(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  color: "#10b981",
-                  fontSize: "11px",
-                  fontWeight: "600",
-                  letterSpacing: "0.04em",
-                  marginBottom: "6px"
-                }
-              },
-              SVG_ICONS.wallet({ h, width: 14, height: 14 }),
-              "SALDO DISPONÍVEL"
-            ),
-            h(
-              "div",
-              { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-              `$${(profileData.balance || 0).toFixed(2)} USD`
-            ),
-            h(
-              "div",
-              { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-              "Recarga Total: $2,000.00 • 13 Grupos Ativos"
-            )
-          ),
-          // Card 2: Consumo Hoje
-          h(
-            "div",
-            {
-              style: {
-                backgroundColor: "rgba(59, 130, 246, 0.04)",
-                border: "1px solid rgba(59, 130, 246, 0.18)",
-                borderRadius: "14px",
-                padding: "16px 20px"
-              }
-            },
-            h(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  color: "#60a5fa",
-                  fontSize: "11px",
-                  fontWeight: "600",
-                  letterSpacing: "0.04em",
-                  marginBottom: "6px"
-                }
-              },
-              SVG_ICONS.pulse({ h, width: 14, height: 14 }),
-              "CONSUMO HOJE"
-            ),
-            h(
-              "div",
-              { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-              `${formatTokens(dashboardMetrics.today_tokens)} tokens`
-            ),
-            h(
-              "div",
-              { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-              `${formatNumber(dashboardMetrics.today_requests)} requisições ($${dashboardMetrics.today_cost.toFixed(2)})`
-            )
-          ),
-          // Card 3: Histórico Acumulado
-          h(
-            "div",
-            {
-              style: {
-                backgroundColor: "rgba(168, 85, 247, 0.04)",
-                border: "1px solid rgba(168, 85, 247, 0.18)",
-                borderRadius: "14px",
-                padding: "16px 20px"
-              }
-            },
-            h(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  color: "#c084fc",
-                  fontSize: "11px",
-                  fontWeight: "600",
-                  letterSpacing: "0.04em",
-                  marginBottom: "6px"
-                }
-              },
-              SVG_ICONS.dashboard({ h, width: 14, height: 14 }),
-              "HISTÓRICO ACUMULADO"
-            ),
-            h(
-              "div",
-              { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-              `${formatTokens(dashboardMetrics.total_tokens)} tokens`
-            ),
-            h(
-              "div",
-              { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-              `${formatNumber(dashboardMetrics.total_requests)} requisições ($${dashboardMetrics.total_cost.toFixed(2)})`
-            )
-          ),
-          // Card 4: Governança & Harness
-          h(
-            "div",
-            {
-              style: {
-                backgroundColor: "rgba(255, 255, 255, 0.03)",
-                border: "1px solid rgba(255, 255, 255, 0.08)",
-                borderRadius: "14px",
-                padding: "16px 20px"
-              }
-            },
-            h(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  color: "#e2e8f0",
-                  fontSize: "11px",
-                  fontWeight: "600",
-                  letterSpacing: "0.04em",
-                  marginBottom: "6px"
-                }
-              },
-              SVG_ICONS.shield({ h, width: 14, height: 14 }),
-              "GOVERNANÇA & HARNESS"
-            ),
-            h(
-              "div",
-              { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
-              `${models.length - disabledModels.length} Ativos / ${disabledModels.length} Inativos`
-            ),
-            h(
-              "div",
-              { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-              lastSyncTime ? `Sincronizado: ${lastSyncTime}` : "Pronto para Goose & Pi"
-            )
-          )
-        ),
-        // 4. OS 4 GRUPOS CANÔNICOS (GRID PERFEITO DE 4 COLUNAS, ZERO "3 E 1", ZERO POLUIÇÃO)
-        h(
-          "div",
-          {
-            style: {
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
-              gap: "16px"
-            }
-          },
-          Object.entries(CANONICAL_GROUPS).map(([pid, group]) => {
-            var _a2;
-            const isSelected = selectedGroupTab === pid;
-            const getLiveSummary = (groupId, staticSummary) => {
-              const platformMap = {
-                nexusmind_openai: "openai",
-                nexusmind_anthropic: "anthropic",
-                nexusmind_antigravity: "antigravity",
-                nexusmind_grok: "grok"
-              };
-              const platform = platformMap[groupId];
-              if (!platform || !(dashboardMetrics == null ? void 0 : dashboardMetrics.by_platform)) return staticSummary;
-              const p = dashboardMetrics.by_platform.find((x) => x.platform === platform);
-              if (!p) return staticSummary;
-              const tokens = p.today_tokens || 0;
-              const reqs = p.today_requests || 0;
-              const fmtTokens = tokens >= 1e9 ? `${(tokens / 1e9).toFixed(1)}B` : tokens >= 1e6 ? `${(tokens / 1e6).toFixed(1)}M` : tokens >= 1e3 ? `${(tokens / 1e3).toFixed(1)}k` : `${tokens}`;
-              return `Hoje: ${fmtTokens} tokens • ${reqs.toLocaleString()} reqs`;
-            };
-            return h(
-              "div",
-              {
-                key: pid,
-                style: {
-                  backgroundColor: isSelected ? "rgba(255, 255, 255, 0.05)" : "rgba(255, 255, 255, 0.02)",
-                  border: `1px solid ${isSelected ? group.accentColor : "rgba(255, 255, 255, 0.08)"}`,
-                  borderRadius: "14px",
-                  padding: "16px 18px",
-                  display: "flex",
-                  flexDirection: "column",
-                  justifyContent: "space-between",
-                  gap: "10px",
-                  transition: "all 0.15s ease"
-                }
-              },
-              // Group Header (Official SVG Logo + Name + Status)
-              h(
+            OFFICIAL_ENDPOINTS.map((ep) => {
+              const isCopied = copiedEndpoint === ep.url;
+              return h(
                 "div",
                 {
+                  key: ep.id,
+                  onClick: () => handleCopyEndpoint(ep.url, ep.label),
+                  title: `${ep.desc} — Clique para copiar (${ep.url})`,
                   style: {
                     display: "flex",
                     alignItems: "center",
-                    justifyContent: "space-between"
+                    gap: "8px",
+                    backgroundColor: isCopied ? "rgba(16, 185, 129, 0.15)" : "rgba(255, 255, 255, 0.04)",
+                    border: isCopied ? "1px solid rgba(16, 185, 129, 0.4)" : "1px solid rgba(255, 255, 255, 0.08)",
+                    borderRadius: "9999px",
+                    padding: "6px 14px",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                    color: isCopied ? "#10b981" : "var(--text-normal, #e4e4e7)",
+                    whiteSpace: "nowrap",
+                    transition: "all 0.15s ease",
+                    flexShrink: 0
                   }
                 },
-                h(
-                  "div",
-                  { style: { display: "flex", alignItems: "center", gap: "10px" } },
-                  h(
-                    "div",
-                    {
-                      style: {
-                        width: "34px",
-                        height: "34px",
-                        borderRadius: "10px",
-                        backgroundColor: "rgba(255, 255, 255, 0.06)",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        color: group.accentColor
-                      }
-                    },
-                    (_a2 = SVG_ICONS[group.logoKey]) == null ? void 0 : _a2.call(SVG_ICONS, { h, width: 20, height: 20 })
-                  ),
-                  h(
-                    "div",
-                    null,
-                    h("div", { style: { fontWeight: "600", fontSize: "14px", color: "#ffffff" } }, group.groupName),
-                    h("div", { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } }, pid)
-                  )
-                ),
+                h("span", { style: { fontWeight: "600", fontSize: "11px", color: "#f4f4f5" } }, ep.label),
                 h(
                   "span",
                   {
                     style: {
                       fontSize: "10px",
-                      padding: "2px 7px",
-                      borderRadius: "9999px",
-                      backgroundColor: "rgba(16, 185, 129, 0.15)",
-                      color: "#10b981",
-                      fontWeight: "600"
+                      padding: "1px 6px",
+                      borderRadius: "4px",
+                      backgroundColor: `${ep.tagColor}22`,
+                      color: ep.tagColor,
+                      fontWeight: "600",
+                      border: `1px solid ${ep.tagColor}44`
                     }
                   },
-                  "Ativo"
+                  ep.tag
+                ),
+                h("span", { style: { opacity: 0.3 } }, "|"),
+                h(
+                  "code",
+                  {
+                    style: {
+                      fontFamily: "monospace",
+                      fontSize: "11px",
+                      color: isCopied ? "#10b981" : "var(--text-subtle, #a1a1aa)"
+                    }
+                  },
+                  ep.url
+                ),
+                h(
+                  "span",
+                  {
+                    style: {
+                      display: "inline-flex",
+                      alignItems: "center",
+                      marginLeft: "2px",
+                      color: isCopied ? "#10b981" : "var(--text-subtle, #71717a)"
+                    }
+                  },
+                  isCopied ? SVG_ICONS.check({ h, width: 12, height: 12 }) : SVG_ICONS.copy({ h, width: 12, height: 12 })
                 )
-              ),
-              // Middle Telemetry Metric (Clean & Concise)
-              h(
-                "div",
-                { style: { fontSize: "12px", color: "#d1d5db", fontWeight: "500" } },
-                getLiveSummary(group.id, group.telemetrySummary)
-              ),
-              // Bottom Filter Pill (Quick Filter to view models in this group)
+              );
+            })
+          ),
+          // 2. STATUS TOAST BANNER (IF ACTIVE)
+          statusMessage && h(
+            "div",
+            {
+              style: {
+                padding: "12px 18px",
+                borderRadius: "12px",
+                fontSize: "13px",
+                fontWeight: "500",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                backgroundColor: statusMessage.type === "success" ? "rgba(16, 185, 129, 0.12)" : statusMessage.type === "error" ? "rgba(239, 68, 68, 0.12)" : "rgba(59, 130, 246, 0.12)",
+                border: `1px solid ${statusMessage.type === "success" ? "rgba(16, 185, 129, 0.3)" : statusMessage.type === "error" ? "rgba(239, 68, 68, 0.3)" : "rgba(59, 130, 246, 0.3)"}`,
+                color: statusMessage.type === "success" ? "#10b981" : statusMessage.type === "error" ? "#ef4444" : "#60a5fa"
+              }
+            },
+            h("span", null, statusMessage.text),
+            h(
+              "button",
+              {
+                onClick: () => setStatusMessage(null),
+                style: {
+                  background: "none",
+                  border: "none",
+                  color: "inherit",
+                  cursor: "pointer",
+                  fontSize: "14px"
+                }
+              },
+              "✕"
+            )
+          ),
+          // 3. MICRO DASHBOARD (4 METRIC CARDS IN A BALANCED 4-COLUMN ROW)
+          h(
+            "div",
+            {
+              style: {
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                gap: "16px"
+              }
+            },
+            // Card 1: Saldo Disponível
+            h(
+              "div",
+              {
+                style: {
+                  backgroundColor: "rgba(16, 185, 129, 0.04)",
+                  border: "1px solid rgba(16, 185, 129, 0.18)",
+                  borderRadius: "14px",
+                  padding: "16px 20px"
+                }
+              },
               h(
                 "div",
                 {
                   style: {
                     display: "flex",
                     alignItems: "center",
-                    justifyContent: "space-between",
-                    paddingTop: "8px",
-                    borderTop: "1px solid rgba(255, 255, 255, 0.06)"
+                    gap: "6px",
+                    color: "#10b981",
+                    fontSize: "11px",
+                    fontWeight: "600",
+                    letterSpacing: "0.04em",
+                    marginBottom: "6px"
                   }
                 },
-                h(
-                  "span",
-                  { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                  `Padrão: ${group.defaultModel.split("/").pop()}`
-                ),
-                h(
-                  "button",
-                  {
-                    onClick: () => {
-                      setSelectedGroupTab(isSelected ? "all" : pid);
-                      setCurrentPage(1);
-                    },
-                    style: {
-                      borderRadius: "9999px",
-                      padding: "3px 10px",
-                      backgroundColor: isSelected ? group.accentColor : "rgba(255, 255, 255, 0.08)",
-                      color: isSelected ? "#000000" : "#ffffff",
-                      border: "none",
-                      fontSize: "11px",
-                      fontWeight: "600",
-                      cursor: "pointer"
-                    }
-                  },
-                  `${groupCounts[pid] ?? group.modelsCount} modelos`
-                )
-              )
-            );
-          })
-        ),
-        // 5. CATALOG WORKSPACE & MODEL MANAGEMENT
-        h(
-          "div",
-          {
-            style: {
-              backgroundColor: "rgba(255, 255, 255, 0.02)",
-              border: "1px solid rgba(255, 255, 255, 0.07)",
-              borderRadius: "16px",
-              padding: "22px 24px",
-              display: "flex",
-              flexDirection: "column",
-              gap: "18px"
-            }
-          },
-          // Header Controls (Filter Tabs + Search Bar)
-          h(
-            "div",
-            {
-              style: {
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                flexWrap: "wrap",
-                gap: "14px"
-              }
-            },
-            // Tabs
-            h(
-              "div",
-              { style: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" } },
-              [
-                { id: "all", label: `Todos os Grupos (${groupCounts.all})` },
-                { id: "nexusmind_openai", label: `Saldo OpenAI (${groupCounts.nexusmind_openai})` },
-                { id: "nexusmind_anthropic", label: `Saldo Claude (${groupCounts.nexusmind_anthropic})` },
-                { id: "nexusmind_antigravity", label: `Antigravity-Saldo (${groupCounts.nexusmind_antigravity})` },
-                { id: "nexusmind_grok", label: `Grok (${groupCounts.nexusmind_grok})` }
-              ].map(
-                (tab) => h(
-                  "button",
-                  {
-                    key: tab.id,
-                    onClick: () => {
-                      setSelectedGroupTab(tab.id);
-                      setCurrentPage(1);
-                    },
-                    style: {
-                      borderRadius: "9999px",
-                      padding: "6px 14px",
-                      border: "none",
-                      backgroundColor: selectedGroupTab === tab.id ? "rgba(255, 255, 255, 0.15)" : "transparent",
-                      color: selectedGroupTab === tab.id ? "#ffffff" : "var(--text-subtle, #8e8e96)",
-                      cursor: "pointer",
-                      fontSize: "12px",
-                      fontWeight: selectedGroupTab === tab.id ? "600" : "500"
-                    }
-                  },
-                  tab.label
-                )
+                SVG_ICONS.wallet({ h, width: 14, height: 14 }),
+                "SALDO DISPONÍVEL"
+              ),
+              h(
+                "div",
+                { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
+                `$${(profileData.balance || 0).toFixed(2)} USD`
+              ),
+              h(
+                "div",
+                { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
+                "Recarga Total: $2,000.00 • 13 Grupos Ativos"
               )
             ),
-            // Search Input & Filter Toggles
+            // Card 2: Consumo Hoje
             h(
               "div",
-              { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } },
+              {
+                style: {
+                  backgroundColor: "rgba(59, 130, 246, 0.04)",
+                  border: "1px solid rgba(59, 130, 246, 0.18)",
+                  borderRadius: "14px",
+                  padding: "16px 20px"
+                }
+              },
               h(
                 "div",
                 {
                   style: {
-                    position: "relative",
                     display: "flex",
-                    alignItems: "center"
+                    alignItems: "center",
+                    gap: "6px",
+                    color: "#60a5fa",
+                    fontSize: "11px",
+                    fontWeight: "600",
+                    letterSpacing: "0.04em",
+                    marginBottom: "6px"
                   }
                 },
-                h("input", {
-                  type: "text",
-                  placeholder: "Buscar modelo...",
-                  value: searchQuery,
-                  onChange: (e) => {
-                    setSearchQuery(e.target.value);
-                    setCurrentPage(1);
-                  },
+                SVG_ICONS.pulse({ h, width: 14, height: 14 }),
+                "CONSUMO HOJE"
+              ),
+              h(
+                "div",
+                { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
+                `${formatTokens(dashboardMetrics.today_tokens)} tokens`
+              ),
+              h(
+                "div",
+                { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
+                `${formatNumber(dashboardMetrics.today_requests)} requisições ($${dashboardMetrics.today_cost.toFixed(2)})`
+              )
+            ),
+            // Card 3: Histórico Acumulado
+            h(
+              "div",
+              {
+                style: {
+                  backgroundColor: "rgba(168, 85, 247, 0.04)",
+                  border: "1px solid rgba(168, 85, 247, 0.18)",
+                  borderRadius: "14px",
+                  padding: "16px 20px"
+                }
+              },
+              h(
+                "div",
+                {
                   style: {
-                    borderRadius: "9999px",
-                    backgroundColor: "rgba(0, 0, 0, 0.3)",
-                    border: "1px solid rgba(255, 255, 255, 0.1)",
-                    color: "#ffffff",
-                    padding: "6px 14px 6px 32px",
-                    fontSize: "12px",
-                    outline: "none",
-                    width: "180px"
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    color: "#c084fc",
+                    fontSize: "11px",
+                    fontWeight: "600",
+                    letterSpacing: "0.04em",
+                    marginBottom: "6px"
                   }
-                }),
+                },
+                SVG_ICONS.dashboard({ h, width: 14, height: 14 }),
+                "HISTÓRICO ACUMULADO"
+              ),
+              h(
+                "div",
+                { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
+                `${formatTokens(dashboardMetrics.total_tokens)} tokens`
+              ),
+              h(
+                "div",
+                { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
+                `${formatNumber(dashboardMetrics.total_requests)} requisições ($${dashboardMetrics.total_cost.toFixed(2)})`
+              )
+            ),
+            // Card 4: Governança & Harness
+            h(
+              "div",
+              {
+                style: {
+                  backgroundColor: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                  borderRadius: "14px",
+                  padding: "16px 20px"
+                }
+              },
+              h(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    color: "#e2e8f0",
+                    fontSize: "11px",
+                    fontWeight: "600",
+                    letterSpacing: "0.04em",
+                    marginBottom: "6px"
+                  }
+                },
+                SVG_ICONS.shield({ h, width: 14, height: 14 }),
+                "GOVERNANÇA & HARNESS"
+              ),
+              h(
+                "div",
+                { style: { fontSize: "22px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" } },
+                `${models.length - disabledModels.length} Ativos / ${disabledModels.length} Inativos`
+              ),
+              h(
+                "div",
+                { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
+                lastSyncTime ? `Sincronizado: ${lastSyncTime}` : "Pronto para Goose & Pi"
+              )
+            )
+          ),
+          // 4. OS 4 GRUPOS CANÔNICOS (GRID PERFEITO DE 4 COLUNAS, ZERO "3 E 1", ZERO POLUIÇÃO)
+          h(
+            "div",
+            {
+              style: {
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+                gap: "16px"
+              }
+            },
+            Object.entries(CANONICAL_GROUPS).map(([pid, group]) => {
+              var _a2;
+              const isSelected = selectedGroupTab === pid;
+              const getLiveSummary = (groupId, staticSummary) => {
+                const platformMap = {
+                  nexusmind_openai: "openai",
+                  nexusmind_anthropic: "anthropic",
+                  nexusmind_antigravity: "antigravity",
+                  nexusmind_grok: "grok"
+                };
+                const platform = platformMap[groupId];
+                if (!platform || !(dashboardMetrics == null ? void 0 : dashboardMetrics.by_platform)) return staticSummary;
+                const p = dashboardMetrics.by_platform.find((x) => x.platform === platform);
+                if (!p) return staticSummary;
+                const tokens = p.today_tokens || 0;
+                const reqs = p.today_requests || 0;
+                const fmtTokens = tokens >= 1e9 ? `${(tokens / 1e9).toFixed(1)}B` : tokens >= 1e6 ? `${(tokens / 1e6).toFixed(1)}M` : tokens >= 1e3 ? `${(tokens / 1e3).toFixed(1)}k` : `${tokens}`;
+                return `Hoje: ${fmtTokens} tokens • ${reqs.toLocaleString()} reqs`;
+              };
+              return h(
+                "div",
+                {
+                  key: pid,
+                  style: {
+                    backgroundColor: isSelected ? "rgba(255, 255, 255, 0.05)" : "rgba(255, 255, 255, 0.02)",
+                    border: `1px solid ${isSelected ? group.accentColor : "rgba(255, 255, 255, 0.08)"}`,
+                    borderRadius: "14px",
+                    padding: "16px 18px",
+                    display: "flex",
+                    flexDirection: "column",
+                    justifyContent: "space-between",
+                    gap: "10px",
+                    transition: "all 0.15s ease"
+                  }
+                },
+                // Group Header (Official SVG Logo + Name + Status)
                 h(
                   "div",
                   {
                     style: {
-                      position: "absolute",
-                      left: "10px",
-                      color: "var(--text-subtle, #8e8e96)",
-                      pointerEvents: "none",
-                      display: "flex"
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between"
                     }
                   },
-                  SVG_ICONS.search({ h, width: 14, height: 14 })
+                  h(
+                    "div",
+                    { style: { display: "flex", alignItems: "center", gap: "10px" } },
+                    h(
+                      "div",
+                      {
+                        style: {
+                          width: "34px",
+                          height: "34px",
+                          borderRadius: "10px",
+                          backgroundColor: "rgba(255, 255, 255, 0.06)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          color: group.accentColor
+                        }
+                      },
+                      (_a2 = SVG_ICONS[group.logoKey]) == null ? void 0 : _a2.call(SVG_ICONS, { h, width: 20, height: 20 })
+                    ),
+                    h(
+                      "div",
+                      null,
+                      h("div", { style: { fontWeight: "600", fontSize: "14px", color: "#ffffff" } }, group.groupName),
+                      h("div", { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } }, pid)
+                    )
+                  ),
+                  h(
+                    "span",
+                    {
+                      style: {
+                        fontSize: "10px",
+                        padding: "2px 7px",
+                        borderRadius: "9999px",
+                        backgroundColor: "rgba(16, 185, 129, 0.15)",
+                        color: "#10b981",
+                        fontWeight: "600"
+                      }
+                    },
+                    "Ativo"
+                  )
+                ),
+                // Middle Telemetry Metric (Clean & Concise)
+                h(
+                  "div",
+                  { style: { fontSize: "12px", color: "#d1d5db", fontWeight: "500" } },
+                  getLiveSummary(group.id, group.telemetrySummary)
+                ),
+                // Bottom Filter Pill (Quick Filter to view models in this group)
+                h(
+                  "div",
+                  {
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      paddingTop: "8px",
+                      borderTop: "1px solid rgba(255, 255, 255, 0.06)"
+                    }
+                  },
+                  h(
+                    "span",
+                    { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
+                    `Padrão: ${group.defaultModel.split("/").pop()}`
+                  ),
+                  h(
+                    "button",
+                    {
+                      onClick: () => {
+                        setSelectedGroupTab(isSelected ? "all" : pid);
+                        setCurrentPage(1);
+                      },
+                      style: {
+                        borderRadius: "9999px",
+                        padding: "3px 10px",
+                        backgroundColor: isSelected ? group.accentColor : "rgba(255, 255, 255, 0.08)",
+                        color: isSelected ? "#000000" : "#ffffff",
+                        border: "none",
+                        fontSize: "11px",
+                        fontWeight: "600",
+                        cursor: "pointer"
+                      }
+                    },
+                    `${groupCounts[pid] ?? group.modelsCount} modelos`
+                  )
                 )
-              ),
-              h(
-                "button",
-                {
-                  onClick: () => {
-                    setFilterReasoning((v) => !v);
-                    setCurrentPage(1);
-                  },
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "6px 12px",
-                    border: "1px solid",
-                    borderColor: filterReasoning ? "#a855f7" : "rgba(255, 255, 255, 0.1)",
-                    backgroundColor: filterReasoning ? "rgba(168, 85, 247, 0.15)" : "transparent",
-                    color: filterReasoning ? "#c084fc" : "var(--text-subtle, #8e8e96)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    fontWeight: "500"
-                  }
-                },
-                "Thinking / Reasoning"
-              ),
-              h(
-                "button",
-                {
-                  onClick: () => {
-                    setFilterFree((v) => !v);
-                    setCurrentPage(1);
-                  },
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "6px 12px",
-                    border: "1px solid",
-                    borderColor: filterFree ? "#10b981" : "rgba(255, 255, 255, 0.1)",
-                    backgroundColor: filterFree ? "rgba(168, 185, 129, 0.15)" : "transparent",
-                    color: filterFree ? "#10b981" : "var(--text-subtle, #8e8e96)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    fontWeight: "500"
-                  }
-                },
-                "Apenas Free"
-              ),
-              (statusFilter !== "all" || selectedGroupTab !== "all" || filterFree || filterReasoning || searchQuery.trim() !== "") && h(
-                "button",
-                {
-                  onClick: () => {
-                    setSelectedGroupTab("all");
-                    setStatusFilter("all");
-                    setFilterFree(false);
-                    setFilterReasoning(false);
-                    setSearchQuery("");
-                    setCurrentPage(1);
-                  },
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "6px 10px",
-                    border: "1px solid rgba(255, 255, 255, 0.12)",
-                    backgroundColor: "rgba(255, 255, 255, 0.04)",
-                    color: "#e4e4e7",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    fontWeight: "500"
-                  }
-                },
-                "Limpar filtros"
-              )
-            )
-          ),
-          // Status & Healthcheck Segmented Filter Bar
-          h(
-            "div",
-            {
-              style: {
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                flexWrap: "wrap"
-              }
-            },
-            h(
-              "span",
-              {
-                style: {
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "5px",
-                  fontSize: "11px",
-                  color: "var(--text-subtle, #8e8e96)",
-                  marginRight: "4px"
-                }
-              },
-              SVG_ICONS.filter({ h, width: 12, height: 12 }),
-              "Status:"
-            ),
-            [
-              { id: "all", label: `Todos (${statusCounts.all})`, accent: "#ffffff" },
-              { id: "active", label: `Ativos (${statusCounts.active})`, accent: "#10b981" },
-              { id: "disabled", label: `Desativados (${statusCounts.disabled})`, accent: "#9ca3af" },
-              { id: "online", label: `Online (${statusCounts.online})`, accent: "#34d399" },
-              { id: "error", label: `Com Erro (${statusCounts.error})`, accent: "#f87171" }
-            ].map((st) => {
-              const active = statusFilter === st.id;
-              return h(
-                "button",
-                {
-                  key: st.id,
-                  onClick: () => {
-                    setStatusFilter(st.id);
-                    setCurrentPage(1);
-                  },
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "4px 12px",
-                    border: `1px solid ${active ? st.accent : "rgba(255, 255, 255, 0.08)"}`,
-                    backgroundColor: active ? "rgba(255, 255, 255, 0.1)" : "transparent",
-                    color: active ? st.accent : "var(--text-subtle, #8e8e96)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    fontWeight: active ? "600" : "500",
-                    transition: "all 0.15s ease"
-                  }
-                },
-                st.label
               );
             })
           ),
-          // Batch Action Bar
+          // 5. CATALOG WORKSPACE & MODEL MANAGEMENT
           h(
             "div",
             {
               style: {
+                backgroundColor: "rgba(255, 255, 255, 0.02)",
+                border: "1px solid rgba(255, 255, 255, 0.07)",
+                borderRadius: "16px",
+                padding: "22px 24px",
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                backgroundColor: "rgba(0, 0, 0, 0.2)",
-                borderRadius: "10px",
-                padding: "8px 14px"
+                flexDirection: "column",
+                gap: "18px"
               }
             },
+            // Header Controls (Filter Tabs + Search Bar)
             h(
-              "div",
-              { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
-              disabledModels.length > 0 ? `${disabledModels.length} modelo(s) desativado(s) serão expurgados do Buzz.` : "Todos os modelos listados estão ativos para sincronização."
-            ),
-            h(
-              "div",
-              { style: { display: "flex", gap: "8px" } },
-              h(
-                "button",
-                {
-                  onClick: handleBatchTestVisible,
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "5px 12px",
-                    backgroundColor: "rgba(59, 130, 246, 0.12)",
-                    color: "#60a5fa",
-                    border: "1px solid rgba(59, 130, 246, 0.25)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    fontWeight: "600",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "5px"
-                  }
-                },
-                SVG_ICONS.sparkles({ h, width: 12, height: 12 }),
-                "Testar Visíveis"
-              ),
-              h(
-                "button",
-                {
-                  onClick: handleBatchDisableUnavailable,
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "5px 12px",
-                    backgroundColor: "rgba(239, 68, 68, 0.12)",
-                    color: "#f87171",
-                    border: "1px solid rgba(239, 68, 68, 0.25)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    fontWeight: "600",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "5px"
-                  }
-                },
-                SVG_ICONS.shield({ h, width: 12, height: 12 }),
-                "Desativar Indisponíveis"
-              )
-            )
-          ),
-          // Ranking Rápido de Healthcheck (apenas quando há modelos testados ao vivo)
-          (() => {
-            const tested = Object.entries(modelTests).filter(([, t]) => t.status === "ok" || t.status === "error");
-            if (tested.length === 0) return null;
-            const onlineSorted = tested.filter(([, t]) => t.status === "ok" && typeof t.latency === "number").sort((a, b) => (a[1].latency ?? 999999) - (b[1].latency ?? 999999));
-            const okCount = onlineSorted.length;
-            const pct = Math.round(okCount / tested.length * 100);
-            const top3 = onlineSorted.slice(0, 3);
-            return h(
               "div",
               {
                 style: {
@@ -2808,305 +3318,596 @@ print("SYNC_SUCCESS")
                   alignItems: "center",
                   justifyContent: "space-between",
                   flexWrap: "wrap",
-                  gap: "10px",
-                  padding: "8px 14px",
-                  borderRadius: "10px",
-                  backgroundColor: "rgba(16, 185, 129, 0.06)",
-                  border: "1px solid rgba(16, 185, 129, 0.2)",
-                  fontSize: "11px"
+                  gap: "14px"
                 }
               },
+              // Tabs
               h(
                 "div",
-                { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-                h("span", { style: { fontWeight: "700", color: "#10b981" } }, "Ranking Ping Real:"),
-                top3.length === 0 ? h("span", { style: { color: "#f87171" } }, "Nenhum modelo online nos testes recentes.") : top3.map(
-                  ([mid, t], idx) => h(
-                    "span",
+                { style: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" } },
+                [
+                  { id: "all", label: `Todos os Grupos (${groupCounts.all})` },
+                  { id: "nexusmind_openai", label: `Saldo OpenAI (${groupCounts.nexusmind_openai})` },
+                  { id: "nexusmind_anthropic", label: `Saldo Claude (${groupCounts.nexusmind_anthropic})` },
+                  { id: "nexusmind_antigravity", label: `Antigravity-Saldo (${groupCounts.nexusmind_antigravity})` },
+                  { id: "nexusmind_grok", label: `Grok (${groupCounts.nexusmind_grok})` }
+                ].map(
+                  (tab) => h(
+                    "button",
                     {
-                      key: mid,
+                      key: tab.id,
+                      onClick: () => {
+                        setSelectedGroupTab(tab.id);
+                        setCurrentPage(1);
+                      },
                       style: {
-                        padding: "2px 8px",
                         borderRadius: "9999px",
-                        backgroundColor: idx === 0 ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.06)",
-                        color: idx === 0 ? "#34d399" : "#e4e4e7",
-                        fontFamily: "monospace",
-                        fontWeight: idx === 0 ? "700" : "500"
+                        padding: "6px 14px",
+                        border: "none",
+                        backgroundColor: selectedGroupTab === tab.id ? "rgba(255, 255, 255, 0.15)" : "transparent",
+                        color: selectedGroupTab === tab.id ? "#ffffff" : "var(--text-subtle, #8e8e96)",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                        fontWeight: selectedGroupTab === tab.id ? "600" : "500"
                       }
                     },
-                    `#${idx + 1} ${mid} (${t.latency}ms)`
+                    tab.label
                   )
                 )
               ),
+              // Search Input & Filter Toggles
               h(
-                "span",
-                { style: { color: "#9ca3af", fontFamily: "monospace" } },
-                `Estabilidade: ${okCount}/${tested.length} online (${pct}%)`
+                "div",
+                { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } },
+                h(
+                  "div",
+                  {
+                    style: {
+                      position: "relative",
+                      display: "flex",
+                      alignItems: "center"
+                    }
+                  },
+                  h("input", {
+                    type: "text",
+                    placeholder: "Buscar modelo...",
+                    value: searchQuery,
+                    onChange: (e) => {
+                      setSearchQuery(e.target.value);
+                      setCurrentPage(1);
+                    },
+                    style: {
+                      borderRadius: "9999px",
+                      backgroundColor: "rgba(0, 0, 0, 0.3)",
+                      border: "1px solid rgba(255, 255, 255, 0.1)",
+                      color: "#ffffff",
+                      padding: "6px 14px 6px 32px",
+                      fontSize: "12px",
+                      outline: "none",
+                      width: "180px"
+                    }
+                  }),
+                  h(
+                    "div",
+                    {
+                      style: {
+                        position: "absolute",
+                        left: "10px",
+                        color: "var(--text-subtle, #8e8e96)",
+                        pointerEvents: "none",
+                        display: "flex"
+                      }
+                    },
+                    SVG_ICONS.search({ h, width: 14, height: 14 })
+                  )
+                ),
+                h(
+                  "button",
+                  {
+                    onClick: () => {
+                      setFilterReasoning((v) => !v);
+                      setCurrentPage(1);
+                    },
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "6px 12px",
+                      border: "1px solid",
+                      borderColor: filterReasoning ? "#a855f7" : "rgba(255, 255, 255, 0.1)",
+                      backgroundColor: filterReasoning ? "rgba(168, 85, 247, 0.15)" : "transparent",
+                      color: filterReasoning ? "#c084fc" : "var(--text-subtle, #8e8e96)",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      fontWeight: "500"
+                    }
+                  },
+                  "Thinking / Reasoning"
+                ),
+                h(
+                  "button",
+                  {
+                    onClick: () => {
+                      setFilterFree((v) => !v);
+                      setCurrentPage(1);
+                    },
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "6px 12px",
+                      border: "1px solid",
+                      borderColor: filterFree ? "#10b981" : "rgba(255, 255, 255, 0.1)",
+                      backgroundColor: filterFree ? "rgba(168, 185, 129, 0.15)" : "transparent",
+                      color: filterFree ? "#10b981" : "var(--text-subtle, #8e8e96)",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      fontWeight: "500"
+                    }
+                  },
+                  "Apenas Free"
+                ),
+                (statusFilter !== "all" || selectedGroupTab !== "all" || filterFree || filterReasoning || searchQuery.trim() !== "") && h(
+                  "button",
+                  {
+                    onClick: () => {
+                      setSelectedGroupTab("all");
+                      setStatusFilter("all");
+                      setFilterFree(false);
+                      setFilterReasoning(false);
+                      setSearchQuery("");
+                      setCurrentPage(1);
+                    },
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "6px 10px",
+                      border: "1px solid rgba(255, 255, 255, 0.12)",
+                      backgroundColor: "rgba(255, 255, 255, 0.04)",
+                      color: "#e4e4e7",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      fontWeight: "500"
+                    }
+                  },
+                  "Limpar filtros"
+                )
               )
-            );
-          })(),
-          // Model List Rows
-          h(
-            "div",
-            { style: { display: "flex", flexDirection: "column", gap: "6px" } },
-            paginatedModels.length === 0 ? h(
+            ),
+            // Status & Healthcheck Segmented Filter Bar
+            h(
               "div",
               {
                 style: {
-                  padding: "28px 16px",
-                  textAlign: "center",
-                  borderRadius: "10px",
-                  backgroundColor: "rgba(255, 255, 255, 0.02)",
-                  border: "1px dashed rgba(255, 255, 255, 0.08)",
-                  color: "var(--text-subtle, #8e8e96)",
-                  fontSize: "12px"
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  flexWrap: "wrap"
                 }
               },
-              statusFilter === "online" || statusFilter === "error" ? "Nenhum modelo corresponde a este filtro ainda. Clique em 'Testar Visíveis' para rodar o healthcheck." : "Nenhum modelo encontrado com os filtros atuais."
-            ) : paginatedModels.map((item) => {
-              const mid = item.id;
-              const isDisabled = disabledModels.includes(mid);
-              const lower = mid.toLowerCase();
-              const isThinking = lower.includes("reasoning") || lower.includes("think") || lower.includes("r1") || lower.includes("luna");
-              const isFree = lower.includes(":free") || lower.includes("free");
-              const testRes = modelTests[mid];
+              h(
+                "span",
+                {
+                  style: {
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "5px",
+                    fontSize: "11px",
+                    color: "var(--text-subtle, #8e8e96)",
+                    marginRight: "4px"
+                  }
+                },
+                SVG_ICONS.filter({ h, width: 12, height: 12 }),
+                "Status:"
+              ),
+              [
+                { id: "all", label: `Todos (${statusCounts.all})`, accent: "#ffffff" },
+                { id: "active", label: `Ativos (${statusCounts.active})`, accent: "#10b981" },
+                { id: "disabled", label: `Desativados (${statusCounts.disabled})`, accent: "#9ca3af" },
+                { id: "online", label: `Online (${statusCounts.online})`, accent: "#34d399" },
+                { id: "error", label: `Com Erro (${statusCounts.error})`, accent: "#f87171" }
+              ].map((st) => {
+                const active = statusFilter === st.id;
+                return h(
+                  "button",
+                  {
+                    key: st.id,
+                    onClick: () => {
+                      setStatusFilter(st.id);
+                      setCurrentPage(1);
+                    },
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "4px 12px",
+                      border: `1px solid ${active ? st.accent : "rgba(255, 255, 255, 0.08)"}`,
+                      backgroundColor: active ? "rgba(255, 255, 255, 0.1)" : "transparent",
+                      color: active ? st.accent : "var(--text-subtle, #8e8e96)",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      fontWeight: active ? "600" : "500",
+                      transition: "all 0.15s ease"
+                    }
+                  },
+                  st.label
+                );
+              })
+            ),
+            // Batch Action Bar
+            h(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  backgroundColor: "rgba(0, 0, 0, 0.2)",
+                  borderRadius: "10px",
+                  padding: "8px 14px"
+                }
+              },
+              h(
+                "div",
+                { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
+                disabledModels.length > 0 ? `${disabledModels.length} modelo(s) desativado(s) serão expurgados do Buzz.` : "Todos os modelos listados estão ativos para sincronização."
+              ),
+              h(
+                "div",
+                { style: { display: "flex", gap: "8px" } },
+                h(
+                  "button",
+                  {
+                    onClick: handleBatchTestVisible,
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "5px 12px",
+                      backgroundColor: "rgba(59, 130, 246, 0.12)",
+                      color: "#60a5fa",
+                      border: "1px solid rgba(59, 130, 246, 0.25)",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      fontWeight: "600",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "5px"
+                    }
+                  },
+                  SVG_ICONS.sparkles({ h, width: 12, height: 12 }),
+                  "Testar Visíveis"
+                ),
+                h(
+                  "button",
+                  {
+                    onClick: handleBatchDisableUnavailable,
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "5px 12px",
+                      backgroundColor: "rgba(239, 68, 68, 0.12)",
+                      color: "#f87171",
+                      border: "1px solid rgba(239, 68, 68, 0.25)",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      fontWeight: "600",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "5px"
+                    }
+                  },
+                  SVG_ICONS.shield({ h, width: 12, height: 12 }),
+                  "Desativar Indisponíveis"
+                )
+              )
+            ),
+            // Ranking Rápido de Healthcheck (apenas quando há modelos testados ao vivo)
+            (() => {
+              const tested = Object.entries(modelTests).filter(([, t]) => t.status === "ok" || t.status === "error");
+              if (tested.length === 0) return null;
+              const onlineSorted = tested.filter(([, t]) => t.status === "ok" && typeof t.latency === "number").sort((a, b) => (a[1].latency ?? 999999) - (b[1].latency ?? 999999));
+              const okCount = onlineSorted.length;
+              const pct = Math.round(okCount / tested.length * 100);
+              const top3 = onlineSorted.slice(0, 3);
               return h(
                 "div",
                 {
-                  key: mid,
                   style: {
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "space-between",
-                    padding: "10px 14px",
-                    backgroundColor: isDisabled ? "rgba(255, 255, 255, 0.01)" : "rgba(255, 255, 255, 0.03)",
-                    border: "1px solid rgba(255, 255, 255, 0.05)",
+                    flexWrap: "wrap",
+                    gap: "10px",
+                    padding: "8px 14px",
                     borderRadius: "10px",
-                    opacity: isDisabled ? 0.45 : 1,
-                    transition: "all 0.15s ease"
+                    backgroundColor: "rgba(16, 185, 129, 0.06)",
+                    border: "1px solid rgba(16, 185, 129, 0.2)",
+                    fontSize: "11px"
                   }
                 },
-                // Left: Toggle Checkbox + Model Name & Badges
                 h(
                   "div",
-                  { style: { display: "flex", alignItems: "center", gap: "12px", minWidth: 0 } },
-                  h("input", {
-                    type: "checkbox",
-                    checked: !isDisabled,
-                    onChange: () => handleToggleModel(mid),
-                    style: { cursor: "pointer", accentColor: "#10b981", width: "16px", height: "16px" }
-                  }),
-                  h(
-                    "div",
-                    { style: { display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 } },
-                    h(
-                      "div",
-                      { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-                      h(
-                        "span",
-                        {
-                          style: {
-                            fontWeight: "600",
-                            fontSize: "13px",
-                            color: isDisabled ? "#8e8e96" : "#ffffff",
-                            textDecoration: isDisabled ? "line-through" : "none"
-                          }
-                        },
-                        mid
-                      ),
-                      isThinking && h(
-                        "span",
-                        {
-                          style: {
-                            fontSize: "9px",
-                            padding: "1px 6px",
-                            borderRadius: "4px",
-                            backgroundColor: "rgba(168, 85, 247, 0.15)",
-                            color: "#c084fc",
-                            fontWeight: "700"
-                          }
-                        },
-                        "THINKING"
-                      ),
-                      isFree && h(
-                        "span",
-                        {
-                          style: {
-                            fontSize: "9px",
-                            padding: "1px 6px",
-                            borderRadius: "4px",
-                            backgroundColor: "rgba(16, 185, 129, 0.15)",
-                            color: "#10b981",
-                            fontWeight: "700"
-                          }
-                        },
-                        "FREE"
-                      )
-                    ),
-                    h(
-                      "div",
-                      { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
-                      item.context_window ? `Ctx: ${formatNumber(item.context_window)} tokens` : "Ctx: 128k tokens"
+                  { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+                  h("span", { style: { fontWeight: "700", color: "#10b981" } }, "Ranking Ping Real:"),
+                  top3.length === 0 ? h("span", { style: { color: "#f87171" } }, "Nenhum modelo online nos testes recentes.") : top3.map(
+                    ([mid, t], idx) => h(
+                      "span",
+                      {
+                        key: mid,
+                        style: {
+                          padding: "2px 8px",
+                          borderRadius: "9999px",
+                          backgroundColor: idx === 0 ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.06)",
+                          color: idx === 0 ? "#34d399" : "#e4e4e7",
+                          fontFamily: "monospace",
+                          fontWeight: idx === 0 ? "700" : "500"
+                        }
+                      },
+                      `#${idx + 1} ${mid} (${t.latency}ms)`
                     )
                   )
                 ),
-                // Right: Test Button + Status Badge + Sync Indicator
                 h(
-                  "div",
-                  { style: { display: "flex", alignItems: "center", gap: "10px" } },
-                  // Test Result Indicator
-                  testRes && h(
-                    "span",
-                    {
-                      style: {
-                        fontSize: "11px",
-                        padding: "2px 8px",
-                        borderRadius: "9999px",
-                        backgroundColor: testRes.status === "ok" ? "rgba(16, 185, 129, 0.15)" : testRes.status === "testing" ? "rgba(59, 130, 246, 0.15)" : "rgba(239, 68, 68, 0.15)",
-                        color: testRes.status === "ok" ? "#10b981" : testRes.status === "testing" ? "#60a5fa" : "#f87171",
-                        fontWeight: "600"
-                      }
-                    },
-                    testRes.status === "testing" ? "Testando..." : testRes.status === "ok" ? `${testRes.latency}ms · Online` : `Erro · ${testRes.errorMsg || "Falha"}`
-                  ),
-                  // Individual Test Button
-                  h(
-                    "button",
-                    {
-                      onClick: () => handleTestSingleModel(mid),
-                      disabled: (testRes == null ? void 0 : testRes.status) === "testing",
-                      style: {
-                        borderRadius: "9999px",
-                        padding: "4px 10px",
-                        backgroundColor: "rgba(255, 255, 255, 0.06)",
-                        color: "#ffffff",
-                        border: "1px solid rgba(255, 255, 255, 0.1)",
-                        fontSize: "11px",
-                        fontWeight: "500",
-                        cursor: (testRes == null ? void 0 : testRes.status) === "testing" ? "not-allowed" : "pointer",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: "4px"
-                      }
-                    },
-                    SVG_ICONS.pulse({ h, width: 11, height: 11 }),
-                    "Testar"
-                  ),
-                  // Active in Buzz Badge
-                  h(
-                    "span",
-                    {
-                      style: {
-                        fontSize: "11px",
-                        fontWeight: "500",
-                        color: isDisabled ? "#8e8e96" : "#10b981",
-                        minWidth: "85px",
-                        textAlign: "right"
-                      }
-                    },
-                    isDisabled ? "✕ Desativado" : "✓ Ativo no Buzz"
-                  )
+                  "span",
+                  { style: { color: "#9ca3af", fontFamily: "monospace" } },
+                  `Estabilidade: ${okCount}/${tested.length} online (${pct}%)`
                 )
               );
-            })
-          ),
-          // Pagination Footer
-          h(
-            "div",
-            {
-              style: {
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                paddingTop: "14px",
-                borderTop: "1px solid rgba(255, 255, 255, 0.06)",
-                flexWrap: "wrap",
-                gap: "10px"
-              }
-            },
+            })(),
+            // Model List Rows
             h(
               "div",
-              { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
-              pageSize === 0 ? `Exibindo todos os ${filteredModels.length} modelos` : `Exibindo ${Math.min((currentPage - 1) * pageSize + 1, filteredModels.length)}–${Math.min(
-                currentPage * pageSize,
-                filteredModels.length
-              )} de ${filteredModels.length} modelos`
+              { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+              paginatedModels.length === 0 ? h(
+                "div",
+                {
+                  style: {
+                    padding: "28px 16px",
+                    textAlign: "center",
+                    borderRadius: "10px",
+                    backgroundColor: "rgba(255, 255, 255, 0.02)",
+                    border: "1px dashed rgba(255, 255, 255, 0.08)",
+                    color: "var(--text-subtle, #8e8e96)",
+                    fontSize: "12px"
+                  }
+                },
+                statusFilter === "online" || statusFilter === "error" ? "Nenhum modelo corresponde a este filtro ainda. Clique em 'Testar Visíveis' para rodar o healthcheck." : "Nenhum modelo encontrado com os filtros atuais."
+              ) : paginatedModels.map((item) => {
+                const mid = item.id;
+                const isDisabled = disabledModels.includes(mid);
+                const lower = mid.toLowerCase();
+                const isThinking = lower.includes("reasoning") || lower.includes("think") || lower.includes("r1") || lower.includes("luna");
+                const isFree = lower.includes(":free") || lower.includes("free");
+                const testRes = modelTests[mid];
+                return h(
+                  "div",
+                  {
+                    key: mid,
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "10px 14px",
+                      backgroundColor: isDisabled ? "rgba(255, 255, 255, 0.01)" : "rgba(255, 255, 255, 0.03)",
+                      border: "1px solid rgba(255, 255, 255, 0.05)",
+                      borderRadius: "10px",
+                      opacity: isDisabled ? 0.45 : 1,
+                      transition: "all 0.15s ease"
+                    }
+                  },
+                  // Left: Toggle Checkbox + Model Name & Badges
+                  h(
+                    "div",
+                    { style: { display: "flex", alignItems: "center", gap: "12px", minWidth: 0 } },
+                    h("input", {
+                      type: "checkbox",
+                      checked: !isDisabled,
+                      onChange: () => handleToggleModel(mid),
+                      style: { cursor: "pointer", accentColor: "#10b981", width: "16px", height: "16px" }
+                    }),
+                    h(
+                      "div",
+                      { style: { display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 } },
+                      h(
+                        "div",
+                        { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+                        h(
+                          "span",
+                          {
+                            style: {
+                              fontWeight: "600",
+                              fontSize: "13px",
+                              color: isDisabled ? "#8e8e96" : "#ffffff",
+                              textDecoration: isDisabled ? "line-through" : "none"
+                            }
+                          },
+                          mid
+                        ),
+                        isThinking && h(
+                          "span",
+                          {
+                            style: {
+                              fontSize: "9px",
+                              padding: "1px 6px",
+                              borderRadius: "4px",
+                              backgroundColor: "rgba(168, 85, 247, 0.15)",
+                              color: "#c084fc",
+                              fontWeight: "700"
+                            }
+                          },
+                          "THINKING"
+                        ),
+                        isFree && h(
+                          "span",
+                          {
+                            style: {
+                              fontSize: "9px",
+                              padding: "1px 6px",
+                              borderRadius: "4px",
+                              backgroundColor: "rgba(16, 185, 129, 0.15)",
+                              color: "#10b981",
+                              fontWeight: "700"
+                            }
+                          },
+                          "FREE"
+                        )
+                      ),
+                      h(
+                        "div",
+                        { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
+                        item.context_window ? `Ctx: ${formatNumber(item.context_window)} tokens` : "Ctx: 128k tokens"
+                      )
+                    )
+                  ),
+                  // Right: Test Button + Status Badge + Sync Indicator
+                  h(
+                    "div",
+                    { style: { display: "flex", alignItems: "center", gap: "10px" } },
+                    // Test Result Indicator
+                    testRes && h(
+                      "span",
+                      {
+                        style: {
+                          fontSize: "11px",
+                          padding: "2px 8px",
+                          borderRadius: "9999px",
+                          backgroundColor: testRes.status === "ok" ? "rgba(16, 185, 129, 0.15)" : testRes.status === "testing" ? "rgba(59, 130, 246, 0.15)" : "rgba(239, 68, 68, 0.15)",
+                          color: testRes.status === "ok" ? "#10b981" : testRes.status === "testing" ? "#60a5fa" : "#f87171",
+                          fontWeight: "600"
+                        }
+                      },
+                      testRes.status === "testing" ? "Testando..." : testRes.status === "ok" ? `${testRes.latency}ms · Online` : `Erro · ${testRes.errorMsg || "Falha"}`
+                    ),
+                    // Individual Test Button
+                    h(
+                      "button",
+                      {
+                        onClick: () => handleTestSingleModel(mid),
+                        disabled: (testRes == null ? void 0 : testRes.status) === "testing",
+                        style: {
+                          borderRadius: "9999px",
+                          padding: "4px 10px",
+                          backgroundColor: "rgba(255, 255, 255, 0.06)",
+                          color: "#ffffff",
+                          border: "1px solid rgba(255, 255, 255, 0.1)",
+                          fontSize: "11px",
+                          fontWeight: "500",
+                          cursor: (testRes == null ? void 0 : testRes.status) === "testing" ? "not-allowed" : "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "4px"
+                        }
+                      },
+                      SVG_ICONS.pulse({ h, width: 11, height: 11 }),
+                      "Testar"
+                    ),
+                    // Active in Buzz Badge
+                    h(
+                      "span",
+                      {
+                        style: {
+                          fontSize: "11px",
+                          fontWeight: "500",
+                          color: isDisabled ? "#8e8e96" : "#10b981",
+                          minWidth: "85px",
+                          textAlign: "right"
+                        }
+                      },
+                      isDisabled ? "✕ Desativado" : "✓ Ativo no Buzz"
+                    )
+                  )
+                );
+              })
             ),
+            // Pagination Footer
             h(
               "div",
-              { style: { display: "flex", alignItems: "center", gap: "8px" } },
-              h(
-                "button",
-                {
-                  onClick: () => setCurrentPage((p) => Math.max(1, p - 1)),
-                  disabled: currentPage <= 1,
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "5px 12px",
-                    backgroundColor: "rgba(255, 255, 255, 0.06)",
-                    color: currentPage <= 1 ? "rgba(255,255,255,0.3)" : "#ffffff",
-                    border: "none",
-                    cursor: currentPage <= 1 ? "not-allowed" : "pointer",
-                    fontSize: "12px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "4px"
-                  }
-                },
-                SVG_ICONS.chevronLeft({ h, width: 14, height: 14 }),
-                "Anterior"
-              ),
-              h(
-                "span",
-                { style: { fontSize: "12px", color: "#8e8e96", padding: "0 6px" } },
-                `Página ${currentPage} de ${totalPages}`
-              ),
-              h(
-                "button",
-                {
-                  onClick: () => setCurrentPage((p) => Math.min(totalPages, p + 1)),
-                  disabled: currentPage >= totalPages,
-                  style: {
-                    borderRadius: "9999px",
-                    padding: "5px 12px",
-                    backgroundColor: "rgba(255, 255, 255, 0.06)",
-                    color: currentPage >= totalPages ? "rgba(255,255,255,0.3)" : "#ffffff",
-                    border: "none",
-                    cursor: currentPage >= totalPages ? "not-allowed" : "pointer",
-                    fontSize: "12px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "4px"
-                  }
-                },
-                "Próxima",
-                SVG_ICONS.chevronRight({ h, width: 14, height: 14 })
-              ),
-              // Page size selector
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  paddingTop: "14px",
+                  borderTop: "1px solid rgba(255, 255, 255, 0.06)",
+                  flexWrap: "wrap",
+                  gap: "10px"
+                }
+              },
               h(
                 "div",
-                { style: { display: "flex", alignItems: "center", gap: "4px", marginLeft: "12px" } },
-                h("span", { style: { fontSize: "12px", color: "#8e8e96" } }, "Por página:"),
-                [15, 30, 50, 0].map(
-                  (sz) => h(
-                    "button",
-                    {
-                      key: sz,
-                      onClick: () => {
-                        setPageSize(sz);
-                        setCurrentPage(1);
+                { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
+                pageSize === 0 ? `Exibindo todos os ${filteredModels.length} modelos` : `Exibindo ${Math.min((currentPage - 1) * pageSize + 1, filteredModels.length)}–${Math.min(
+                  currentPage * pageSize,
+                  filteredModels.length
+                )} de ${filteredModels.length} modelos`
+              ),
+              h(
+                "div",
+                { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                h(
+                  "button",
+                  {
+                    onClick: () => setCurrentPage((p) => Math.max(1, p - 1)),
+                    disabled: currentPage <= 1,
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "5px 12px",
+                      backgroundColor: "rgba(255, 255, 255, 0.06)",
+                      color: currentPage <= 1 ? "rgba(255,255,255,0.3)" : "#ffffff",
+                      border: "none",
+                      cursor: currentPage <= 1 ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px"
+                    }
+                  },
+                  SVG_ICONS.chevronLeft({ h, width: 14, height: 14 }),
+                  "Anterior"
+                ),
+                h(
+                  "span",
+                  { style: { fontSize: "12px", color: "#8e8e96", padding: "0 6px" } },
+                  `Página ${currentPage} de ${totalPages}`
+                ),
+                h(
+                  "button",
+                  {
+                    onClick: () => setCurrentPage((p) => Math.min(totalPages, p + 1)),
+                    disabled: currentPage >= totalPages,
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "5px 12px",
+                      backgroundColor: "rgba(255, 255, 255, 0.06)",
+                      color: currentPage >= totalPages ? "rgba(255,255,255,0.3)" : "#ffffff",
+                      border: "none",
+                      cursor: currentPage >= totalPages ? "not-allowed" : "pointer",
+                      fontSize: "12px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px"
+                    }
+                  },
+                  "Próxima",
+                  SVG_ICONS.chevronRight({ h, width: 14, height: 14 })
+                ),
+                // Page size selector
+                h(
+                  "div",
+                  { style: { display: "flex", alignItems: "center", gap: "4px", marginLeft: "12px" } },
+                  h("span", { style: { fontSize: "12px", color: "#8e8e96" } }, "Por página:"),
+                  [15, 30, 50, 0].map(
+                    (sz) => h(
+                      "button",
+                      {
+                        key: sz,
+                        onClick: () => {
+                          setPageSize(sz);
+                          setCurrentPage(1);
+                        },
+                        style: {
+                          borderRadius: "6px",
+                          padding: "2px 8px",
+                          border: "none",
+                          backgroundColor: pageSize === sz ? "rgba(255, 255, 255, 0.15)" : "transparent",
+                          color: pageSize === sz ? "#ffffff" : "#8e8e96",
+                          fontSize: "11px",
+                          cursor: "pointer"
+                        }
                       },
-                      style: {
-                        borderRadius: "6px",
-                        padding: "2px 8px",
-                        border: "none",
-                        backgroundColor: pageSize === sz ? "rgba(255, 255, 255, 0.15)" : "transparent",
-                        color: pageSize === sz ? "#ffffff" : "#8e8e96",
-                        fontSize: "11px",
-                        cursor: "pointer"
-                      }
-                    },
-                    sz === 0 ? "Todos" : String(sz)
+                      sz === 0 ? "Todos" : String(sz)
+                    )
                   )
                 )
               )
@@ -3406,7 +4207,8 @@ Ferramentas nativas do Gateway:
 2. nexusmind_status(): Ping HTTP real nos 4 grupos canônicos e consulta ao vivo de saldo/perfil (/api/v1/user/profile).
 3. nexusmind_best_model({ tier?, exclude_models?, prefer_free?, avoid_free?, max_probes? }): Faz ping real em paralelo e elege o melhor modelo saudável para o tier ('tier1_fast' | 'tier2_balanced' | 'tier3_frontier' | 'reasoning' | 'decision'), evitando modelos :free com rate limit por padrão.
 4. nexusmind_apply_best_model({ agente, tier?, exclude_models?, prefer_free? }): Seleciona o melhor modelo saudável para o tier e já aplica diretamente no agente via ctx.agents.save().
-Use nexusmind_best_model ou nexusmind_apply_best_model sempre que precisar garantir o melhor modelo online para um card ou recuperar de erro 429/502.`
+5. nexusmind_model_ranking({ tier?, live_probe?, avoid_free?, limit? }): Retorna o ranking real de modelos combinando telemetria do Gateway (nm_usage.json) + ping ao vivo, e atualiza ~/.buzz/.scratch/nexusmind-model-ranking.json para todo o ecossistema.
+Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model sempre que precisar garantir o melhor modelo online para um card ou recuperar de erro 429/502.`
       });
       console.log("[NEXUSMIND] ctx.agents.addInstructions registrado com sucesso.");
     } catch (err) {
@@ -3662,7 +4464,78 @@ Use nexusmind_best_model ou nexusmind_apply_best_model sempre que precisar garan
           return JSON.stringify(res, null, 2);
         }
       });
-      console.log("[NEXUSMIND] 4 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
+      ctx.agents.addTool({
+        name: "nexusmind_model_ranking",
+        description: "Retorna o ranking real de modelos do NexusMind Gateway combinando telemetria de uso real (nm_usage.json), latência, cache hit, custo e opcionalmente ping HTTP 200 ao vivo, persistindo o snapshot compartilhado em ~/.buzz/.scratch/nexusmind-model-ranking.json.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tier: {
+              type: "string",
+              enum: ["geral", "tier1_fast", "tier2_balanced", "tier3_frontier", "reasoning", "decision"],
+              description: "Tier do ranking desejado (default: 'geral')"
+            },
+            live_probe: {
+              type: "boolean",
+              description: "Se true, faz ping HTTP 200 ao vivo nos top candidatos antes de ranquear (default: false)"
+            },
+            avoid_free: {
+              type: "boolean",
+              description: "Se true (padrão), penaliza modelos :free propensos a HTTP 429"
+            },
+            limit: {
+              type: "number",
+              description: "Quantidade de modelos retornados no ranking (default: 15)"
+            }
+          }
+        },
+        call: async (_client, _context, args) => {
+          const tier = (args == null ? void 0 : args.tier) || "geral";
+          const avoidFree = (args == null ? void 0 : args.avoid_free) !== false;
+          const limit = Math.max(1, Math.min(50, Number((args == null ? void 0 : args.limit) || 15)));
+          const usage = await loadGatewayUsageByModel(ctx);
+          const liveProbes = {};
+          if (args == null ? void 0 : args.live_probe) {
+            const probeRes = await selectBestModelByTier(ctx, CANONICAL_GROUPS, {
+              tier: tier === "geral" ? "tier2_balanced" : tier,
+              avoid_free: avoidFree,
+              max_probes: 6
+            });
+            for (const cand of probeRes.ranking) {
+              liveProbes[cand.model] = {
+                status: cand.online ? "ok" : "error",
+                latency: cand.latencyMs ?? void 0,
+                errorMsg: cand.error
+              };
+            }
+          }
+          let cachedModels = [];
+          try {
+            const raw = localStorage.getItem("nexusmind_cached_models");
+            if (raw) cachedModels = JSON.parse(raw);
+          } catch {
+          }
+          const snap = buildModelRankingSnapshot({
+            catalogModels: cachedModels,
+            groups: CANONICAL_GROUPS,
+            usageByModel: usage.byModel,
+            usageSampleSize: usage.sampleSize,
+            liveProbes,
+            tier,
+            avoidFree
+          });
+          await persistModelRankingSnapshot(ctx, snap);
+          return JSON.stringify(
+            {
+              ...snap,
+              models: snap.models.slice(0, limit)
+            },
+            null,
+            2
+          );
+        }
+      });
+      console.log("[NEXUSMIND] 5 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar agentTools:", err);
     }
@@ -3675,9 +4548,12 @@ export {
   OFFICIAL_ENDPOINTS,
   apply,
   applyBestModelToAgent,
+  buildModelRankingSnapshot,
   createNexusMindDecisionProvider,
   getModelGroups,
   inject,
+  loadGatewayUsageByModel,
+  persistModelRankingSnapshot,
   scoreModelForTier,
   selectBestModelByTier
 };

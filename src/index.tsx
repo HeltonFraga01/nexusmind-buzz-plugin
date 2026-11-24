@@ -5,12 +5,22 @@ import {
   createNexusMindDecisionProvider,
   scoreModelForTier,
 } from "./services/smart-router";
+import {
+  buildModelRankingSnapshot,
+  loadGatewayUsageByModel,
+  persistModelRankingSnapshot,
+  type RankingTier,
+} from "./services/model-ranking";
+import { createModelRankingTabComponent } from "./components/ModelRankingTab";
 
 export {
   selectBestModelByTier,
   applyBestModelToAgent,
   createNexusMindDecisionProvider,
   scoreModelForTier,
+  buildModelRankingSnapshot,
+  loadGatewayUsageByModel,
+  persistModelRankingSnapshot,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -503,6 +513,13 @@ export function apply(ctx: Context) {
     const [modelTests, setModelTests] = React.useState<
       Record<string, { status: "testing" | "ok" | "error"; latency?: number; errorMsg?: string }>
     >({});
+
+    // Primary Workspace Section (Catálogo & Gateway vs. Ranking de Modelos)
+    const [activeSection, setActiveSection] = React.useState<"catalog" | "ranking">("catalog");
+    const ModelRankingTab = React.useMemo(
+      () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS as any),
+      []
+    );
 
     // Filter & Pagination States
     const [selectedGroupTab, setSelectedGroupTab] = React.useState<string>("all");
@@ -1967,6 +1984,55 @@ print("SYNC_SUCCESS")
               )
             ),
 
+            // PRIMARY NAVIGATION TABS (Catálogo & Gateway | Ranking de Modelos)
+            h(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+                  paddingBottom: "10px",
+                },
+              },
+              [
+                { id: "catalog", label: "Catálogo & Gateway" },
+                { id: "ranking", label: "Ranking de Modelos (Telemetria Real)" },
+              ].map((tab) => {
+                const active = activeSection === tab.id;
+                return h(
+                  "button",
+                  {
+                    key: tab.id,
+                    onClick: () => setActiveSection(tab.id as "catalog" | "ranking"),
+                    style: {
+                      borderRadius: "9999px",
+                      padding: "7px 16px",
+                      border: active ? "1px solid rgba(16, 185, 129, 0.45)" : "1px solid rgba(255, 255, 255, 0.08)",
+                      backgroundColor: active ? "rgba(16, 185, 129, 0.16)" : "rgba(255, 255, 255, 0.03)",
+                      color: active ? "#34d399" : "#a1a1aa",
+                      fontSize: "12px",
+                      fontWeight: active ? "700" : "500",
+                      cursor: "pointer",
+                    },
+                  },
+                  tab.label
+                );
+              })
+            ),
+
+            activeSection === "ranking"
+              ? h(ModelRankingTab, {
+                  models,
+                  disabledModels,
+                  modelTests,
+                  onTestSingleModel: handleTestSingleModel,
+                  onNotify: setStatusMessage,
+                })
+              : h(
+                  React.Fragment,
+                  null,
             // OFFICIAL NEXUSMIND GATEWAY ENDPOINTS BAR (Matching Official Dashboard)
             h(
               "div",
@@ -3084,6 +3150,7 @@ print("SYNC_SUCCESS")
                 )
               )
             )
+                )
           )
     );
   }
@@ -3402,7 +3469,8 @@ Ferramentas nativas do Gateway:
 2. nexusmind_status(): Ping HTTP real nos 4 grupos canônicos e consulta ao vivo de saldo/perfil (/api/v1/user/profile).
 3. nexusmind_best_model({ tier?, exclude_models?, prefer_free?, avoid_free?, max_probes? }): Faz ping real em paralelo e elege o melhor modelo saudável para o tier ('tier1_fast' | 'tier2_balanced' | 'tier3_frontier' | 'reasoning' | 'decision'), evitando modelos :free com rate limit por padrão.
 4. nexusmind_apply_best_model({ agente, tier?, exclude_models?, prefer_free? }): Seleciona o melhor modelo saudável para o tier e já aplica diretamente no agente via ctx.agents.save().
-Use nexusmind_best_model ou nexusmind_apply_best_model sempre que precisar garantir o melhor modelo online para um card ou recuperar de erro 429/502.`
+5. nexusmind_model_ranking({ tier?, live_probe?, avoid_free?, limit? }): Retorna o ranking real de modelos combinando telemetria do Gateway (nm_usage.json) + ping ao vivo, e atualiza ~/.buzz/.scratch/nexusmind-model-ranking.json para todo o ecossistema.
+Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model sempre que precisar garantir o melhor modelo online para um card ou recuperar de erro 429/502.`
       });
       console.log("[NEXUSMIND] ctx.agents.addInstructions registrado com sucesso.");
     } catch (err) {
@@ -3675,7 +3743,78 @@ Use nexusmind_best_model ou nexusmind_apply_best_model sempre que precisar garan
         },
       });
 
-      console.log("[NEXUSMIND] 4 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
+      (ctx.agents as any).addTool({
+        name: "nexusmind_model_ranking",
+        description: "Retorna o ranking real de modelos do NexusMind Gateway combinando telemetria de uso real (nm_usage.json), latência, cache hit, custo e opcionalmente ping HTTP 200 ao vivo, persistindo o snapshot compartilhado em ~/.buzz/.scratch/nexusmind-model-ranking.json.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tier: {
+              type: "string",
+              enum: ["geral", "tier1_fast", "tier2_balanced", "tier3_frontier", "reasoning", "decision"],
+              description: "Tier do ranking desejado (default: 'geral')",
+            },
+            live_probe: {
+              type: "boolean",
+              description: "Se true, faz ping HTTP 200 ao vivo nos top candidatos antes de ranquear (default: false)",
+            },
+            avoid_free: {
+              type: "boolean",
+              description: "Se true (padrão), penaliza modelos :free propensos a HTTP 429",
+            },
+            limit: {
+              type: "number",
+              description: "Quantidade de modelos retornados no ranking (default: 15)",
+            },
+          },
+        },
+        call: async (_client: any, _context: any, args: any) => {
+          const tier = (args?.tier || "geral") as RankingTier;
+          const avoidFree = args?.avoid_free !== false;
+          const limit = Math.max(1, Math.min(50, Number(args?.limit || 15)));
+          const usage = await loadGatewayUsageByModel(ctx);
+          const liveProbes: Record<string, { status: "ok" | "error"; latency?: number; errorMsg?: string }> = {};
+          if (args?.live_probe) {
+            const probeRes = await selectBestModelByTier(ctx, CANONICAL_GROUPS as any, {
+              tier: tier === "geral" ? "tier2_balanced" : tier,
+              avoid_free: avoidFree,
+              max_probes: 6,
+            });
+            for (const cand of probeRes.ranking) {
+              liveProbes[cand.model] = {
+                status: cand.online ? "ok" : "error",
+                latency: cand.latencyMs ?? undefined,
+                errorMsg: cand.error,
+              };
+            }
+          }
+          let cachedModels: any[] = [];
+          try {
+            const raw = localStorage.getItem("nexusmind_cached_models");
+            if (raw) cachedModels = JSON.parse(raw);
+          } catch {}
+          const snap = buildModelRankingSnapshot({
+            catalogModels: cachedModels,
+            groups: CANONICAL_GROUPS as any,
+            usageByModel: usage.byModel,
+            usageSampleSize: usage.sampleSize,
+            liveProbes,
+            tier,
+            avoidFree,
+          });
+          await persistModelRankingSnapshot(ctx, snap);
+          return JSON.stringify(
+            {
+              ...snap,
+              models: snap.models.slice(0, limit),
+            },
+            null,
+            2
+          );
+        },
+      });
+
+      console.log("[NEXUSMIND] 5 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar agentTools:", err);
     }
