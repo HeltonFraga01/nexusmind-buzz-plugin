@@ -199,6 +199,74 @@ const snapForceFree = nmMod.buildModelRankingSnapshot({
 });
 assert.equal(snapForceFree.bestByTier.geral?.model, "qwen/qwen3:free", "forceFree=true deve priorizar modelos :free");
 
+// 6. C2: Persistência de sessão MCP fora do localStorage + hidratação pós-reinício
+const fakeFiles = new Map();
+const fakeLocalStorage = new Map([["nexusmind_mcp_token", "legacy-should-be-removed"]]);
+globalThis.localStorage = {
+  getItem: (k) => (fakeLocalStorage.has(k) ? fakeLocalStorage.get(k) : null),
+  setItem: (k, v) => fakeLocalStorage.set(k, String(v)),
+  removeItem: (k) => fakeLocalStorage.delete(k),
+};
+const sessionCtx = {
+  host: {
+    writeFile: async (p, content) => { fakeFiles.set(p, content); },
+    readFile: async (p) => {
+      if (!fakeFiles.has(p)) throw new Error("ENOENT");
+      return fakeFiles.get(p);
+    },
+  },
+};
+const persisted = await nmMod.writePrivateSessionData(sessionCtx, {
+  status: "authorized",
+  access_token: "mcp_at_survives_restart_123",
+  source: "manual_key",
+});
+assert.equal(persisted, true, "C2: sessão deve ser persistida no arquivo de sessão");
+assert.equal(fakeLocalStorage.has("nexusmind_mcp_token"), false, "C2: token não pode permanecer em localStorage");
+// Simula reinício do Buzz (localStorage limpo)
+fakeLocalStorage.clear();
+const hydratedToken = await nmMod.loadPersistedAccountToken(sessionCtx);
+assert.equal(hydratedToken, "mcp_at_survives_restart_123", "C2: token MCP deve sobreviver ao reinício via arquivo de sessão");
+
+// 7. C3: Merge YAML seguro de secrets.yaml (preserva comentários, aspas e '#' dentro de valores + chmod 0600)
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "nm-secrets-c3-"));
+const secretsFile = path.join(tmpDir, "secrets.yaml");
+fs.writeFileSync(
+  secretsFile,
+  "# Comentario de cabecalho\nCUSTOM_QUOTED: \"abc#123:def\"\nCUSTOM_SINGLE: 'foo # bar'\nOPENAI_API_KEY: sk-old\n",
+  "utf8"
+);
+const pyTest = `
+import os, json
+def write_private(path, content):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.chmod(path, 0o600)
+${nmMod.GOOSE_SECRETS_MERGE_PY}
+res = merge_goose_secrets(${JSON.stringify(secretsFile)}, {
+    "OPENAI_API_KEY": "sk-openai-new",
+    "ANTHROPIC_API_KEY": "sk-anthropic-new",
+    "ANTIGRAVITY_API_KEY": "sk-antigravity-new",
+})
+print(json.dumps(res))
+`;
+const pyOut = execFileSync("/usr/local/bin/python3.13", ["-c", pyTest], { encoding: "utf8" }).trim();
+const merged = JSON.parse(pyOut);
+const mode = fs.statSync(secretsFile).mode & 0o777;
+assert.equal(mode, 0o600, "C3: secrets.yaml deve ter permissão 0600");
+assert.equal(merged.CUSTOM_QUOTED, "abc#123:def", "C3: valor com '#' e ':' entre aspas duplas deve ser preservado");
+assert.equal(merged.CUSTOM_SINGLE, "foo # bar", "C3: valor com '#' entre aspas simples deve ser preservado");
+assert.equal(merged.OPENAI_API_KEY, "sk-openai-new");
+assert.notEqual(merged.ANTHROPIC_API_KEY, merged.ANTIGRAVITY_API_KEY, "C3: ANTHROPIC_API_KEY não pode receber chave Antigravity");
+fs.rmSync(tmpDir, { recursive: true, force: true });
+
 console.log("[NEXUSMIND GATEWAY v2.6 OK]", JSON.stringify({
   tools: Array.from(tools.keys()),
   decisionProvider: registeredProvider.id,
@@ -206,4 +274,6 @@ console.log("[NEXUSMIND GATEWAY v2.6 OK]", JSON.stringify({
   appliedFrontier: applied.selectedModel,
   rankingTopGeral: rankingSnap.bestByTier.geral.model,
   forceFreeTop: snapForceFree.bestByTier.geral.model,
+  c2Hydrated: hydratedToken,
+  c3SecretsMode: mode.toString(8),
 }));

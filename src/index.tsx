@@ -24,6 +24,155 @@ export {
   persistModelRankingSnapshot,
 };
 
+export const SESSION_FILE_PATHS = [
+  "~/.buzz/.nexusmind_auth_session.json",
+  "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
+];
+
+export async function readPrivateSessionFile(ctx: any): Promise<{ path: string; data: any } | null> {
+  if (!ctx?.host?.readFile) return null;
+  for (const p of SESSION_FILE_PATHS) {
+    try {
+      const raw = await ctx.host.readFile(p);
+      const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+      const data = JSON.parse(text);
+      if (data && typeof data === "object") {
+        return { path: p, data };
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export async function writePrivateSessionData(ctx: any, sessionData: any): Promise<boolean> {
+  // C2: nunca persiste access_token/refresh_token em localStorage da WebView.
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem("nexusmind_mcp_token");
+      localStorage.removeItem("nexusmind_auth_session");
+    }
+  } catch {}
+  const serialized = JSON.stringify(sessionData, null, 2);
+  if (ctx?.host?.spawn) {
+    try {
+      const pyScript = `
+import os, json
+path = os.path.expanduser("~/.buzz/.nexusmind_auth_session.json")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+content = ${JSON.stringify(serialized)}
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write(content)
+os.chmod(path, 0o600)
+`;
+      const proc = await ctx.host.spawn("python", { args: [pyScript] });
+      const code = await proc.exited;
+      if (code === 0) return true;
+    } catch {}
+  }
+  for (const p of SESSION_FILE_PATHS) {
+    try {
+      if ((ctx?.host as any)?.writeFile) {
+        await (ctx.host as any).writeFile(p, serialized);
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+export async function loadPersistedAccountToken(ctx: any): Promise<string | null> {
+  const sess = await readPrivateSessionFile(ctx);
+  if (!sess?.data) return null;
+  const tok = sess.data.access_token || sess.data.token || sess.data.token_data?.access_token;
+  return typeof tok === "string" && tok.trim().length > 0 ? tok.trim() : null;
+}
+
+export const GOOSE_SECRETS_MERGE_PY = `
+def _parse_yaml_scalar(raw_val):
+    s = raw_val.strip()
+    if not s:
+        return ""
+    if s[0] == '"':
+        out = []
+        esc = False
+        for ch in s[1:]:
+            if esc:
+                out.append(ch)
+                esc = False
+            elif ch == '\\\\':
+                esc = True
+            elif ch == '"':
+                break
+            else:
+                out.append(ch)
+        return "".join(out)
+    if s[0] == "'":
+        end = s.find("'", 1)
+        return s[1:end] if end != -1 else s[1:]
+    idx = s.find(" #")
+    if idx != -1:
+        s = s[:idx].rstrip()
+    return s
+
+def _format_yaml_value(val):
+    s = str(val)
+    needs_quote = any(c in s for c in ["#", ":", "'", '"', "\\n", "\\r"]) or s.startswith((" ", "-", "?", "!", "*", "&", "{", "[")) or s.endswith(" ")
+    return json.dumps(s, ensure_ascii=False) if needs_quote else s
+
+def merge_goose_secrets(path, updates):
+    try:
+        import yaml
+        data = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = yaml.safe_load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        for k, v in updates.items():
+            if v:
+                data[k] = v
+        dumped = yaml.safe_dump(data, sort_keys=False, default_flow_style=False, allow_unicode=True)
+        write_private(path, dumped)
+        return {str(k): str(v) for k, v in data.items() if v is not None}
+    except Exception:
+        # Fallback preservando comentários, linhas desconhecidas, aspas e '#' em valores
+        raw_lines = []
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                raw_lines = f.readlines()
+        parsed = {}
+        seen = set()
+        out_lines = []
+        for line in raw_lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"): 
+                out_lines.append(line)
+                continue
+            if ":" in line:
+                k_part, v_part = line.split(":", 1)
+                k = k_part.strip()
+                if k and not k.startswith("-") and " " not in k:
+                    if k in updates and updates[k]:
+                        out_lines.append(f"{k}: {_format_yaml_value(updates[k])}\\n")
+                        parsed[k] = str(updates[k])
+                        seen.add(k)
+                    else:
+                        out_lines.append(line)
+                        parsed[k] = _parse_yaml_scalar(v_part)
+                        seen.add(k)
+                    continue
+            out_lines.append(line)
+        for k, v in updates.items():
+            if v and k not in seen:
+                if out_lines and not out_lines[-1].endswith("\\n"):
+                    out_lines[-1] = out_lines[-1] + "\\n"
+                out_lines.append(f"{k}: {_format_yaml_value(v)}\\n")
+                parsed[k] = str(v)
+        write_private(path, "".join(out_lines))
+        return parsed
+`;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OFFICIAL BRAND SVGS & MINIMALIST BUZZ UI ICONS (ZERO EMOJIS)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -668,15 +817,21 @@ export function apply(ctx: Context) {
       }
     };
 
-    // Auto-load on mount
+    // Auto-load on mount + hidrata token de sessão 0600 (fora do localStorage)
     React.useEffect(() => {
-      if (isConnected) {
-        if (models.length === 0) {
-          handlePullModelsFromNexusMind();
-        }
-        if (mcpToken && mcpToken !== "connected") {
-          fetchTelemetry(mcpToken);
-        }
+      if (!isConnected) return;
+      if (models.length === 0) {
+        handlePullModelsFromNexusMind();
+      }
+      if (mcpToken && mcpToken !== "connected") {
+        fetchTelemetry(mcpToken);
+      } else {
+        loadPersistedAccountToken(ctx).then((tok) => {
+          if (tok) {
+            setMcpToken(tok);
+            fetchTelemetry(tok);
+          }
+        }).catch(() => {});
       }
     }, [isConnected]);
 
@@ -713,7 +868,13 @@ subprocess.run([sys.executable, script_path])
                     });
                   } else if (ev.type === "authorized" && ev.token) {
                     setMcpToken(ev.token);
-                    try { localStorage.removeItem("nexusmind_mcp_token"); } catch {}
+                    void writePrivateSessionData(ctx, {
+                      status: "authorized",
+                      access_token: ev.token,
+                      token: ev.token,
+                      source: "oauth_pkce",
+                      updated_at: Math.floor(Date.now() / 1000),
+                    });
                     localStorage.setItem("nexusmind_connected", "true");
                     setIsConnected(true);
                     setAuthInFlight(false);
@@ -786,7 +947,7 @@ subprocess.run([sys.executable, script_path])
       }
     };
 
-    const handleManualKeyConnect = () => {
+    const handleManualKeyConnect = async () => {
       const key = manualKeyInput.trim();
       if (!key) {
         setStatusMessage({
@@ -796,13 +957,19 @@ subprocess.run([sys.executable, script_path])
         return;
       }
       setMcpToken(key);
-      try { localStorage.removeItem("nexusmind_mcp_token"); } catch {}
+      await writePrivateSessionData(ctx, {
+        status: "authorized",
+        access_token: key,
+        token: key,
+        source: "manual_key",
+        updated_at: Math.floor(Date.now() / 1000),
+      });
       localStorage.setItem("nexusmind_connected", "true");
       setIsConnected(true);
       fetchTelemetry(key);
       setStatusMessage({
         type: "success",
-        text: "Chave vinculada com sucesso! Cockpit conectado.",
+        text: "Chave vinculada com sucesso e salva em sessão privada (0600)! Cockpit conectado.",
       });
       if (models.length === 0) {
         handlePullModelsFromNexusMind();
@@ -1233,17 +1400,9 @@ for pid, cfg in CANONICAL.items():
     }
     write_private(os.path.join(goose_dir, f"{pid}.json"), json.dumps(provider_json, indent=2))
 
-# 2. Merge Goose secrets.yaml (preserva chaves existentes + chmod 0600, sem cruzar Antigravity em ANTHROPIC_API_KEY)
+# 2. Merge Goose secrets.yaml via PyYAML (yaml.safe_load/safe_dump) com fallback seguro + chmod 0600
+${GOOSE_SECRETS_MERGE_PY}
 goose_secrets_path = os.path.expanduser("~/.config/goose/secrets.yaml")
-existing_lines = {}
-if os.path.exists(goose_secrets_path):
-    with open(goose_secrets_path, "r", encoding="utf-8") as f:
-        for line in f:
-            s = line.strip()
-            if s and not s.startswith("#") and ":" in s:
-                k, v = s.split(":", 1)
-                existing_lines[k.strip()] = v.strip()
-
 secrets_map = {
     "OPENAI_API_KEY": keys.get("nexusmind_openai", ""),
     "ANTIGRAVITY_API_KEY": keys.get("nexusmind_antigravity", ""),
@@ -1252,12 +1411,7 @@ secrets_map = {
     "XAI_API_KEY": keys.get("nexusmind_grok", ""),
     "GOOGLE_API_KEY": keys.get("nexusmind_antigravity", "")
 }
-for k, v in secrets_map.items():
-    if v:
-        existing_lines[k] = v
-
-secrets_content = "".join(f"{k}: {v}\\n" for k, v in existing_lines.items())
-write_private(goose_secrets_path, secrets_content)
+existing_lines = merge_goose_secrets(goose_secrets_path, secrets_map)
 
 # Update macOS Keychain for Goose via stdin (sem expor segredo em argv / ps aux)
 try:
@@ -2954,42 +3108,8 @@ print("SYNC_SUCCESS")
     return { status: res.status, body: res.body, json: parsed, latencyMs };
   };
 
-  const SESSION_PATHS = [
-    "~/.buzz/.nexusmind_auth_session.json",
-    "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json",
-  ];
-
-  const readSessionFile = async (): Promise<{ path: string; data: any } | null> => {
-    if (!ctx?.host?.readFile) return null;
-    for (const p of SESSION_PATHS) {
-      try {
-        const raw = await ctx.host.readFile(p);
-        const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
-        const data = JSON.parse(text);
-        if (data && typeof data === "object") {
-          return { path: p, data };
-        }
-      } catch {}
-    }
-    return null;
-  };
-
-  const persistSessionData = async (sessionData: any, _token: string) => {
-    // Segurança: não persiste access_token/refresh_token em localStorage da WebView.
-    try {
-      localStorage.removeItem("nexusmind_mcp_token");
-      localStorage.removeItem("nexusmind_auth_session");
-    } catch {}
-    const serialized = JSON.stringify(sessionData, null, 2);
-    for (const p of SESSION_PATHS) {
-      try {
-        if ((ctx?.host as any)?.writeFile) {
-          await (ctx.host as any).writeFile(p, serialized);
-          break;
-        }
-      } catch {}
-    }
-  };
+  const readSessionFile = () => readPrivateSessionFile(ctx);
+  const persistSessionData = (sessionData: any, _token: string) => writePrivateSessionData(ctx, sessionData);
 
   const refreshOAuthSession = async (sessionData: any): Promise<string | null> => {
     const clientId = sessionData?.client_id;
