@@ -250,8 +250,10 @@ function readDecisionsConfig(defaultModel) {
     const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, DECISIONS_CONFIG_STORAGE_KEY);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw);
-    const primary = String((parsed == null ? void 0 : parsed.primaryModel) || "").trim() || defaults.primaryModel;
-    const fallbacks = Array.isArray(parsed == null ? void 0 : parsed.fallbackModels) ? parsed.fallbackModels.map((x) => String(x || "").trim()).filter(Boolean) : defaults.fallbackModels;
+    const rawPrimary = String((parsed == null ? void 0 : parsed.primaryModel) || "").trim();
+    const primary = rawPrimary && !isUnsupportedAgentModel(rawPrimary) ? rawPrimary : defaults.primaryModel;
+    const rawFallbacks = Array.isArray(parsed == null ? void 0 : parsed.fallbackModels) ? parsed.fallbackModels.map((x) => String(x || "").trim()).filter((x) => Boolean(x) && !isUnsupportedAgentModel(x) && x !== "gpt-6.1-terra" && x !== "grok-4.1-fast") : [];
+    const fallbacks = rawFallbacks.length > 0 ? rawFallbacks : defaults.fallbackModels;
     const autoRankFallback = (parsed == null ? void 0 : parsed.autoRankFallback) !== false;
     return { primaryModel: primary, fallbackModels: fallbacks, autoRankFallback };
   } catch {
@@ -286,14 +288,13 @@ function getKnownDecisionModels(groups) {
   var _a, _b, _c, _d;
   const set = /* @__PURE__ */ new Set();
   for (const grp of Object.values(groups)) {
-    if (grp == null ? void 0 : grp.defaultModel) set.add(grp.defaultModel);
+    if ((grp == null ? void 0 : grp.defaultModel) && !isUnsupportedAgentModel(grp.defaultModel)) set.add(grp.defaultModel);
   }
   for (const seed of [
+    "gemini-2.5-flash",
     "gemini-3.8-flash-medium",
-    "gpt-6.1-terra",
-    "claude-sonnet-5-5",
-    "grok-4.1-fast",
-    "gemini-2.5-flash"
+    "claude-sonnet-4-6",
+    "claude-sonnet-5-5"
   ]) {
     set.add(seed);
   }
@@ -302,7 +303,7 @@ function getKnownDecisionModels(groups) {
     if (rawRank) {
       const parsed = JSON.parse(rawRank);
       for (const m of Array.isArray(parsed == null ? void 0 : parsed.models) ? parsed.models : []) {
-        if ((m == null ? void 0 : m.model) && (m == null ? void 0 : m.online) !== false && !(m == null ? void 0 : m.isDisabled) && !isFreeModel(m.model)) {
+        if ((m == null ? void 0 : m.model) && !isUnsupportedAgentModel(m.model) && (m == null ? void 0 : m.online) !== false && !(m == null ? void 0 : m.isDisabled) && !isFreeModel(m.model)) {
           set.add(String(m.model));
         }
       }
@@ -314,7 +315,7 @@ function getKnownDecisionModels(groups) {
     if (rawCached) {
       const parsed = JSON.parse(rawCached);
       for (const m of Array.isArray(parsed) ? parsed : []) {
-        if ((m == null ? void 0 : m.id) && !isFreeModel(m.id)) set.add(String(m.id));
+        if ((m == null ? void 0 : m.id) && !isUnsupportedAgentModel(m.id) && !isFreeModel(m.id)) set.add(String(m.id));
       }
     }
   } catch {

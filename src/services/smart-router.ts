@@ -378,10 +378,15 @@ function readDecisionsConfig(defaultModel: string): DecisionsModelConfig {
     const raw = (globalThis as any)?.localStorage?.getItem?.(DECISIONS_CONFIG_STORAGE_KEY);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw);
-    const primary = String(parsed?.primaryModel || "").trim() || defaults.primaryModel;
-    const fallbacks = Array.isArray(parsed?.fallbackModels)
-      ? parsed.fallbackModels.map((x: any) => String(x || "").trim()).filter(Boolean)
-      : defaults.fallbackModels;
+    const rawPrimary = String(parsed?.primaryModel || "").trim();
+    const primary =
+      rawPrimary && !isUnsupportedAgentModel(rawPrimary) ? rawPrimary : defaults.primaryModel;
+    const rawFallbacks = Array.isArray(parsed?.fallbackModels)
+      ? parsed.fallbackModels
+          .map((x: any) => String(x || "").trim())
+          .filter((x: string) => Boolean(x) && !isUnsupportedAgentModel(x) && x !== "gpt-6.1-terra" && x !== "grok-4.1-fast")
+      : [];
+    const fallbacks = rawFallbacks.length > 0 ? rawFallbacks : defaults.fallbackModels;
     const autoRankFallback = parsed?.autoRankFallback !== false;
     return { primaryModel: primary, fallbackModels: fallbacks, autoRankFallback };
   } catch {
@@ -419,14 +424,13 @@ function resolveGroupForModel(
 function getKnownDecisionModels(groups: Record<string, CanonicalGroupDef>): string[] {
   const set = new Set<string>();
   for (const grp of Object.values(groups)) {
-    if (grp?.defaultModel) set.add(grp.defaultModel);
+    if (grp?.defaultModel && !isUnsupportedAgentModel(grp.defaultModel)) set.add(grp.defaultModel);
   }
   for (const seed of [
-    "gemini-3.8-flash-medium",
-    "gpt-6.1-terra",
-    "claude-sonnet-5-5",
-    "grok-4.1-fast",
     "gemini-2.5-flash",
+    "gemini-3.8-flash-medium",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5-5",
   ]) {
     set.add(seed);
   }
@@ -435,7 +439,7 @@ function getKnownDecisionModels(groups: Record<string, CanonicalGroupDef>): stri
     if (rawRank) {
       const parsed = JSON.parse(rawRank);
       for (const m of Array.isArray(parsed?.models) ? parsed.models : []) {
-        if (m?.model && m?.online !== false && !m?.isDisabled && !isFreeModel(m.model)) {
+        if (m?.model && !isUnsupportedAgentModel(m.model) && m?.online !== false && !m?.isDisabled && !isFreeModel(m.model)) {
           set.add(String(m.model));
         }
       }
@@ -446,7 +450,7 @@ function getKnownDecisionModels(groups: Record<string, CanonicalGroupDef>): stri
     if (rawCached) {
       const parsed = JSON.parse(rawCached);
       for (const m of Array.isArray(parsed) ? parsed : []) {
-        if (m?.id && !isFreeModel(m.id)) set.add(String(m.id));
+        if (m?.id && !isUnsupportedAgentModel(m.id) && !isFreeModel(m.id)) set.add(String(m.id));
       }
     }
   } catch {}
