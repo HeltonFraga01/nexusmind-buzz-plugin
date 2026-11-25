@@ -1450,14 +1450,14 @@ CANONICAL = {
     "nexusmind_responses": {
         "engine": "openai",
         "api_key_env": "OPENAI_API_KEY",
-        "base_url": "https://api.nexusmind.digital/v1",
+        "base_url": "https://api.nexusmind.digital/responses",
         "display_name": "NexusMind Responses",
         "description": "OpenAI Responses API e WebSocket streaming via NexusMind",
         "default_ctx": 131072,
         "default_out": 8192,
         "default_model": "gpt-5",
         "pi_api": "openai-compatible",
-        "pi_baseUrl": "https://api.nexusmind.digital/v1"
+        "pi_baseUrl": "https://api.nexusmind.digital/responses"
     }
 }
 
