@@ -2048,7 +2048,8 @@ function apply(ctx) {
   function NexusMindComponent({ isSettingsCard = false }) {
     const [mcpToken, setMcpToken] = React.useState(() => {
       try {
-        return localStorage.getItem("nexusmind_mcp_token") || "connected";
+        localStorage.removeItem("nexusmind_mcp_token");
+        return localStorage.getItem("nexusmind_connected") === "false" ? "" : "connected";
       } catch {
         return "connected";
       }
@@ -2268,7 +2269,10 @@ subprocess.run([sys.executable, script_path])
                     });
                   } else if (ev.type === "authorized" && ev.token) {
                     setMcpToken(ev.token);
-                    localStorage.setItem("nexusmind_mcp_token", ev.token);
+                    try {
+                      localStorage.removeItem("nexusmind_mcp_token");
+                    } catch {
+                    }
                     localStorage.setItem("nexusmind_connected", "true");
                     setIsConnected(true);
                     setAuthInFlight(false);
@@ -2295,7 +2299,10 @@ subprocess.run([sys.executable, script_path])
                   const resolvedToken = sess.access_token || sess.token || ((_a2 = sess.token_data) == null ? void 0 : _a2.access_token);
                   if (resolvedToken) {
                     setMcpToken(resolvedToken);
-                    localStorage.setItem("nexusmind_mcp_token", resolvedToken);
+                    try {
+                      localStorage.removeItem("nexusmind_mcp_token");
+                    } catch {
+                    }
                     localStorage.setItem("nexusmind_connected", "true");
                     setIsConnected(true);
                     fetchTelemetry(resolvedToken);
@@ -2350,7 +2357,10 @@ subprocess.run([sys.executable, script_path])
         return;
       }
       setMcpToken(key);
-      localStorage.setItem("nexusmind_mcp_token", key);
+      try {
+        localStorage.removeItem("nexusmind_mcp_token");
+      } catch {
+      }
       localStorage.setItem("nexusmind_connected", "true");
       setIsConnected(true);
       fetchTelemetry(key);
@@ -2692,69 +2702,79 @@ CANONICAL = {
     "nexusmind_responses": {
         "engine": "openai",
         "api_key_env": "OPENAI_API_KEY",
-        "base_url": "https://api.nexusmind.digital/responses",
+        "base_url": "https://api.nexusmind.digital/v1",
         "display_name": "NexusMind Responses",
         "description": "OpenAI Responses API e WebSocket streaming via NexusMind",
         "default_ctx": 131072,
         "default_out": 8192,
         "default_model": "gpt-5",
         "pi_api": "openai-compatible",
-        "pi_baseUrl": "https://api.nexusmind.digital/responses"
+        "pi_baseUrl": "https://api.nexusmind.digital/v1"
     }
 }
 
-# 1. Update Goose custom_providers
+def write_private(path, content):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.chmod(path, 0o600)
+
+# 1. Update Goose custom_providers (allowlist <= 40 models, sem api_key em texto puro)
 goose_dir = os.path.expanduser("~/.config/goose/custom_providers")
 os.makedirs(goose_dir, exist_ok=True)
 
 for pid, cfg in CANONICAL.items():
-    m_list = group_models.get(pid, [cfg["default_model"]])
-    models_spec = []
-    for mid in m_list:
-        models_spec.append({
-            "name": mid,
-            "context_limit": cfg["default_ctx"],
-            "max_tokens": cfg["default_out"]
-        })
+    m_list = [m for m in group_models.get(pid, [cfg["default_model"]]) if m][:40]
+    if not m_list:
+        m_list = [cfg["default_model"]]
+    models_spec = [{
+        "name": mid,
+        "context_limit": cfg["default_ctx"],
+        "max_tokens": cfg["default_out"]
+    } for mid in m_list]
     provider_json = {
         "name": pid,
         "engine": cfg["engine"],
         "display_name": cfg["display_name"],
         "description": cfg["description"],
-        "api_key": keys.get(pid, ""),
         "base_url": cfg["base_url"],
         "api_key_env": cfg["api_key_env"],
         "models": models_spec
     }
-    with open(os.path.join(goose_dir, f"{pid}.json"), "w", encoding="utf-8") as f:
-        json.dump(provider_json, f, indent=2)
+    write_private(os.path.join(goose_dir, f"{pid}.json"), json.dumps(provider_json, indent=2))
 
-# 2. Update Goose config.yaml & secrets.yaml
-goose_conf_path = os.path.expanduser("~/.config/goose/config.yaml")
+# 2. Merge Goose secrets.yaml (preserva chaves existentes + chmod 0600, sem cruzar Antigravity em ANTHROPIC_API_KEY)
 goose_secrets_path = os.path.expanduser("~/.config/goose/secrets.yaml")
+existing_lines = {}
+if os.path.exists(goose_secrets_path):
+    with open(goose_secrets_path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s and not s.startswith("#") and ":" in s:
+                k, v = s.split(":", 1)
+                existing_lines[k.strip()] = v.strip()
 
 secrets_map = {
     "OPENAI_API_KEY": keys.get("nexusmind_openai", ""),
     "ANTIGRAVITY_API_KEY": keys.get("nexusmind_antigravity", ""),
-    "ANTHROPIC_API_KEY": keys.get("nexusmind_anthropic", "") or keys.get("nexusmind_antigravity", ""),
+    "ANTHROPIC_API_KEY": keys.get("nexusmind_anthropic", ""),
     "GROK_API_KEY": keys.get("nexusmind_grok", ""),
     "XAI_API_KEY": keys.get("nexusmind_grok", ""),
     "GOOGLE_API_KEY": keys.get("nexusmind_antigravity", "")
 }
+for k, v in secrets_map.items():
+    if v:
+        existing_lines[k] = v
 
-with open(goose_secrets_path, "w", encoding="utf-8") as f:
-    for k, v in secrets_map.items():
-        f.write(f"{k}: {v}\\n")
+secrets_content = "".join(f"{k}: {v}\\n" for k, v in existing_lines.items())
+write_private(goose_secrets_path, secrets_content)
 
-# Update macOS Keychain for Goose if security tool exists
+# Update macOS Keychain for Goose via stdin (sem expor segredo em argv / ps aux)
 try:
-    keyring_json = json.dumps(secrets_map)
-    subprocess.run([
-        "security", "add-generic-password", "-U",
-        "-s", "goose",
-        "-a", "secrets",
-        "-w", keyring_json
-    ], capture_output=True, timeout=5)
+    keyring_json = json.dumps({k: v for k, v in existing_lines.items() if v})
+    cmd_line = f"add-generic-password -U -s goose -a secrets -w {json.dumps(keyring_json)}\\n"
+    subprocess.run(["security", "-i"], input=cmd_line, text=True, capture_output=True, timeout=5)
 except Exception:
     pass
 
@@ -4407,7 +4427,7 @@ print("SYNC_SUCCESS")
     return null;
   };
   const resolveLiveAccountToken = async (forceRefresh = false) => {
-    var _a2, _b2, _c2, _d;
+    var _a2, _b2, _c2;
     let sessionObj = null;
     const sessResult = await readSessionFile();
     if (sessResult) {
@@ -4428,8 +4448,7 @@ print("SYNC_SUCCESS")
       }
     }
     try {
-      const stored = (_d = localStorage.getItem("nexusmind_mcp_token")) == null ? void 0 : _d.trim();
-      if (stored && stored !== "connected") return stored;
+      localStorage.removeItem("nexusmind_mcp_token");
     } catch {
     }
     return null;
