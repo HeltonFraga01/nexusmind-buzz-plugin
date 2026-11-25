@@ -370,8 +370,8 @@ const DECISIONS_CONFIG_DISK_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-
 
 function readDecisionsConfig(defaultModel: string): DecisionsModelConfig {
   const defaults: DecisionsModelConfig = {
-    primaryModel: "gemini-2.5-flash",
-    fallbackModels: ["gemini-3.8-flash-medium", "claude-sonnet-4-6", "claude-sonnet-5-5"],
+    primaryModel: "claude-sonnet-4-6",
+    fallbackModels: ["claude-sonnet-5-5", "gemini-2.5-flash", "gemini-3.8-flash-medium"],
     autoRankFallback: true,
   };
   try {
@@ -819,7 +819,7 @@ export function createNexusMindDecisionProvider(
           method: "POST",
           headers,
           body: JSON.stringify(reqBody),
-          timeoutMs: Math.min(7000, Math.max(2000, Number(request.timeoutMs || 7000))),
+          timeoutMs: Math.min(5500, Math.max(2000, Number(request.timeoutMs || 5500))),
         });
 
         if (!res || res.status < 200 || res.status >= 300 || !res.body) {
@@ -829,8 +829,11 @@ export function createNexusMindDecisionProvider(
         const rawText = isAnthropic
           ? String(outer?.content?.find?.((b: any) => b?.type === "text")?.text || outer?.content?.[0]?.text || "").trim()
           : String(outer?.choices?.[0]?.message?.content || "").trim();
-        const cleaned = rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-        const parsed = JSON.parse(cleaned);
+        const cleaned = rawText.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+        const firstBrace = cleaned.indexOf("{");
+        const lastBrace = cleaned.lastIndexOf("}");
+        const jsonSlice = firstBrace >= 0 && lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
+        const parsed = JSON.parse(jsonSlice);
         if (!parsed || typeof parsed !== "object") return null;
 
         // Normaliza respostas conforme o contrato estrito do DecisionsService

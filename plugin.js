@@ -242,8 +242,8 @@ const DECISIONS_CONFIG_DISK_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-
 function readDecisionsConfig(defaultModel) {
   var _a, _b;
   const defaults = {
-    primaryModel: "gemini-2.5-flash",
-    fallbackModels: ["gemini-3.8-flash-medium", "claude-sonnet-4-6", "claude-sonnet-5-5"],
+    primaryModel: "claude-sonnet-4-6",
+    fallbackModels: ["claude-sonnet-5-5", "gemini-2.5-flash", "gemini-3.8-flash-medium"],
     autoRankFallback: true
   };
   try {
@@ -648,15 +648,18 @@ function createNexusMindDecisionProvider(ctx, groups) {
           method: "POST",
           headers,
           body: JSON.stringify(reqBody),
-          timeoutMs: Math.min(7e3, Math.max(2e3, Number(request.timeoutMs || 7e3)))
+          timeoutMs: Math.min(5500, Math.max(2e3, Number(request.timeoutMs || 5500)))
         });
         if (!res || res.status < 200 || res.status >= 300 || !res.body) {
           return null;
         }
         const outer = JSON.parse(res.body);
         const rawText = isAnthropic ? String(((_d = (_c = (_b = outer == null ? void 0 : outer.content) == null ? void 0 : _b.find) == null ? void 0 : _c.call(_b, (b) => (b == null ? void 0 : b.type) === "text")) == null ? void 0 : _d.text) || ((_f = (_e = outer == null ? void 0 : outer.content) == null ? void 0 : _e[0]) == null ? void 0 : _f.text) || "").trim() : String(((_i = (_h = (_g = outer == null ? void 0 : outer.choices) == null ? void 0 : _g[0]) == null ? void 0 : _h.message) == null ? void 0 : _i.content) || "").trim();
-        const cleaned = rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-        const parsed = JSON.parse(cleaned);
+        const cleaned = rawText.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+        const firstBrace = cleaned.indexOf("{");
+        const lastBrace = cleaned.lastIndexOf("}");
+        const jsonSlice = firstBrace >= 0 && lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
+        const parsed = JSON.parse(jsonSlice);
         if (!parsed || typeof parsed !== "object") return null;
         const answers = {};
         for (const [k, q] of Object.entries(request.questions || {})) {
