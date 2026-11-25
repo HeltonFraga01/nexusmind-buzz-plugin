@@ -60,6 +60,24 @@ export function isFreeModel(modelId: string): boolean {
   return m.includes(":free") || m.includes("-free") || m.includes("/free") || m.endsWith("free");
 }
 
+export function isUnsupportedAgentModel(modelId: string): boolean {
+  const m = String(modelId || "").trim().toLowerCase();
+  if (!m) return true;
+  return (
+    m.startsWith("auto/") ||
+    m.includes("tab_jump") ||
+    m.includes("autocomplete") ||
+    m.includes("fim-") ||
+    m.includes("embedding") ||
+    m.includes("rerank") ||
+    m.includes("whisper") ||
+    m.includes("tts") ||
+    m.includes("imagen") ||
+    m.includes("dall-e") ||
+    m.includes("moderation")
+  );
+}
+
 export function scoreModelForTier(modelId: string, tier: NexusTier): { capability: number; tierMatch: number } {
   const m = String(modelId || "").toLowerCase();
   let capability = 55;
@@ -134,15 +152,24 @@ async function pingModel(
 
   const t0 = Date.now();
   try {
+    const probeBody: Record<string, any> = isAnthropic
+      ? {
+          model: modelId,
+          messages: [{ role: "user", content: "ok" }],
+          max_tokens: 16,
+          tools: [{ name: "ping", description: "healthcheck", input_schema: { type: "object", properties: {} } }],
+        }
+      : {
+          model: modelId,
+          messages: [{ role: "user", content: "ok" }],
+          max_tokens: 5,
+          tools: [{ type: "function", function: { name: "ping", description: "healthcheck", parameters: { type: "object", properties: {} } } }],
+        };
     const res = await host.request({
       url,
       method: "POST",
       headers,
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: "user", content: "ok" }],
-        max_tokens: isAnthropic ? 16 : 5,
-      }),
+      body: JSON.stringify(probeBody),
       timeoutMs: 9000,
     });
     const latencyMs = Date.now() - t0;
@@ -199,7 +226,7 @@ export async function selectBestModelByTier(
             const parsed = JSON.parse(res.body);
             for (const m of Array.isArray(parsed?.data) ? parsed.data : []) {
               const mid = String(m?.id || "").trim();
-              if (!mid || disabled.has(mid) || excluded.has(mid.toLowerCase()) || catalog.has(mid)) continue;
+              if (!mid || isUnsupportedAgentModel(mid) || disabled.has(mid) || excluded.has(mid.toLowerCase()) || catalog.has(mid)) continue;
               catalog.set(mid, { id: mid, group: grp });
             }
           }

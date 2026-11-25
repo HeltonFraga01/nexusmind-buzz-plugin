@@ -2,6 +2,11 @@ function isFreeModel(modelId) {
   const m = String(modelId || "").toLowerCase();
   return m.includes(":free") || m.includes("-free") || m.includes("/free") || m.endsWith("free");
 }
+function isUnsupportedAgentModel(modelId) {
+  const m = String(modelId || "").trim().toLowerCase();
+  if (!m) return true;
+  return m.startsWith("auto/") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("dall-e") || m.includes("moderation");
+}
 function scoreModelForTier(modelId, tier) {
   const m = String(modelId || "").toLowerCase();
   let capability = 55;
@@ -63,15 +68,22 @@ async function pingModel(ctx, modelId, group) {
   };
   const t0 = Date.now();
   try {
+    const probeBody = isAnthropic ? {
+      model: modelId,
+      messages: [{ role: "user", content: "ok" }],
+      max_tokens: 16,
+      tools: [{ name: "ping", description: "healthcheck", input_schema: { type: "object", properties: {} } }]
+    } : {
+      model: modelId,
+      messages: [{ role: "user", content: "ok" }],
+      max_tokens: 5,
+      tools: [{ type: "function", function: { name: "ping", description: "healthcheck", parameters: { type: "object", properties: {} } } }]
+    };
     const res = await host.request({
       url,
       method: "POST",
       headers,
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: "user", content: "ok" }],
-        max_tokens: isAnthropic ? 16 : 5
-      }),
+      body: JSON.stringify(probeBody),
       timeoutMs: 9e3
     });
     const latencyMs = Date.now() - t0;
@@ -120,7 +132,7 @@ async function selectBestModelByTier(ctx, groups, input = {}) {
             const parsed = JSON.parse(res.body);
             for (const m of Array.isArray(parsed == null ? void 0 : parsed.data) ? parsed.data : []) {
               const mid = String((m == null ? void 0 : m.id) || "").trim();
-              if (!mid || disabled.has(mid) || excluded.has(mid.toLowerCase()) || catalog.has(mid)) continue;
+              if (!mid || isUnsupportedAgentModel(mid) || disabled.has(mid) || excluded.has(mid.toLowerCase()) || catalog.has(mid)) continue;
               catalog.set(mid, { id: mid, group: grp });
             }
           }
@@ -924,7 +936,8 @@ function buildModelRankingSnapshot(params) {
       const usage = params.usageByModel[item.id];
       const probe = liveProbes[item.id];
       const isDisabled = disabledSet.has(item.id);
-      const isBlocked = blockedSet.has(item.id.toLowerCase());
+      const unsupported = isUnsupportedAgentModel(item.id);
+      const isBlocked = unsupported || blockedSet.has(item.id.toLowerCase());
       const free = isFreeModel(item.id);
       const avgCost = (usage == null ? void 0 : usage.avgCostUsd) ?? 0;
       const exceedsCostCap = policy.maxCostPerReqUsd !== null && avgCost > 0 && avgCost > policy.maxCostPerReqUsd;

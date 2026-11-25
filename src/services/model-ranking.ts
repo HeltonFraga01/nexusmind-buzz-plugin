@@ -15,6 +15,7 @@ import {
   type CanonicalGroupDef,
   type NexusTier,
   isFreeModel,
+  isUnsupportedAgentModel,
   scoreModelForTier,
 } from "./smart-router";
 
@@ -393,7 +394,8 @@ export function buildModelRankingSnapshot(params: {
       const usage = params.usageByModel[item.id];
       const probe = liveProbes[item.id];
       const isDisabled = disabledSet.has(item.id);
-      const isBlocked = blockedSet.has(item.id.toLowerCase());
+      const unsupported = isUnsupportedAgentModel(item.id);
+      const isBlocked = unsupported || blockedSet.has(item.id.toLowerCase());
       const free = isFreeModel(item.id);
       const avgCost = usage?.avgCostUsd ?? 0;
       const exceedsCostCap =
