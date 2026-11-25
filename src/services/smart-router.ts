@@ -844,22 +844,55 @@ export function createNexusMindDecisionProvider(
           } else if (q.type === "choice") {
             const keys = Object.keys(q.options || {});
             const ch = keys.includes(String(raw.choice)) ? String(raw.choice) : keys[0];
-            const conf = Math.max(0, Math.min(1, Number(raw.confidence ?? 0.8)));
+            const rawConf = Number(raw.confidence ?? 0.8);
+            const conf = Number.isFinite(rawConf) ? Math.max(0, Math.min(1, rawConf)) : 0.8;
+            const normProbs: Record<string, number> = {};
+            if (raw.probabilities && typeof raw.probabilities === "object") {
+              for (const [pk, pv] of Object.entries(raw.probabilities)) {
+                if (keys.includes(pk)) {
+                  const num = Number(pv);
+                  if (Number.isFinite(num)) normProbs[pk] = Math.max(0, Math.min(1, num));
+                }
+              }
+            }
+            if (Object.keys(normProbs).length === 0 && ch) {
+              normProbs[ch] = conf;
+            }
             answers[k] = {
               type: "choice",
               choice: ch,
-              confidence: Number.isFinite(conf) ? conf : 0.8,
-              probabilities: raw.probabilities && typeof raw.probabilities === "object" ? raw.probabilities : { [ch]: conf },
+              confidence: conf,
+              probabilities: normProbs,
             };
           } else if (q.type === "score") {
-            const maxIdx = Math.max(1, (q.levels?.length || 2) - 1);
-            const sc = Math.max(0, Math.min(maxIdx, Number(raw.score ?? 0)));
-            const conf = Math.max(0, Math.min(1, Number(raw.confidence ?? 0.8)));
+            const levels: string[] = Array.isArray(q.levels) ? q.levels.map(String) : [];
+            const maxIdx = Math.max(1, levels.length - 1);
+            const rawSc = Number(raw.score ?? 0);
+            const sc = Number.isFinite(rawSc) ? Math.max(0, Math.min(maxIdx, rawSc)) : 0;
+            const rawConf = Number(raw.confidence ?? 0.8);
+            const conf = Number.isFinite(rawConf) ? Math.max(0, Math.min(1, rawConf)) : 0.8;
+            const normProbs: Record<string, number> = {};
+            if (raw.probabilities && typeof raw.probabilities === "object") {
+              for (const [pk, pv] of Object.entries(raw.probabilities)) {
+                const num = Number(pv);
+                if (!Number.isFinite(num)) continue;
+                const clamped = Math.max(0, Math.min(1, num));
+                if (/^\d+$/.test(pk) && Number(pk) >= 0 && Number(pk) <= maxIdx) {
+                  normProbs[pk] = clamped;
+                } else {
+                  const idx = levels.findIndex((lv) => lv.toLowerCase() === pk.toLowerCase());
+                  if (idx >= 0) normProbs[String(idx)] = clamped;
+                }
+              }
+            }
+            if (Object.keys(normProbs).length === 0) {
+              normProbs[String(Math.round(sc))] = conf;
+            }
             answers[k] = {
               type: "score",
-              score: Number.isFinite(sc) ? sc : 0,
-              confidence: Number.isFinite(conf) ? conf : 0.8,
-              probabilities: raw.probabilities && typeof raw.probabilities === "object" ? raw.probabilities : {},
+              score: sc,
+              confidence: conf,
+              probabilities: normProbs,
             };
           }
         }
