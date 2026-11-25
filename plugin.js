@@ -242,8 +242,8 @@ const DECISIONS_CONFIG_DISK_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-
 function readDecisionsConfig(defaultModel) {
   var _a, _b;
   const defaults = {
-    primaryModel: defaultModel,
-    fallbackModels: ["gpt-6.1-terra", "claude-sonnet-5-5", "grok-4.1-fast"],
+    primaryModel: "gemini-2.5-flash",
+    fallbackModels: ["gemini-3.8-flash-medium", "claude-sonnet-4-6", "claude-sonnet-5-5"],
     autoRankFallback: true
   };
   try {
@@ -348,9 +348,9 @@ function createNexusMindDecisionProvider(ctx, groups) {
   const React = ctx == null ? void 0 : ctx.react;
   const SettingsComponent = (React == null ? void 0 : React.createElement) ? function NexusMindDecisionsSettings() {
     const h = React.createElement;
-    const [cfg, setCfg] = React.useState(() => readDecisionsConfig(defaultModel));
+    const [cfg, setCfg] = React.useState(() => readDecisionsConfig());
     const [fallbackInput, setFallbackInput] = React.useState(
-      () => readDecisionsConfig(defaultModel).fallbackModels.join(", ")
+      () => readDecisionsConfig().fallbackModels.join(", ")
     );
     const [savedMsg, setSavedMsg] = React.useState("");
     const [pingState, setPingState] = React.useState({
@@ -630,7 +630,6 @@ function createNexusMindDecisionProvider(ctx, groups) {
         const reqBody = isAnthropic ? {
           model: mdl,
           max_tokens: 600,
-          temperature: 0,
           system: "Retorne estritamente JSON válido seguindo o schema solicitado.",
           messages: [{ role: "user", content: prompt }]
         } : {
@@ -648,7 +647,7 @@ function createNexusMindDecisionProvider(ctx, groups) {
           method: "POST",
           headers,
           body: JSON.stringify(reqBody),
-          timeoutMs: Math.min(25e3, Math.max(2e3, Number(request.timeoutMs || 1e4)))
+          timeoutMs: Math.min(7e3, Math.max(2e3, Number(request.timeoutMs || 7e3)))
         });
         if (!res || res.status < 200 || res.status >= 300 || !res.body) {
           return null;
@@ -689,7 +688,7 @@ function createNexusMindDecisionProvider(ctx, groups) {
         }
         return { outcome: "answered", model: mdl, answers };
       };
-      const cfg = readDecisionsConfig(defaultModel);
+      const cfg = readDecisionsConfig();
       const chain = [
         cfg.primaryModel,
         ...cfg.fallbackModels,

@@ -370,8 +370,8 @@ const DECISIONS_CONFIG_DISK_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-
 
 function readDecisionsConfig(defaultModel: string): DecisionsModelConfig {
   const defaults: DecisionsModelConfig = {
-    primaryModel: defaultModel,
-    fallbackModels: ["gpt-6.1-terra", "claude-sonnet-5-5", "grok-4.1-fast"],
+    primaryModel: "gemini-2.5-flash",
+    fallbackModels: ["gemini-3.8-flash-medium", "claude-sonnet-4-6", "claude-sonnet-5-5"],
     autoRankFallback: true,
   };
   try {
@@ -796,7 +796,6 @@ export function createNexusMindDecisionProvider(
           ? {
               model: mdl,
               max_tokens: 600,
-              temperature: 0,
               system: "Retorne estritamente JSON válido seguindo o schema solicitado.",
               messages: [{ role: "user", content: prompt }],
             }
@@ -816,7 +815,7 @@ export function createNexusMindDecisionProvider(
           method: "POST",
           headers,
           body: JSON.stringify(reqBody),
-          timeoutMs: Math.min(25000, Math.max(2000, Number(request.timeoutMs || 10000))),
+          timeoutMs: Math.min(7000, Math.max(2000, Number(request.timeoutMs || 7000))),
         });
 
         if (!res || res.status < 200 || res.status >= 300 || !res.body) {
