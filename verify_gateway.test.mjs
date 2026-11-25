@@ -267,6 +267,29 @@ assert.equal(merged.OPENAI_API_KEY, "sk-openai-new");
 assert.notEqual(merged.ANTHROPIC_API_KEY, merged.ANTIGRAVITY_API_KEY, "C3: ANTHROPIC_API_KEY não pode receber chave Antigravity");
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
+// 8. C1 (Top 40 ranqueado no Goose): prioriza uso real + qualidade + online em vez de ordem alfabética
+const alphaFill = Array.from({ length: 50 }, (_, i) => `aaa-model-${String(i + 1).padStart(2, "0")}`);
+const rankedTop = nmMod.selectTopGooseModelsByGroup({
+  groupModelsMap: {
+    nexusmind_openai: [...alphaFill, "z-gpt-5-turbo", "z-claude-sonnet-4-6", "mistralai/mistral-large-4-1t-a52b", "aaa-broken-free:free"],
+  },
+  catalogModels: [...alphaFill, "z-gpt-5-turbo", "z-claude-sonnet-4-6", "mistralai/mistral-large-4-1t-a52b", "aaa-broken-free:free"].map((id) => ({ id, primaryGroup: "nexusmind_openai" })),
+  usageByModel: {
+    "z-gpt-5-turbo": { calls: 950, avgDurationMs: 2100, avgFirstTokenMs: 400, totalCostUsd: 12, avgCostUsd: 0.012, cacheHitPct: 85, lastSeenAt: "2026-11-25T16:00:00Z" },
+  },
+  usageSampleSize: 950,
+  liveProbes: {
+    "z-claude-sonnet-4-6": { status: "ok", latency: 1200 },
+    "aaa-broken-free:free": { status: "error", errorMsg: "HTTP 429" },
+  },
+  limit: 40,
+});
+assert.equal(rankedTop.nexusmind_openai.length, 40, "C1: Goose deve manter teto estrito de 40 modelos por provedor");
+assert.ok(rankedTop.nexusmind_openai.slice(0, 3).includes("z-claude-sonnet-4-6"), "C1: modelo verificado online deve entrar no top 3 mesmo começando com z");
+assert.ok(rankedTop.nexusmind_openai.slice(0, 3).includes("z-gpt-5-turbo"), "C1: modelo mais usado deve entrar no top 3 mesmo começando com z");
+assert.ok(rankedTop.nexusmind_openai.slice(0, 3).includes("mistralai/mistral-large-4-1t-a52b"), "C1: defaultModel do grupo deve entrar no top 3");
+assert.equal(rankedTop.nexusmind_openai.includes("aaa-broken-free:free"), false, "C1: modelo :free com erro deve ficar fora dos 40");
+
 console.log("[NEXUSMIND GATEWAY v2.6 OK]", JSON.stringify({
   tools: Array.from(tools.keys()),
   decisionProvider: registeredProvider.id,
@@ -276,4 +299,5 @@ console.log("[NEXUSMIND GATEWAY v2.6 OK]", JSON.stringify({
   forceFreeTop: snapForceFree.bestByTier.geral.model,
   c2Hydrated: hydratedToken,
   c3SecretsMode: mode.toString(8),
+  c1Top3Openai: rankedTop.nexusmind_openai.slice(0, 3),
 }));
