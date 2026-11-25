@@ -1698,6 +1698,66 @@ function createModelRankingTabComponent(ctx, groups) {
     );
   };
 }
+const GOOSE_MAX_MODELS_PER_GROUP = 40;
+function selectTopGooseModelsByGroup(params) {
+  var _a;
+  const limit = Math.max(1, params.limit ?? GOOSE_MAX_MODELS_PER_GROUP);
+  const usageByModel = params.usageByModel || {};
+  const liveProbes = params.liveProbes || {};
+  const policy = loadSavedRoutingPolicy();
+  const normalizedProbes = {};
+  for (const [mid, p] of Object.entries(liveProbes)) {
+    if ((p == null ? void 0 : p.status) === "ok" || (p == null ? void 0 : p.status) === "error") {
+      normalizedProbes[mid] = { status: p.status, latency: p.latency, errorMsg: p.errorMsg };
+    }
+  }
+  const snap = buildModelRankingSnapshot({
+    catalogModels: params.catalogModels || [],
+    groups: CANONICAL_GROUPS,
+    usageByModel,
+    usageSampleSize: params.usageSampleSize || 0,
+    liveProbes: normalizedProbes,
+    tier: "geral",
+    avoidFree: !policy.forceFree,
+    policy
+  });
+  const rankScoreByModel = /* @__PURE__ */ new Map();
+  const callsByModel = /* @__PURE__ */ new Map();
+  for (const row of snap.models || []) {
+    if (row == null ? void 0 : row.model) {
+      rankScoreByModel.set(row.model, typeof row.score === "number" ? row.score : 0);
+      callsByModel.set(row.model, typeof row.calls === "number" ? row.calls : 0);
+    }
+  }
+  const out = {};
+  for (const [pid, rawList] of Object.entries(params.groupModelsMap)) {
+    const unique = Array.from(new Set((rawList || []).filter(Boolean)));
+    const defModel = (_a = CANONICAL_GROUPS[pid]) == null ? void 0 : _a.defaultModel;
+    const scored = unique.map((mid) => {
+      var _a2;
+      const low = mid.toLowerCase();
+      const probe = normalizedProbes[mid];
+      const calls = callsByModel.get(mid) ?? Number(((_a2 = usageByModel[mid]) == null ? void 0 : _a2.calls) || 0);
+      const fallbackScore = scoreModelForTier(mid, "tier2_balanced");
+      const baseRank = rankScoreByModel.get(mid) ?? fallbackScore.capability + fallbackScore.tierMatch;
+      const isFree = low.includes(":free") || low.includes("-free") || low.endsWith("free");
+      let priority = baseRank;
+      if (defModel && mid === defModel) priority += 80;
+      if ((probe == null ? void 0 : probe.status) === "ok") priority += 200;
+      else if ((probe == null ? void 0 : probe.status) === "error") priority -= 150;
+      if (calls > 0) priority += Math.min(60, Math.log10(calls + 1) * 20);
+      if (isFree && !policy.forceFree) priority -= 40;
+      return { mid, priority, calls };
+    });
+    scored.sort((a, b) => {
+      if (b.priority !== a.priority) return b.priority - a.priority;
+      if (b.calls !== a.calls) return b.calls - a.calls;
+      return a.mid.localeCompare(b.mid);
+    });
+    out[pid] = scored.slice(0, limit).map((s) => s.mid);
+  }
+  return out;
+}
 const SESSION_FILE_PATHS = [
   "~/.buzz/.nexusmind_auth_session.json",
   "/Users/heltonfraga/.buzz/.nexusmind_auth_session.json"
@@ -2802,9 +2862,23 @@ subprocess.run([sys.executable, script_path])
             groupModelsMap[pid] = [def.defaultModel];
           }
         }
+        let usageData = { byModel: {}, sampleSize: 0 };
+        try {
+          usageData = await loadGatewayUsageByModel(ctx);
+        } catch {
+        }
+        const gooseModelsMap = selectTopGooseModelsByGroup({
+          groupModelsMap,
+          catalogModels: models,
+          usageByModel: usageData.byModel,
+          usageSampleSize: usageData.sampleSize,
+          liveProbes: modelTests,
+          limit: GOOSE_MAX_MODELS_PER_GROUP
+        });
         const syncPayload = {
           effectiveKeys,
-          groupModels: groupModelsMap
+          groupModels: groupModelsMap,
+          gooseModels: gooseModelsMap
         };
         const pythonSyncScript = `
 import os, sys, json, subprocess
@@ -2812,6 +2886,7 @@ import os, sys, json, subprocess
 payload = json.loads('''${JSON.stringify(syncPayload)}''')
 keys = payload["effectiveKeys"]
 group_models = payload["groupModels"]
+goose_models = payload.get("gooseModels") or group_models
 
 CANONICAL = {
     "nexusmind_openai": {
@@ -2888,7 +2963,7 @@ goose_dir = os.path.expanduser("~/.config/goose/custom_providers")
 os.makedirs(goose_dir, exist_ok=True)
 
 for pid, cfg in CANONICAL.items():
-    m_list = [m for m in group_models.get(pid, [cfg["default_model"]]) if m][:40]
+    m_list = [m for m in goose_models.get(pid, [cfg["default_model"]]) if m][:40]
     if not m_list:
         m_list = [cfg["default_model"]]
     models_spec = [{
@@ -3007,9 +3082,10 @@ print("SYNC_SUCCESS")
         setLastSyncTime(now);
         localStorage.setItem("nexusmind_last_sync_time", now);
         const totalActive = models.length - disabledModels.length;
+        const gooseTotal = Object.values(gooseModelsMap).reduce((acc, arr) => acc + arr.length, 0);
         setStatusMessage({
           type: "success",
-          text: `Sincronização concluída com sucesso! ${totalActive} modelos ativos registrados no Goose e Pi. (${disabledModels.length} desativados foram expurgados).`
+          text: `Sincronização concluída! Goose: ${gooseTotal} modelos (top ${GOOSE_MAX_MODELS_PER_GROUP} por provedor por uso/qualidade). Pi: ${totalActive} ativos (${disabledModels.length} desativados expurgados).`
         });
       } catch (err) {
         setStatusMessage({
@@ -5041,6 +5117,7 @@ export {
   ANTHROPIC_ONLY_CLAUDE,
   ANTIGRAVITY_ONLY_CLAUDE,
   CANONICAL_GROUPS,
+  GOOSE_MAX_MODELS_PER_GROUP,
   GOOSE_SECRETS_MERGE_PY,
   OFFICIAL_ENDPOINTS,
   SESSION_FILE_PATHS,
@@ -5056,5 +5133,6 @@ export {
   readPrivateSessionFile,
   scoreModelForTier,
   selectBestModelByTier,
+  selectTopGooseModelsByGroup,
   writePrivateSessionData
 };
