@@ -223,19 +223,12 @@ export function createModelRankingTabComponent(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "14px" } },
 
-      // 1. Barra compacta de Tier + Critérios de Roteamento (flat, estilo Buzz)
+      // 1. Barra compacta de Tier + Critérios de Roteamento (CodeDen + Buzz Theme)
       h(
         "div",
         {
-          style: {
-            display: "flex",
-            flexDirection: "column",
-            gap: "10px",
-            padding: "12px 14px",
-            borderRadius: "10px",
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
-          },
+          className: "nm-card-pad",
+          style: { display: "flex", flexDirection: "column", gap: "10px", padding: "12px 14px" },
         },
         // Linha 1: Tiers + Ação de Healthcheck
         h(
@@ -243,24 +236,17 @@ export function createModelRankingTabComponent(
           { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" } },
+            { className: "nm-segmented", style: { flexWrap: "wrap" } },
             TIER_OPTIONS.map((t) => {
               const active = selectedTier === t.id;
               return h(
                 "button",
                 {
                   key: t.id,
+                  type: "button",
+                  className: "nm-seg-btn",
+                  "data-active": active ? "true" : "false",
                   onClick: () => setSelectedTier(t.id),
-                  style: {
-                    borderRadius: "6px",
-                    padding: "5px 10px",
-                    border: "none",
-                    backgroundColor: active ? "var(--affordance-selected, #333333)" : "transparent",
-                    color: active ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
-                    fontSize: "12px",
-                    fontWeight: active ? "600" : "500",
-                    cursor: "pointer",
-                  },
                 },
                 t.label
               );
@@ -269,18 +255,11 @@ export function createModelRankingTabComponent(
           h(
             "button",
             {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "primary",
               onClick: handleProbeTopCandidates,
               disabled: probingTop,
-              style: {
-                borderRadius: "6px",
-                padding: "6px 12px",
-                backgroundColor: "var(--affordance-prominent, #ffffff)",
-                color: "var(--text-on-prominent, #000000)",
-                border: "none",
-                fontSize: "12px",
-                fontWeight: "600",
-                cursor: probingTop ? "wait" : "pointer",
-              },
             },
             probingTop ? "Testando..." : "Testar Top 6"
           )
@@ -363,68 +342,59 @@ export function createModelRankingTabComponent(
                   gap: "6px",
                   fontSize: "11px",
                   padding: "4px 9px",
-                  borderRadius: "6px",
+                  borderRadius: "7px",
                   cursor: "pointer",
-                  border: `1px solid ${policy.forceFree ? "var(--green-7, #28714f)" : "var(--border-primary, #333333)"}`,
-                  backgroundColor: policy.forceFree ? "var(--green-3, #132d21)" : "transparent",
-                  color: policy.forceFree ? "var(--green-11, #3dd68c)" : "var(--text-secondary, #c7c7c7)",
+                  border: `1px solid ${policy.forceFree ? "var(--nm-primary-border)" : "var(--nm-border)"}`,
+                  backgroundColor: policy.forceFree ? "var(--nm-primary-soft)" : "transparent",
+                  color: policy.forceFree ? "var(--nm-primary-text)" : "var(--nm-fg-secondary)",
                   fontWeight: policy.forceFree ? "600" : "500",
                 },
               },
               h("input", {
                 type: "checkbox",
+                className: "nm-check",
                 checked: policy.forceFree,
                 onChange: (e: any) => updatePolicy((p) => ({ ...p, forceFree: Boolean(e.target.checked) })),
-                style: { accentColor: "#30a46c" },
               }),
               "Forçar modelos :free"
             ),
             // Filtro elegíveis para auto-designação
             h(
               "label",
-              { style: { display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", cursor: "pointer" } },
+              { style: { display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "11px", color: "var(--nm-muted)", cursor: "pointer" } },
               h("input", {
                 type: "checkbox",
+                className: "nm-check",
                 checked: onlyAutoEligible,
                 onChange: (e: any) => setOnlyAutoEligible(Boolean(e.target.checked)),
-                style: { accentColor: "#30a46c" },
               }),
               "Só elegíveis (Auto)"
             )
           ),
           h("input", {
             type: "text",
+            className: "nm-input",
             placeholder: "Filtrar modelo...",
             value: searchFilter,
             onChange: (e: any) => setSearchFilter(e.target.value),
-            style: {
-              backgroundColor: "var(--surface-inset, #101010)",
-              border: "1px solid var(--border-primary, #333333)",
-              borderRadius: "6px",
-              padding: "4px 10px",
-              color: "var(--text-primary, #ffffff)",
-              fontSize: "11px",
-              width: "160px",
-              outline: "none",
-            },
+            style: { width: "170px", fontSize: "11.5px" },
           })
         )
       ),
 
-      // 2. Faixa única do Modelo #1 Eleito + Aplicação Direta (substitui 3 cards + banner azul)
+      // 2. Faixa única do Modelo #1 Eleito + Aplicação Direta (com acento herdado do Buzz)
       h(
         "div",
         {
+          className: "nm-card-pad",
           style: {
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             flexWrap: "wrap",
             gap: "12px",
-            padding: "10px 14px",
-            borderRadius: "10px",
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
+            padding: "11px 14px",
+            borderColor: activeWinner ? "var(--nm-primary-border)" : "var(--nm-border)",
           },
         },
         h(
@@ -432,24 +402,24 @@ export function createModelRankingTabComponent(
           { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
           h(
             "span",
-            { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", fontWeight: "600", textTransform: "uppercase" } },
-            activeWinner?.pinned ? "Fixado:" : "Auto #1:"
+            { className: "nm-pill", "data-tone": "accent" },
+            activeWinner?.pinned ? "FIXADO" : "AUTO #1"
           ),
           h(
             "span",
-            { style: { fontSize: "13px", fontWeight: "700", color: "var(--text-primary, #ffffff)", fontFamily: "monospace" } },
+            { className: "nm-mono", style: { fontSize: "13px", fontWeight: "700", color: "var(--nm-fg)" } },
             activeWinner ? activeWinner.model : "Nenhum elegível"
           ),
           activeWinner &&
             h(
               "span",
-              { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace" } },
+              { className: "nm-mono nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } },
               `score ${activeWinner.score} · ${activeWinner.calls.toLocaleString("pt-BR")} reqs · ${fmtCost(activeWinner.avgCostUsd)}`
             ),
           h(
             "span",
-            { style: { fontSize: "11px", color: "var(--text-tertiary, #808080)" } },
-            `(${usageSampleSize.toLocaleString("pt-BR")} chamadas no Gateway · ${policy.autoAssignBlocked.length} bloqueados p/ auto)`
+            { style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `(${usageSampleSize.toLocaleString("pt-BR")} chamadas · ${policy.autoAssignBlocked.length} bloqueados p/ auto)`
           )
         ),
         agentsList.length > 0 &&
@@ -459,16 +429,10 @@ export function createModelRankingTabComponent(
             h(
               "select",
               {
+                className: "nm-select",
                 value: selectedAgentKey,
                 onChange: (e: any) => setSelectedAgentKey(e.target.value),
-                style: {
-                  backgroundColor: "var(--surface-inset, #101010)",
-                  color: "var(--text-primary, #ffffff)",
-                  border: "1px solid var(--border-primary, #333333)",
-                  borderRadius: "6px",
-                  padding: "4px 8px",
-                  fontSize: "11px",
-                },
+                style: { fontSize: "11.5px" },
               },
               agentsList.map((a) =>
                 h("option", { key: a.key, value: a.key }, `${a.name || a.key} (${a.config?.model || "padrão"})`)
@@ -478,18 +442,12 @@ export function createModelRankingTabComponent(
               h(
                 "button",
                 {
+                  type: "button",
+                  className: "nm-btn",
+                  "data-variant": "soft",
                   onClick: () => handleApplyModel(activeWinner.model, activeWinner.group),
                   disabled: applyingModel !== null,
-                  style: {
-                    borderRadius: "6px",
-                    padding: "5px 10px",
-                    backgroundColor: "var(--affordance-subtle, #282828)",
-                    border: "1px solid var(--border-primary, #3a3a3a)",
-                    color: "var(--text-primary, #ffffff)",
-                    fontSize: "11px",
-                    fontWeight: "600",
-                    cursor: "pointer",
-                  },
+                  style: { padding: "5px 10px", fontSize: "11.5px" },
                 },
                 "Aplicar #1"
               )
@@ -499,17 +457,10 @@ export function createModelRankingTabComponent(
       // 3. Tabela minimalista de Ranking + Controle de Auto-Designação por Modelo
       h(
         "div",
-        {
-          style: {
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
-            borderRadius: "10px",
-            overflowX: "auto",
-          },
-        },
+        { className: "nm-card", style: { overflowX: "auto" } },
         h(
           "table",
-          { style: { width: "100%", borderCollapse: "collapse", fontSize: "12px" } },
+          { className: "nm-table" },
           h(
             "thead",
             null,
@@ -582,7 +533,7 @@ export function createModelRankingTabComponent(
                       isPinned &&
                         h(
                           "span",
-                          { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "var(--green-3, #132d21)", color: "var(--green-11, #3dd68c)" } },
+                          { className: "nm-pill", "data-tone": "accent", style: { marginLeft: "6px", fontSize: "9.5px", padding: "1px 6px" } },
                           "FIXADO"
                         )
                     ),

@@ -14,6 +14,7 @@ import {
 } from "./services/model-ranking";
 import { createModelRankingTabComponent } from "./components/ModelRankingTab";
 import { createNexusMindAgentsTabComponent } from "./components/NexusMindAgentsTab";
+import { NEXUSMIND_THEME_CSS } from "./styles/nexusmind-theme";
 
 export {
   selectBestModelByTier,
@@ -23,6 +24,7 @@ export {
   buildModelRankingSnapshot,
   loadGatewayUsageByModel,
   persistModelRankingSnapshot,
+  NEXUSMIND_THEME_CSS,
 };
 
 export const GOOSE_MAX_MODELS_PER_GROUP = 40;
@@ -1774,16 +1776,11 @@ print("SYNC_SUCCESS")
       return h(
         "div",
         {
-          style: {
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
-            borderRadius: "10px",
-            padding: "14px 16px",
-            display: "flex",
-            flexDirection: "column",
-            gap: "12px",
-          },
+          "data-nexusmind-root": "true",
+          className: "nm-card-pad",
+          style: { display: "flex", flexDirection: "column", gap: "12px" },
         },
+        h("style", { "data-nexusmind-theme": "true" }, NEXUSMIND_THEME_CSS),
         h(
           "div",
           {
@@ -1798,67 +1795,26 @@ print("SYNC_SUCCESS")
           h(
             "div",
             { style: { display: "flex", alignItems: "center", gap: "10px" } },
-            h(
-              "div",
-              {
-                style: {
-                  width: "32px",
-                  height: "32px",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--affordance-subtle, #282828)",
-                  border: "1px solid var(--border-primary, #333333)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "var(--text-primary, #ffffff)",
-                },
-              },
-              SVG_ICONS.dashboard({ h, width: 16, height: 16 })
-            ),
+            h("div", { className: "nm-brand-icon", style: { width: "32px", height: "32px" } }, SVG_ICONS.dashboard({ h, width: 16, height: 16 })),
             h(
               "div",
               null,
               h(
                 "div",
                 { style: { display: "flex", alignItems: "center", gap: "6px" } },
-                h("span", { style: { fontWeight: "600", fontSize: "13px", color: "var(--text-primary, #ffffff)" } }, "NexusMind Gateway"),
-                h(
-                  "span",
-                  {
-                    style: {
-                      fontSize: "10px",
-                      padding: "1px 6px",
-                      borderRadius: "4px",
-                      backgroundColor: "var(--green-3, #132d21)",
-                      color: "var(--green-11, #3dd68c)",
-                      fontWeight: "600",
-                    },
-                  },
-                  "v2.7"
-                )
+                h("span", { style: { fontWeight: "600", fontSize: "13px", color: "var(--nm-fg)" } }, "NexusMind Gateway"),
+                h("span", { className: "nm-pill", "data-tone": "accent", style: { fontSize: "10px" } }, "v2.8")
               ),
               h(
                 "div",
-                { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
+                { className: "nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } },
                 `${profileData.username} · $${(profileData.balance || 0).toFixed(2)} · ${models.length} modelos`
               )
             )
           ),
           h(
             "button",
-            {
-              onClick: openFullPage,
-              style: {
-                borderRadius: "6px",
-                backgroundColor: "var(--affordance-subtle, #282828)",
-                color: "var(--text-primary, #ffffff)",
-                border: "1px solid var(--border-primary, #333333)",
-                cursor: "pointer",
-                padding: "6px 12px",
-                fontSize: "12px",
-                fontWeight: "500",
-              },
-            },
+            { type: "button", className: "nm-btn", onClick: openFullPage },
             "Abrir Cockpit ↗"
           )
         ),
@@ -1867,38 +1823,12 @@ print("SYNC_SUCCESS")
           { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
           h(
             "button",
-            {
-              onClick: handlePullModelsFromNexusMind,
-              disabled: loadingPull,
-              style: {
-                borderRadius: "6px",
-                padding: "6px 12px",
-                backgroundColor: "var(--affordance-subtle, #232323)",
-                color: "var(--text-primary, #ffffff)",
-                border: "1px solid var(--border-primary, #333333)",
-                cursor: loadingPull ? "not-allowed" : "pointer",
-                fontSize: "12px",
-                fontWeight: "500",
-              },
-            },
+            { type: "button", className: "nm-btn", onClick: handlePullModelsFromNexusMind, disabled: loadingPull },
             loadingPull ? "Puxando..." : "Puxar Modelos"
           ),
           h(
             "button",
-            {
-              onClick: handleSyncModelsToBuzz,
-              disabled: loadingSync,
-              style: {
-                borderRadius: "6px",
-                padding: "6px 14px",
-                backgroundColor: "var(--affordance-prominent, #ffffff)",
-                color: "var(--text-on-prominent, #000000)",
-                border: "none",
-                cursor: loadingSync ? "not-allowed" : "pointer",
-                fontSize: "12px",
-                fontWeight: "600",
-              },
-            },
+            { type: "button", className: "nm-btn", "data-variant": "primary", onClick: handleSyncModelsToBuzz, disabled: loadingSync },
             loadingSync ? "Sincronizando..." : "Sincronizar no Buzz"
           )
         )
@@ -1963,24 +1893,12 @@ print("SYNC_SUCCESS")
         h(
           "button",
           {
+            type: "button",
+            className: "nm-btn",
+            "data-variant": "primary",
             onClick: handleStartOAuthFlow,
             disabled: authInFlight,
-            style: {
-              width: "100%",
-              borderRadius: "8px",
-              padding: "10px 18px",
-              backgroundColor: "var(--affordance-prominent, #ffffff)",
-              color: "var(--text-on-prominent, #000000)",
-              border: "none",
-              cursor: authInFlight ? "not-allowed" : "pointer",
-              fontWeight: "600",
-              fontSize: "13px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              marginBottom: "10px",
-            },
+            style: { width: "100%", padding: "10px 18px", fontSize: "13px", marginBottom: "10px" },
           },
           SVG_ICONS.plug({ h, width: 15, height: 15 }),
           authInFlight ? "Aguardando no Navegador..." : "Conectar via OAuth / MCP"
@@ -2074,17 +1992,11 @@ print("SYNC_SUCCESS")
             h(
               "button",
               {
+                type: "button",
+                className: "nm-btn",
+                "data-variant": "primary",
                 onClick: handleManualKeyConnect,
-                style: {
-                  borderRadius: "6px",
-                  padding: "8px 14px",
-                  backgroundColor: "var(--affordance-prominent, #ffffff)",
-                  color: "var(--text-on-prominent, #000000)",
-                  border: "none",
-                  cursor: "pointer",
-                  fontWeight: "600",
-                  fontSize: "12px",
-                },
+                style: { padding: "8px 14px" },
               },
               "Conectar"
             )
@@ -2099,91 +2011,45 @@ print("SYNC_SUCCESS")
     return h(
       "div",
       {
-        style: {
-          width: "100%",
-          height: "100%",
-          minHeight: "100%",
-          overflowY: "auto",
-          backgroundColor: "transparent",
-          color: "var(--text-normal, #f0f6fc)",
-          fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-          padding: "24px 32px",
-          boxSizing: "border-box",
-        },
+        "data-nexusmind-root": "true",
+        className: "nm-workspace",
       },
+      h("style", { "data-nexusmind-theme": "true" }, NEXUSMIND_THEME_CSS),
       !isConnected
-        ? renderDisconnectedHero()
+        ? h("div", { className: "nm-container" }, renderDisconnectedHero())
         : h(
             "div",
-            {
-              style: {
-                width: "100%",
-                maxWidth: "100%",
-                display: "flex",
-                flexDirection: "column",
-                gap: "24px",
-                paddingBottom: "48px",
-              },
-            },
+            { className: "nm-container" },
 
-            // 1. BUZZ-NATIVE MINIMALIST HEADER (SEM CARD DENTRO DE CARD, SEM NEON)
+            // 1. HEADER CODEDEN + BUZZ THEME (herda acento e fonte do Buzz Desktop)
             h(
               "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  flexWrap: "wrap",
-                  gap: "12px",
-                  paddingBottom: "14px",
-                  borderBottom: "1px solid var(--border-primary, #333333)",
-                },
-              },
-              // Left: Title + Primary Tabs inline
+              { className: "nm-header" },
               h(
                 "div",
-                { style: { display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" } },
+                { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" } },
                 h(
                   "div",
-                  { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                  { style: { display: "flex", alignItems: "center", gap: "9px" } },
+                  h("span", { className: "nm-brand-icon" }, SVG_ICONS.dashboard({ h, width: 14, height: 14 })),
                   h(
                     "h1",
                     {
                       style: {
-                        fontSize: "16px",
-                        fontWeight: "600",
+                        fontSize: "15px",
+                        fontWeight: "700",
                         margin: 0,
-                        color: "var(--text-primary, #ffffff)",
-                        letterSpacing: "-0.01em",
+                        color: "var(--nm-fg)",
+                        letterSpacing: "-0.015em",
                       },
                     },
-                    "NexusMind"
+                    "NexusMind Gateway"
                   ),
-                  h("span", {
-                    title: "Conectado",
-                    style: {
-                      width: "7px",
-                      height: "7px",
-                      borderRadius: "50%",
-                      backgroundColor: "var(--green-11, #3dd68c)",
-                      display: "inline-block",
-                    },
-                  })
+                  h("span", { className: "nm-pill", "data-tone": "ok", style: { fontSize: "10px", padding: "1px 6px" } }, "Online")
                 ),
                 h(
                   "div",
-                  {
-                    style: {
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "2px",
-                      backgroundColor: "var(--bg-panel, #1a1a1a)",
-                      border: "1px solid var(--border-primary, #333333)",
-                      borderRadius: "8px",
-                      padding: "2px",
-                    },
-                  },
+                  { className: "nm-segmented" },
                   [
                     { id: "catalog", label: "Modelos" },
                     { id: "ranking", label: "Ranking & Roteamento" },
@@ -2194,17 +2060,10 @@ print("SYNC_SUCCESS")
                       "button",
                       {
                         key: tab.id,
+                        type: "button",
+                        className: "nm-seg-btn",
+                        "data-active": active ? "true" : "false",
                         onClick: () => setActiveSection(tab.id as "catalog" | "ranking" | "agents"),
-                        style: {
-                          borderRadius: "6px",
-                          padding: "5px 12px",
-                          border: "none",
-                          backgroundColor: active ? "var(--affordance-selected, #333333)" : "transparent",
-                          color: active ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
-                          fontSize: "12px",
-                          fontWeight: active ? "600" : "500",
-                          cursor: "pointer",
-                        },
                       },
                       tab.label
                     );
@@ -2212,28 +2071,16 @@ print("SYNC_SUCCESS")
                 )
               ),
 
-              // Right: Compact Actions & Account
               h(
                 "div",
                 { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
                 h(
                   "button",
                   {
+                    type: "button",
+                    className: "nm-btn",
                     onClick: handlePullModelsFromNexusMind,
                     disabled: loadingPull,
-                    style: {
-                      borderRadius: "8px",
-                      padding: "6px 12px",
-                      backgroundColor: "var(--affordance-subtle, #232323)",
-                      color: "var(--text-primary, #ffffff)",
-                      border: "1px solid var(--border-primary, #333333)",
-                      cursor: loadingPull ? "not-allowed" : "pointer",
-                      fontWeight: "500",
-                      fontSize: "12px",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
-                    },
                   },
                   SVG_ICONS.pull({ h, width: 13, height: 13 }),
                   loadingPull ? "Buscando..." : "Puxar"
@@ -2241,21 +2088,11 @@ print("SYNC_SUCCESS")
                 h(
                   "button",
                   {
+                    type: "button",
+                    className: "nm-btn",
+                    "data-variant": "primary",
                     onClick: handleSyncModelsToBuzz,
                     disabled: loadingSync,
-                    style: {
-                      borderRadius: "8px",
-                      padding: "6px 14px",
-                      backgroundColor: "var(--affordance-prominent, #ffffff)",
-                      color: "var(--text-on-prominent, #000000)",
-                      border: "none",
-                      cursor: loadingSync ? "not-allowed" : "pointer",
-                      fontWeight: "600",
-                      fontSize: "12px",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
-                    },
                   },
                   SVG_ICONS.sync({ h, width: 13, height: 13 }),
                   loadingSync ? "Sincronizando..." : "Sincronizar"
@@ -2263,37 +2100,30 @@ print("SYNC_SUCCESS")
                 h(
                   "div",
                   {
+                    className: "nm-surface",
                     style: {
-                      display: "flex",
+                      display: "inline-flex",
                       alignItems: "center",
-                      gap: "6px",
-                      backgroundColor: "var(--bg-panel, #1a1a1a)",
-                      border: "1px solid var(--border-primary, #333333)",
-                      borderRadius: "8px",
+                      gap: "7px",
                       padding: "5px 10px",
                       fontSize: "12px",
                     },
                   },
-                  h("span", { style: { color: "var(--text-secondary, #c7c7c7)" } }, profileData.username),
+                  h("span", { style: { color: "var(--nm-fg-secondary)", fontWeight: 500 } }, profileData.username),
                   h(
                     "span",
-                    { style: { color: "var(--green-11, #3dd68c)", fontWeight: "600", fontFamily: "monospace" } },
+                    { className: "nm-mono nm-num", style: { color: "var(--nm-primary-text)", fontWeight: "600" } },
                     `$${(profileData.balance || 0).toFixed(2)}`
                   ),
                   h(
                     "button",
                     {
+                      type: "button",
+                      className: "nm-btn",
+                      "data-variant": "ghost",
                       onClick: handleDisconnect,
                       title: "Desconectar",
-                      style: {
-                        background: "none",
-                        border: "none",
-                        color: "var(--text-tertiary, #a4a4a4)",
-                        cursor: "pointer",
-                        fontSize: "11px",
-                        padding: "0 2px",
-                        marginLeft: "2px",
-                      },
+                      style: { padding: "0 4px", fontSize: "11px" },
                     },
                     "✕"
                   )
@@ -2365,61 +2195,72 @@ print("SYNC_SUCCESS")
               : h(
                   React.Fragment,
                   null,
-            // 3. ONE-LINE SUMMARY STRIP + COLLAPSIBLE GATEWAY & ENDPOINTS
-            h(
-              "div",
-              {
-                style: {
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  flexWrap: "wrap",
-                  gap: "12px",
-                  padding: "8px 12px",
-                  backgroundColor: "var(--bg-panel, #1a1a1a)",
-                  border: "1px solid var(--border-primary, #333333)",
-                  borderRadius: "8px",
-                  fontSize: "12px",
-                  color: "var(--text-secondary, #c7c7c7)",
-                },
-              },
-              h(
+            // 3. KPI STRIP 4 CARDS (CodeDen Style + Buzz Accent Progress Bar)
+            (() => {
+              const activeCount = Math.max(0, models.length - disabledModels.length);
+              const activePct = models.length > 0 ? Math.round((activeCount / models.length) * 100) : 0;
+              return h(
                 "div",
-                { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" } },
+                { className: "nm-kpi-grid", "data-nexusmind-kpi-grid": "true" },
                 h(
-                  "span",
-                  null,
-                  "Ativos: ",
-                  h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, `${models.length - disabledModels.length}`),
-                  h("span", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, ` / ${models.length}`)
+                  "div",
+                  { className: "nm-kpi-card" },
+                  h("span", { className: "nm-kpi-label" }, "SALDO DISPONÍVEL"),
+                  h("div", { className: "nm-kpi-val" }, `$${(profileData.balance || 0).toFixed(2)}`),
+                  h("div", { style: { fontSize: "11px", color: "var(--nm-muted)" } }, `${profileData.username} · ${profileData.activeApiKeys || 4} chaves ativas`)
                 ),
                 h(
-                  "span",
-                  null,
-                  "Hoje: ",
-                  h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, formatTokens(dashboardMetrics.today_tokens)),
-                  ` (${formatNumber(dashboardMetrics.today_requests)} reqs)`
+                  "div",
+                  { className: "nm-kpi-card" },
+                  h(
+                    "div",
+                    { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" } },
+                    h("span", { className: "nm-kpi-label" }, "CATÁLOGO ATIVO"),
+                    h("span", { className: "nm-mono nm-num", style: { fontSize: "11px", color: "var(--nm-primary-text)" } }, `${activePct}%`)
+                  ),
+                  h(
+                    "div",
+                    { className: "nm-kpi-val" },
+                    `${activeCount}`,
+                    h("span", { style: { fontSize: "12px", fontWeight: 500, color: "var(--nm-muted)" } }, ` / ${models.length}`)
+                  ),
+                  h("div", { className: "nm-bar-track" }, h("div", { className: "nm-bar-fill", style: { width: `${activePct}%` } }))
                 ),
-                lastSyncTime &&
-                  h("span", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, `Sync: ${lastSyncTime}`)
-              ),
-              h(
-                "button",
-                {
-                  onClick: () => setShowGatewayDetails((v: boolean) => !v),
-                  style: {
-                    background: "none",
-                    border: "none",
-                    color: "var(--text-secondary, #c7c7c7)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    fontWeight: "500",
-                    padding: "2px 6px",
-                  },
-                },
-                showGatewayDetails ? "Ocultar Gateway & Endpoints ▾" : "Gateway & Endpoints ▸"
-              )
-            ),
+                h(
+                  "div",
+                  { className: "nm-kpi-card" },
+                  h("span", { className: "nm-kpi-label" }, "CONSUMO HOJE"),
+                  h("div", { className: "nm-kpi-val" }, formatTokens(dashboardMetrics.today_tokens)),
+                  h("div", { className: "nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } }, `${formatNumber(dashboardMetrics.today_requests)} reqs · $${(dashboardMetrics.today_cost || 0).toFixed(2)}`)
+                ),
+                h(
+                  "div",
+                  { className: "nm-kpi-card", style: { justifyContent: "space-between" } },
+                  h(
+                    "div",
+                    { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                    h("span", { className: "nm-kpi-label" }, "GATEWAY & ENDPOINTS"),
+                    h("span", { className: "nm-pill", "data-tone": "accent", style: { fontSize: "9.5px", padding: "1px 6px" } }, "4 grupos")
+                  ),
+                  h(
+                    "div",
+                    { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginTop: "4px" } },
+                    h("span", { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } }, lastSyncTime ? `Sync ${lastSyncTime}` : "api.nexusmind.digital"),
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        className: "nm-btn",
+                        "data-variant": "ghost",
+                        onClick: () => setShowGatewayDetails((v: boolean) => !v),
+                        style: { padding: "3px 7px", fontSize: "11px", color: "var(--nm-primary-text)" },
+                      },
+                      showGatewayDetails ? "Ocultar ▾" : "Endpoints ▸"
+                    )
+                  )
+                )
+              );
+            })(),
 
             showGatewayDetails &&
               h(
@@ -2782,9 +2623,9 @@ print("SYNC_SUCCESS")
                     },
                     h("input", {
                       type: "checkbox",
+                      className: "nm-check",
                       checked: allFilteredActive,
                       onChange: handleToggleAllFiltered,
-                      style: { cursor: "pointer", accentColor: "#ffffff", width: "14px", height: "14px" },
                     }),
                     h(
                       "span",
@@ -2929,12 +2770,8 @@ print("SYNC_SUCCESS")
                     "div",
                     {
                       key: mid,
+                      className: "nm-list-row",
                       style: {
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "9px 14px",
-                        borderTop: idx > 0 ? "1px solid var(--border-subtle, rgba(255,255,255,0.05))" : "none",
                         opacity: isDisabled ? 0.5 : 1,
                       },
                     },
@@ -2944,9 +2781,9 @@ print("SYNC_SUCCESS")
                       { style: { display: "flex", alignItems: "center", gap: "10px", minWidth: 0 } },
                       h("input", {
                         type: "checkbox",
+                        className: "nm-check",
                         checked: !isDisabled,
                         onChange: () => handleToggleModel(mid),
-                        style: { cursor: "pointer", accentColor: "#30a46c", width: "14px", height: "14px" },
                       }),
                       h(
                         "div",

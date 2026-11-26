@@ -244,49 +244,46 @@ export function createNexusMindAgentsTabComponent(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "14px" } },
 
-      // 1. Barra de Resumo & Filtros (Buzz-native flat bar)
+      // 1. Barra de Resumo & Filtros (CodeDen + Buzz Theme)
       h(
         "div",
         {
+          className: "nm-card-pad",
           style: {
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             flexWrap: "wrap",
             gap: "10px",
-            padding: "10px 14px",
-            borderRadius: "10px",
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
+            padding: "11px 14px",
             fontSize: "12px",
           },
         },
         h(
           "div",
-          { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap", color: "var(--text-secondary, #c7c7c7)" } },
+          { style: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", color: "var(--nm-fg-secondary)" } },
           h(
             "span",
-            null,
+            { className: "nm-num" },
             "Agentes: ",
-            h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, `${agents.length}`)
+            h("strong", { style: { color: "var(--nm-fg)" } }, `${agents.length}`)
           ),
           h(
             "span",
-            null,
-            "Ativos: ",
-            h("strong", { style: { color: "var(--green-11, #3dd68c)" } }, `${runningCount}`)
+            { className: "nm-pill", "data-tone": "ok" },
+            `${runningCount} online`
           ),
           freeAgentsCount > 0 &&
             h(
               "span",
-              { style: { color: "var(--amber-11, #ffca16)" } },
+              { className: "nm-pill", "data-tone": "warn" },
               `${freeAgentsCount} usando :free`
             ),
           bestModelInfo &&
             h(
               "span",
-              { style: { color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace", fontSize: "11px" } },
-              `Recomendado: ${bestModelInfo.model}`
+              { className: "nm-pill", "data-tone": "accent" },
+              `#1 ${bestModelInfo.model}`
             )
         ),
         h(
@@ -294,19 +291,11 @@ export function createNexusMindAgentsTabComponent(
           { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
           h("input", {
             type: "text",
+            className: "nm-input",
             placeholder: "Filtrar agente ou modelo...",
             value: search,
             onChange: (e: any) => setSearch(e.target.value),
-            style: {
-              backgroundColor: "var(--surface-inset, #101010)",
-              border: "1px solid var(--border-primary, #333333)",
-              borderRadius: "6px",
-              padding: "5px 10px",
-              color: "var(--text-primary, #ffffff)",
-              fontSize: "11px",
-              width: "180px",
-              outline: "none",
-            },
+            style: { width: "185px", fontSize: "11.5px" },
           }),
           freeAgentsCount > 0 &&
             h(
@@ -317,50 +306,37 @@ export function createNexusMindAgentsTabComponent(
                   alignItems: "center",
                   gap: "5px",
                   fontSize: "11px",
-                  color: filterOnlyFree ? "var(--amber-11, #ffca16)" : "var(--text-tertiary, #a4a4a4)",
+                  color: filterOnlyFree ? "var(--nm-warn)" : "var(--nm-muted)",
                   cursor: "pointer",
                 },
               },
               h("input", {
                 type: "checkbox",
+                className: "nm-check",
                 checked: filterOnlyFree,
                 onChange: (e: any) => setFilterOnlyFree(Boolean(e.target.checked)),
-                style: { accentColor: "#ffca16" },
               }),
               "Só :free"
             ),
           h(
             "button",
             {
+              type: "button",
+              className: "nm-btn",
               onClick: refreshAgents,
-              style: {
-                borderRadius: "6px",
-                padding: "5px 10px",
-                backgroundColor: "var(--affordance-subtle, #232323)",
-                border: "1px solid var(--border-primary, #333333)",
-                color: "var(--text-secondary, #c7c7c7)",
-                fontSize: "11px",
-                fontWeight: "500",
-                cursor: "pointer",
-              },
+              style: { padding: "5px 10px", fontSize: "11.5px" },
             },
             "Atualizar"
           ),
           h(
             "button",
             {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "soft",
               onClick: handleOpenOrgfyFactory,
               title: "Abrir OrgFy Factory via navegação nativa do Buzz",
-              style: {
-                borderRadius: "6px",
-                padding: "5px 10px",
-                backgroundColor: "var(--affordance-subtle, #232323)",
-                border: "1px solid var(--border-primary, #333333)",
-                color: "var(--text-primary, #ffffff)",
-                fontSize: "11px",
-                fontWeight: "500",
-                cursor: "pointer",
-              },
+              style: { padding: "5px 10px", fontSize: "11.5px" },
             },
             "OrgFy Factory ↗"
           )
@@ -370,17 +346,10 @@ export function createNexusMindAgentsTabComponent(
       // 2. Tabela limpa de Agentes Buzz com Troca Direta de Modelo
       h(
         "div",
-        {
-          style: {
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
-            borderRadius: "10px",
-            overflowX: "auto",
-          },
-        },
+        { className: "nm-card", style: { overflowX: "auto" } },
         h(
           "table",
-          { style: { width: "100%", borderCollapse: "collapse", fontSize: "12px" } },
+          { className: "nm-table" },
           h(
             "thead",
             null,
@@ -570,22 +539,12 @@ export function createNexusMindAgentsTabComponent(
                         h(
                           "button",
                           {
+                            type: "button",
+                            className: "nm-btn",
+                            "data-variant": hasPendingChange ? "primary" : undefined,
                             onClick: () => handleSaveAgentModel(agent, selectedDraft),
                             disabled: isSaving || !hasPendingChange,
-                            style: {
-                              padding: "4px 9px",
-                              borderRadius: "6px",
-                              border: "none",
-                              backgroundColor: hasPendingChange
-                                ? "var(--affordance-prominent, #ffffff)"
-                                : "var(--affordance-subtle, #232323)",
-                              color: hasPendingChange
-                                ? "var(--text-on-prominent, #000000)"
-                                : "var(--text-tertiary, #808080)",
-                              fontSize: "11px",
-                              fontWeight: "600",
-                              cursor: isSaving || !hasPendingChange ? "not-allowed" : "pointer",
-                            },
+                            style: { padding: "4px 10px", fontSize: "11px" },
                           },
                           isSaving ? "..." : "Salvar"
                         ),
@@ -594,19 +553,13 @@ export function createNexusMindAgentsTabComponent(
                           h(
                             "button",
                             {
+                              type: "button",
+                              className: "nm-btn",
+                              "data-variant": "soft",
                               onClick: () => handleSaveAgentModel(agent, bestModelInfo.model, bestModelInfo.group),
                               disabled: isSaving,
                               title: `Aplicar modelo #1 do ranking (${bestModelInfo.model})`,
-                              style: {
-                                padding: "4px 8px",
-                                borderRadius: "6px",
-                                border: "1px solid var(--border-primary, #333333)",
-                                backgroundColor: "transparent",
-                                color: "var(--text-secondary, #c7c7c7)",
-                                fontSize: "10px",
-                                fontWeight: "500",
-                                cursor: isSaving ? "wait" : "pointer",
-                              },
+                              style: { padding: "4px 9px", fontSize: "10.5px" },
                             },
                             "Usar #1"
                           )

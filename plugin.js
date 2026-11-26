@@ -1254,19 +1254,12 @@ function createModelRankingTabComponent(ctx, groups) {
     return h(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "14px" } },
-      // 1. Barra compacta de Tier + Critérios de Roteamento (flat, estilo Buzz)
+      // 1. Barra compacta de Tier + Critérios de Roteamento (CodeDen + Buzz Theme)
       h(
         "div",
         {
-          style: {
-            display: "flex",
-            flexDirection: "column",
-            gap: "10px",
-            padding: "12px 14px",
-            borderRadius: "10px",
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)"
-          }
+          className: "nm-card-pad",
+          style: { display: "flex", flexDirection: "column", gap: "10px", padding: "12px 14px" }
         },
         // Linha 1: Tiers + Ação de Healthcheck
         h(
@@ -1274,24 +1267,17 @@ function createModelRankingTabComponent(ctx, groups) {
           { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" } },
+            { className: "nm-segmented", style: { flexWrap: "wrap" } },
             TIER_OPTIONS.map((t) => {
               const active = selectedTier === t.id;
               return h(
                 "button",
                 {
                   key: t.id,
-                  onClick: () => setSelectedTier(t.id),
-                  style: {
-                    borderRadius: "6px",
-                    padding: "5px 10px",
-                    border: "none",
-                    backgroundColor: active ? "var(--affordance-selected, #333333)" : "transparent",
-                    color: active ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
-                    fontSize: "12px",
-                    fontWeight: active ? "600" : "500",
-                    cursor: "pointer"
-                  }
+                  type: "button",
+                  className: "nm-seg-btn",
+                  "data-active": active ? "true" : "false",
+                  onClick: () => setSelectedTier(t.id)
                 },
                 t.label
               );
@@ -1300,18 +1286,11 @@ function createModelRankingTabComponent(ctx, groups) {
           h(
             "button",
             {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "primary",
               onClick: handleProbeTopCandidates,
-              disabled: probingTop,
-              style: {
-                borderRadius: "6px",
-                padding: "6px 12px",
-                backgroundColor: "var(--affordance-prominent, #ffffff)",
-                color: "var(--text-on-prominent, #000000)",
-                border: "none",
-                fontSize: "12px",
-                fontWeight: "600",
-                cursor: probingTop ? "wait" : "pointer"
-              }
+              disabled: probingTop
             },
             probingTop ? "Testando..." : "Testar Top 6"
           )
@@ -1393,67 +1372,58 @@ function createModelRankingTabComponent(ctx, groups) {
                   gap: "6px",
                   fontSize: "11px",
                   padding: "4px 9px",
-                  borderRadius: "6px",
+                  borderRadius: "7px",
                   cursor: "pointer",
-                  border: `1px solid ${policy.forceFree ? "var(--green-7, #28714f)" : "var(--border-primary, #333333)"}`,
-                  backgroundColor: policy.forceFree ? "var(--green-3, #132d21)" : "transparent",
-                  color: policy.forceFree ? "var(--green-11, #3dd68c)" : "var(--text-secondary, #c7c7c7)",
+                  border: `1px solid ${policy.forceFree ? "var(--nm-primary-border)" : "var(--nm-border)"}`,
+                  backgroundColor: policy.forceFree ? "var(--nm-primary-soft)" : "transparent",
+                  color: policy.forceFree ? "var(--nm-primary-text)" : "var(--nm-fg-secondary)",
                   fontWeight: policy.forceFree ? "600" : "500"
                 }
               },
               h("input", {
                 type: "checkbox",
+                className: "nm-check",
                 checked: policy.forceFree,
-                onChange: (e) => updatePolicy((p) => ({ ...p, forceFree: Boolean(e.target.checked) })),
-                style: { accentColor: "#30a46c" }
+                onChange: (e) => updatePolicy((p) => ({ ...p, forceFree: Boolean(e.target.checked) }))
               }),
               "Forçar modelos :free"
             ),
             // Filtro elegíveis para auto-designação
             h(
               "label",
-              { style: { display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", cursor: "pointer" } },
+              { style: { display: "inline-flex", alignItems: "center", gap: "5px", fontSize: "11px", color: "var(--nm-muted)", cursor: "pointer" } },
               h("input", {
                 type: "checkbox",
+                className: "nm-check",
                 checked: onlyAutoEligible,
-                onChange: (e) => setOnlyAutoEligible(Boolean(e.target.checked)),
-                style: { accentColor: "#30a46c" }
+                onChange: (e) => setOnlyAutoEligible(Boolean(e.target.checked))
               }),
               "Só elegíveis (Auto)"
             )
           ),
           h("input", {
             type: "text",
+            className: "nm-input",
             placeholder: "Filtrar modelo...",
             value: searchFilter,
             onChange: (e) => setSearchFilter(e.target.value),
-            style: {
-              backgroundColor: "var(--surface-inset, #101010)",
-              border: "1px solid var(--border-primary, #333333)",
-              borderRadius: "6px",
-              padding: "4px 10px",
-              color: "var(--text-primary, #ffffff)",
-              fontSize: "11px",
-              width: "160px",
-              outline: "none"
-            }
+            style: { width: "170px", fontSize: "11.5px" }
           })
         )
       ),
-      // 2. Faixa única do Modelo #1 Eleito + Aplicação Direta (substitui 3 cards + banner azul)
+      // 2. Faixa única do Modelo #1 Eleito + Aplicação Direta (com acento herdado do Buzz)
       h(
         "div",
         {
+          className: "nm-card-pad",
           style: {
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             flexWrap: "wrap",
             gap: "12px",
-            padding: "10px 14px",
-            borderRadius: "10px",
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)"
+            padding: "11px 14px",
+            borderColor: activeWinner ? "var(--nm-primary-border)" : "var(--nm-border)"
           }
         },
         h(
@@ -1461,23 +1431,23 @@ function createModelRankingTabComponent(ctx, groups) {
           { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
           h(
             "span",
-            { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", fontWeight: "600", textTransform: "uppercase" } },
-            (activeWinner == null ? void 0 : activeWinner.pinned) ? "Fixado:" : "Auto #1:"
+            { className: "nm-pill", "data-tone": "accent" },
+            (activeWinner == null ? void 0 : activeWinner.pinned) ? "FIXADO" : "AUTO #1"
           ),
           h(
             "span",
-            { style: { fontSize: "13px", fontWeight: "700", color: "var(--text-primary, #ffffff)", fontFamily: "monospace" } },
+            { className: "nm-mono", style: { fontSize: "13px", fontWeight: "700", color: "var(--nm-fg)" } },
             activeWinner ? activeWinner.model : "Nenhum elegível"
           ),
           activeWinner && h(
             "span",
-            { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace" } },
+            { className: "nm-mono nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } },
             `score ${activeWinner.score} · ${activeWinner.calls.toLocaleString("pt-BR")} reqs · ${fmtCost(activeWinner.avgCostUsd)}`
           ),
           h(
             "span",
-            { style: { fontSize: "11px", color: "var(--text-tertiary, #808080)" } },
-            `(${usageSampleSize.toLocaleString("pt-BR")} chamadas no Gateway · ${policy.autoAssignBlocked.length} bloqueados p/ auto)`
+            { style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `(${usageSampleSize.toLocaleString("pt-BR")} chamadas · ${policy.autoAssignBlocked.length} bloqueados p/ auto)`
           )
         ),
         agentsList.length > 0 && h(
@@ -1486,16 +1456,10 @@ function createModelRankingTabComponent(ctx, groups) {
           h(
             "select",
             {
+              className: "nm-select",
               value: selectedAgentKey,
               onChange: (e) => setSelectedAgentKey(e.target.value),
-              style: {
-                backgroundColor: "var(--surface-inset, #101010)",
-                color: "var(--text-primary, #ffffff)",
-                border: "1px solid var(--border-primary, #333333)",
-                borderRadius: "6px",
-                padding: "4px 8px",
-                fontSize: "11px"
-              }
+              style: { fontSize: "11.5px" }
             },
             agentsList.map(
               (a) => {
@@ -1507,18 +1471,12 @@ function createModelRankingTabComponent(ctx, groups) {
           activeWinner && h(
             "button",
             {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "soft",
               onClick: () => handleApplyModel(activeWinner.model, activeWinner.group),
               disabled: applyingModel !== null,
-              style: {
-                borderRadius: "6px",
-                padding: "5px 10px",
-                backgroundColor: "var(--affordance-subtle, #282828)",
-                border: "1px solid var(--border-primary, #3a3a3a)",
-                color: "var(--text-primary, #ffffff)",
-                fontSize: "11px",
-                fontWeight: "600",
-                cursor: "pointer"
-              }
+              style: { padding: "5px 10px", fontSize: "11.5px" }
             },
             "Aplicar #1"
           )
@@ -1527,17 +1485,10 @@ function createModelRankingTabComponent(ctx, groups) {
       // 3. Tabela minimalista de Ranking + Controle de Auto-Designação por Modelo
       h(
         "div",
-        {
-          style: {
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
-            borderRadius: "10px",
-            overflowX: "auto"
-          }
-        },
+        { className: "nm-card", style: { overflowX: "auto" } },
         h(
           "table",
-          { style: { width: "100%", borderCollapse: "collapse", fontSize: "12px" } },
+          { className: "nm-table" },
           h(
             "thead",
             null,
@@ -1599,7 +1550,7 @@ function createModelRankingTabComponent(ctx, groups) {
                   ),
                   isPinned && h(
                     "span",
-                    { style: { marginLeft: "6px", fontSize: "9px", padding: "1px 5px", borderRadius: "4px", backgroundColor: "var(--green-3, #132d21)", color: "var(--green-11, #3dd68c)" } },
+                    { className: "nm-pill", "data-tone": "accent", style: { marginLeft: "6px", fontSize: "9.5px", padding: "1px 6px" } },
                     "FIXADO"
                   )
                 ),
@@ -1886,47 +1837,44 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
     return h(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "14px" } },
-      // 1. Barra de Resumo & Filtros (Buzz-native flat bar)
+      // 1. Barra de Resumo & Filtros (CodeDen + Buzz Theme)
       h(
         "div",
         {
+          className: "nm-card-pad",
           style: {
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             flexWrap: "wrap",
             gap: "10px",
-            padding: "10px 14px",
-            borderRadius: "10px",
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
+            padding: "11px 14px",
             fontSize: "12px"
           }
         },
         h(
           "div",
-          { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap", color: "var(--text-secondary, #c7c7c7)" } },
+          { style: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", color: "var(--nm-fg-secondary)" } },
           h(
             "span",
-            null,
+            { className: "nm-num" },
             "Agentes: ",
-            h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, `${agents.length}`)
+            h("strong", { style: { color: "var(--nm-fg)" } }, `${agents.length}`)
           ),
           h(
             "span",
-            null,
-            "Ativos: ",
-            h("strong", { style: { color: "var(--green-11, #3dd68c)" } }, `${runningCount}`)
+            { className: "nm-pill", "data-tone": "ok" },
+            `${runningCount} online`
           ),
           freeAgentsCount > 0 && h(
             "span",
-            { style: { color: "var(--amber-11, #ffca16)" } },
+            { className: "nm-pill", "data-tone": "warn" },
             `${freeAgentsCount} usando :free`
           ),
           bestModelInfo && h(
             "span",
-            { style: { color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace", fontSize: "11px" } },
-            `Recomendado: ${bestModelInfo.model}`
+            { className: "nm-pill", "data-tone": "accent" },
+            `#1 ${bestModelInfo.model}`
           )
         ),
         h(
@@ -1934,19 +1882,11 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
           { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
           h("input", {
             type: "text",
+            className: "nm-input",
             placeholder: "Filtrar agente ou modelo...",
             value: search,
             onChange: (e) => setSearch(e.target.value),
-            style: {
-              backgroundColor: "var(--surface-inset, #101010)",
-              border: "1px solid var(--border-primary, #333333)",
-              borderRadius: "6px",
-              padding: "5px 10px",
-              color: "var(--text-primary, #ffffff)",
-              fontSize: "11px",
-              width: "180px",
-              outline: "none"
-            }
+            style: { width: "185px", fontSize: "11.5px" }
           }),
           freeAgentsCount > 0 && h(
             "label",
@@ -1956,50 +1896,37 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
                 alignItems: "center",
                 gap: "5px",
                 fontSize: "11px",
-                color: filterOnlyFree ? "var(--amber-11, #ffca16)" : "var(--text-tertiary, #a4a4a4)",
+                color: filterOnlyFree ? "var(--nm-warn)" : "var(--nm-muted)",
                 cursor: "pointer"
               }
             },
             h("input", {
               type: "checkbox",
+              className: "nm-check",
               checked: filterOnlyFree,
-              onChange: (e) => setFilterOnlyFree(Boolean(e.target.checked)),
-              style: { accentColor: "#ffca16" }
+              onChange: (e) => setFilterOnlyFree(Boolean(e.target.checked))
             }),
             "Só :free"
           ),
           h(
             "button",
             {
+              type: "button",
+              className: "nm-btn",
               onClick: refreshAgents,
-              style: {
-                borderRadius: "6px",
-                padding: "5px 10px",
-                backgroundColor: "var(--affordance-subtle, #232323)",
-                border: "1px solid var(--border-primary, #333333)",
-                color: "var(--text-secondary, #c7c7c7)",
-                fontSize: "11px",
-                fontWeight: "500",
-                cursor: "pointer"
-              }
+              style: { padding: "5px 10px", fontSize: "11.5px" }
             },
             "Atualizar"
           ),
           h(
             "button",
             {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "soft",
               onClick: handleOpenOrgfyFactory,
               title: "Abrir OrgFy Factory via navegação nativa do Buzz",
-              style: {
-                borderRadius: "6px",
-                padding: "5px 10px",
-                backgroundColor: "var(--affordance-subtle, #232323)",
-                border: "1px solid var(--border-primary, #333333)",
-                color: "var(--text-primary, #ffffff)",
-                fontSize: "11px",
-                fontWeight: "500",
-                cursor: "pointer"
-              }
+              style: { padding: "5px 10px", fontSize: "11.5px" }
             },
             "OrgFy Factory ↗"
           )
@@ -2008,17 +1935,10 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
       // 2. Tabela limpa de Agentes Buzz com Troca Direta de Modelo
       h(
         "div",
-        {
-          style: {
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
-            borderRadius: "10px",
-            overflowX: "auto"
-          }
-        },
+        { className: "nm-card", style: { overflowX: "auto" } },
         h(
           "table",
-          { style: { width: "100%", borderCollapse: "collapse", fontSize: "12px" } },
+          { className: "nm-table" },
           h(
             "thead",
             null,
@@ -2198,37 +2118,25 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
                     h(
                       "button",
                       {
+                        type: "button",
+                        className: "nm-btn",
+                        "data-variant": hasPendingChange ? "primary" : void 0,
                         onClick: () => handleSaveAgentModel(agent, selectedDraft),
                         disabled: isSaving || !hasPendingChange,
-                        style: {
-                          padding: "4px 9px",
-                          borderRadius: "6px",
-                          border: "none",
-                          backgroundColor: hasPendingChange ? "var(--affordance-prominent, #ffffff)" : "var(--affordance-subtle, #232323)",
-                          color: hasPendingChange ? "var(--text-on-prominent, #000000)" : "var(--text-tertiary, #808080)",
-                          fontSize: "11px",
-                          fontWeight: "600",
-                          cursor: isSaving || !hasPendingChange ? "not-allowed" : "pointer"
-                        }
+                        style: { padding: "4px 10px", fontSize: "11px" }
                       },
                       isSaving ? "..." : "Salvar"
                     ),
                     bestModelInfo && agent.model !== bestModelInfo.model && h(
                       "button",
                       {
+                        type: "button",
+                        className: "nm-btn",
+                        "data-variant": "soft",
                         onClick: () => handleSaveAgentModel(agent, bestModelInfo.model, bestModelInfo.group),
                         disabled: isSaving,
                         title: `Aplicar modelo #1 do ranking (${bestModelInfo.model})`,
-                        style: {
-                          padding: "4px 8px",
-                          borderRadius: "6px",
-                          border: "1px solid var(--border-primary, #333333)",
-                          backgroundColor: "transparent",
-                          color: "var(--text-secondary, #c7c7c7)",
-                          fontSize: "10px",
-                          fontWeight: "500",
-                          cursor: isSaving ? "wait" : "pointer"
-                        }
+                        style: { padding: "4px 9px", fontSize: "10.5px" }
                       },
                       "Usar #1"
                     )
@@ -2242,6 +2150,398 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
     );
   };
 }
+const NEXUSMIND_THEME_CSS = `
+[data-nexusmind-root="true"] {
+  --nm-bg: var(--bg-app, var(--surface-base, #101010));
+  --nm-fg: var(--text-primary, var(--text-standard, #f3f4f6));
+  --nm-fg-secondary: var(--text-secondary, var(--text-subtle, #c7c7c7));
+  --nm-muted: var(--text-tertiary, var(--text-metadata, #9ca3af));
+  --nm-card: var(--bg-panel, var(--surface-panel, #18181b));
+  --nm-surface: var(--affordance-subtle, var(--surface-inset, #202024));
+  --nm-surface-hover: var(--affordance-subtle-hover, #2a2a30);
+  --nm-inset: var(--surface-inset, var(--bg-app, #121215));
+  --nm-selected: var(--affordance-selected, #2c2c32);
+  --nm-border: var(--border-primary, var(--border-standard, rgba(255, 255, 255, 0.09)));
+  --nm-border-strong: var(--border-prominent, var(--border-control, rgba(255, 255, 255, 0.16)));
+
+  /* Acento 100% herdado do Buzz Desktop (Bee, Citrus, Cobalt, Iris, Magenta, Mono) */
+  --nm-primary: var(--affordance-accent-prominent, var(--accent-9, #3dd68c));
+  --nm-primary-hover: var(--affordance-accent-prominent-hover, var(--accent-10, var(--nm-primary)));
+  --nm-primary-pressed: var(--affordance-accent-prominent-pressed, var(--accent-pressed, var(--nm-primary)));
+  --nm-primary-fg: var(--text-on-accent, var(--accent-contrast, #08120c));
+  --nm-primary-soft: var(--accent-3, color-mix(in srgb, var(--nm-primary) 14%, transparent));
+  --nm-primary-border: var(--accent-7, color-mix(in srgb, var(--nm-primary) 42%, transparent));
+  --nm-primary-text: var(--accent-link, var(--accent-11, var(--nm-primary)));
+
+  /* Semânticos */
+  --nm-ok: var(--green-11, #3dd68c);
+  --nm-ok-soft: var(--green-3, rgba(61, 214, 140, 0.13));
+  --nm-ok-border: var(--green-7, rgba(61, 214, 140, 0.35));
+  --nm-warn: var(--amber-11, #fbbf24);
+  --nm-warn-soft: var(--amber-3, rgba(245, 158, 11, 0.13));
+  --nm-warn-border: var(--amber-7, rgba(245, 158, 11, 0.38));
+  --nm-danger: var(--red-11, #f87171);
+  --nm-danger-soft: var(--red-3, rgba(239, 68, 68, 0.14));
+  --nm-danger-border: var(--red-7, rgba(239, 68, 68, 0.42));
+  --nm-info: var(--blue-11, #60a5fa);
+  --nm-info-soft: var(--blue-3, rgba(56, 189, 248, 0.13));
+  --nm-info-border: var(--blue-7, rgba(56, 189, 248, 0.35));
+
+  --nm-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  color: var(--nm-fg);
+  font-family: inherit;
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+}
+
+[data-nexusmind-root="true"] *,
+[data-nexusmind-root="true"] *::before,
+[data-nexusmind-root="true"] *::after {
+  box-sizing: border-box;
+}
+
+[data-nexusmind-root="true"] button,
+[data-nexusmind-root="true"] input,
+[data-nexusmind-root="true"] select,
+[data-nexusmind-root="true"] textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.nm-workspace {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  background: transparent;
+}
+
+.nm-container {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 26px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.nm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--nm-border);
+}
+
+.nm-brand-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--nm-primary-soft);
+  border: 1px solid var(--nm-primary-border);
+  color: var(--nm-primary-text);
+  flex-shrink: 0;
+}
+
+.nm-card {
+  background: var(--nm-card);
+  border: 1px solid var(--nm-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.nm-card-pad {
+  background: var(--nm-card);
+  border: 1px solid var(--nm-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.nm-surface {
+  background: var(--nm-surface);
+  border: 1px solid var(--nm-border);
+  border-radius: 9px;
+}
+
+.nm-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.nm-kpi-card {
+  background: var(--nm-card);
+  border: 1px solid var(--nm-border);
+  border-radius: 10px;
+  padding: 11px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color 0.14s ease;
+}
+
+.nm-kpi-card:hover {
+  border-color: var(--nm-border-strong);
+}
+
+.nm-kpi-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--nm-muted);
+}
+
+.nm-kpi-val {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--nm-fg);
+}
+
+.nm-bar-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--nm-surface);
+  overflow: hidden;
+}
+
+.nm-bar-fill {
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--nm-primary);
+  transition: width 0.25s ease;
+}
+
+.nm-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--nm-border);
+  background: var(--nm-card);
+}
+
+.nm-seg-btn {
+  padding: 5px 11px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--nm-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.nm-seg-btn:hover {
+  color: var(--nm-fg);
+}
+
+.nm-seg-btn[data-active="true"] {
+  background: var(--nm-selected);
+  color: var(--nm-fg);
+  font-weight: 600;
+}
+
+.nm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--nm-border);
+  background: var(--nm-surface);
+  color: var(--nm-fg);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+
+.nm-btn:hover:not(:disabled) {
+  background: var(--nm-surface-hover);
+  border-color: var(--nm-border-strong);
+}
+
+.nm-btn[data-variant="primary"] {
+  background: var(--nm-primary);
+  border-color: var(--nm-primary);
+  color: var(--nm-primary-fg);
+  font-weight: 600;
+}
+
+.nm-btn[data-variant="primary"]:hover:not(:disabled) {
+  background: var(--nm-primary-hover);
+  border-color: var(--nm-primary-hover);
+  color: var(--nm-primary-fg);
+}
+
+.nm-btn[data-variant="primary"]:active:not(:disabled) {
+  background: var(--nm-primary-pressed);
+  border-color: var(--nm-primary-pressed);
+  color: var(--nm-primary-fg);
+}
+
+.nm-btn[data-variant="soft"] {
+  background: var(--nm-primary-soft);
+  border-color: var(--nm-primary-border);
+  color: var(--nm-primary-text);
+  font-weight: 600;
+}
+
+.nm-btn[data-variant="ghost"] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--nm-muted);
+}
+
+.nm-btn[data-variant="ghost"]:hover:not(:disabled) {
+  background: var(--nm-surface);
+  color: var(--nm-fg);
+}
+
+.nm-btn[data-variant="danger"] {
+  background: var(--nm-danger-soft);
+  border-color: var(--nm-danger-border);
+  color: var(--nm-danger);
+}
+
+.nm-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.nm-input, .nm-select {
+  border-radius: 7px;
+  background: var(--nm-inset);
+  border: 1px solid var(--nm-border);
+  color: var(--nm-fg);
+  font-size: 12px;
+  padding: 5px 10px;
+  outline: none;
+  transition: border-color 0.12s ease;
+}
+
+.nm-input:focus, .nm-select:focus {
+  border-color: var(--nm-primary-border);
+}
+
+.nm-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 9999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-family: var(--nm-font-mono);
+  border: 1px solid var(--nm-border);
+  background: var(--nm-surface);
+  color: var(--nm-fg-secondary);
+  white-space: nowrap;
+}
+
+.nm-pill[data-tone="accent"] {
+  background: var(--nm-primary-soft);
+  border-color: var(--nm-primary-border);
+  color: var(--nm-primary-text);
+}
+
+.nm-pill[data-tone="ok"] {
+  background: var(--nm-ok-soft);
+  border-color: var(--nm-ok-border);
+  color: var(--nm-ok);
+}
+
+.nm-pill[data-tone="warn"] {
+  background: var(--nm-warn-soft);
+  border-color: var(--nm-warn-border);
+  color: var(--nm-warn);
+}
+
+.nm-pill[data-tone="danger"] {
+  background: var(--nm-danger-soft);
+  border-color: var(--nm-danger-border);
+  color: var(--nm-danger);
+}
+
+.nm-pill[data-tone="info"] {
+  background: var(--nm-info-soft);
+  border-color: var(--nm-info-border);
+  color: var(--nm-info);
+}
+
+.nm-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--nm-border);
+  transition: background 0.12s ease;
+}
+
+.nm-list-row:first-child {
+  border-top: none;
+}
+
+.nm-list-row:hover {
+  background: var(--nm-surface);
+}
+
+.nm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.nm-table th {
+  text-align: left;
+  padding: 9px 12px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--nm-muted);
+  border-bottom: 1px solid var(--nm-border);
+}
+
+.nm-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--nm-border);
+}
+
+.nm-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.nm-table tbody tr:hover {
+  background: var(--nm-surface);
+}
+
+.nm-check {
+  cursor: pointer;
+  accent-color: var(--nm-primary);
+  width: 14px;
+  height: 14px;
+}
+
+.nm-mono { font-family: var(--nm-font-mono); }
+.nm-num { font-variant-numeric: tabular-nums; }
+`;
 const GOOSE_MAX_MODELS_PER_GROUP = 40;
 function selectTopGooseModelsByGroup(params) {
   var _a;
@@ -3778,16 +4078,11 @@ print("SYNC_SUCCESS")
       return h(
         "div",
         {
-          style: {
-            backgroundColor: "var(--bg-panel, #1a1a1a)",
-            border: "1px solid var(--border-primary, #2e2e2e)",
-            borderRadius: "10px",
-            padding: "14px 16px",
-            display: "flex",
-            flexDirection: "column",
-            gap: "12px"
-          }
+          "data-nexusmind-root": "true",
+          className: "nm-card-pad",
+          style: { display: "flex", flexDirection: "column", gap: "12px" }
         },
+        h("style", { "data-nexusmind-theme": "true" }, NEXUSMIND_THEME_CSS),
         h(
           "div",
           {
@@ -3802,67 +4097,26 @@ print("SYNC_SUCCESS")
           h(
             "div",
             { style: { display: "flex", alignItems: "center", gap: "10px" } },
-            h(
-              "div",
-              {
-                style: {
-                  width: "32px",
-                  height: "32px",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--affordance-subtle, #282828)",
-                  border: "1px solid var(--border-primary, #333333)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "var(--text-primary, #ffffff)"
-                }
-              },
-              SVG_ICONS.dashboard({ h, width: 16, height: 16 })
-            ),
+            h("div", { className: "nm-brand-icon", style: { width: "32px", height: "32px" } }, SVG_ICONS.dashboard({ h, width: 16, height: 16 })),
             h(
               "div",
               null,
               h(
                 "div",
                 { style: { display: "flex", alignItems: "center", gap: "6px" } },
-                h("span", { style: { fontWeight: "600", fontSize: "13px", color: "var(--text-primary, #ffffff)" } }, "NexusMind Gateway"),
-                h(
-                  "span",
-                  {
-                    style: {
-                      fontSize: "10px",
-                      padding: "1px 6px",
-                      borderRadius: "4px",
-                      backgroundColor: "var(--green-3, #132d21)",
-                      color: "var(--green-11, #3dd68c)",
-                      fontWeight: "600"
-                    }
-                  },
-                  "v2.7"
-                )
+                h("span", { style: { fontWeight: "600", fontSize: "13px", color: "var(--nm-fg)" } }, "NexusMind Gateway"),
+                h("span", { className: "nm-pill", "data-tone": "accent", style: { fontSize: "10px" } }, "v2.8")
               ),
               h(
                 "div",
-                { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
+                { className: "nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } },
                 `${profileData.username} · $${(profileData.balance || 0).toFixed(2)} · ${models.length} modelos`
               )
             )
           ),
           h(
             "button",
-            {
-              onClick: openFullPage,
-              style: {
-                borderRadius: "6px",
-                backgroundColor: "var(--affordance-subtle, #282828)",
-                color: "var(--text-primary, #ffffff)",
-                border: "1px solid var(--border-primary, #333333)",
-                cursor: "pointer",
-                padding: "6px 12px",
-                fontSize: "12px",
-                fontWeight: "500"
-              }
-            },
+            { type: "button", className: "nm-btn", onClick: openFullPage },
             "Abrir Cockpit ↗"
           )
         ),
@@ -3871,38 +4125,12 @@ print("SYNC_SUCCESS")
           { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
           h(
             "button",
-            {
-              onClick: handlePullModelsFromNexusMind,
-              disabled: loadingPull,
-              style: {
-                borderRadius: "6px",
-                padding: "6px 12px",
-                backgroundColor: "var(--affordance-subtle, #232323)",
-                color: "var(--text-primary, #ffffff)",
-                border: "1px solid var(--border-primary, #333333)",
-                cursor: loadingPull ? "not-allowed" : "pointer",
-                fontSize: "12px",
-                fontWeight: "500"
-              }
-            },
+            { type: "button", className: "nm-btn", onClick: handlePullModelsFromNexusMind, disabled: loadingPull },
             loadingPull ? "Puxando..." : "Puxar Modelos"
           ),
           h(
             "button",
-            {
-              onClick: handleSyncModelsToBuzz,
-              disabled: loadingSync,
-              style: {
-                borderRadius: "6px",
-                padding: "6px 14px",
-                backgroundColor: "var(--affordance-prominent, #ffffff)",
-                color: "var(--text-on-prominent, #000000)",
-                border: "none",
-                cursor: loadingSync ? "not-allowed" : "pointer",
-                fontSize: "12px",
-                fontWeight: "600"
-              }
-            },
+            { type: "button", className: "nm-btn", "data-variant": "primary", onClick: handleSyncModelsToBuzz, disabled: loadingSync },
             loadingSync ? "Sincronizando..." : "Sincronizar no Buzz"
           )
         )
@@ -3963,24 +4191,12 @@ print("SYNC_SUCCESS")
         h(
           "button",
           {
+            type: "button",
+            className: "nm-btn",
+            "data-variant": "primary",
             onClick: handleStartOAuthFlow,
             disabled: authInFlight,
-            style: {
-              width: "100%",
-              borderRadius: "8px",
-              padding: "10px 18px",
-              backgroundColor: "var(--affordance-prominent, #ffffff)",
-              color: "var(--text-on-prominent, #000000)",
-              border: "none",
-              cursor: authInFlight ? "not-allowed" : "pointer",
-              fontWeight: "600",
-              fontSize: "13px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              marginBottom: "10px"
-            }
+            style: { width: "100%", padding: "10px 18px", fontSize: "13px", marginBottom: "10px" }
           },
           SVG_ICONS.plug({ h, width: 15, height: 15 }),
           authInFlight ? "Aguardando no Navegador..." : "Conectar via OAuth / MCP"
@@ -4074,17 +4290,11 @@ print("SYNC_SUCCESS")
             h(
               "button",
               {
+                type: "button",
+                className: "nm-btn",
+                "data-variant": "primary",
                 onClick: handleManualKeyConnect,
-                style: {
-                  borderRadius: "6px",
-                  padding: "8px 14px",
-                  backgroundColor: "var(--affordance-prominent, #ffffff)",
-                  color: "var(--text-on-prominent, #000000)",
-                  border: "none",
-                  cursor: "pointer",
-                  fontWeight: "600",
-                  fontSize: "12px"
-                }
+                style: { padding: "8px 14px" }
               },
               "Conectar"
             )
@@ -4095,88 +4305,42 @@ print("SYNC_SUCCESS")
     return h(
       "div",
       {
-        style: {
-          width: "100%",
-          height: "100%",
-          minHeight: "100%",
-          overflowY: "auto",
-          backgroundColor: "transparent",
-          color: "var(--text-normal, #f0f6fc)",
-          fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-          padding: "24px 32px",
-          boxSizing: "border-box"
-        }
+        "data-nexusmind-root": "true",
+        className: "nm-workspace"
       },
-      !isConnected ? renderDisconnectedHero() : h(
+      h("style", { "data-nexusmind-theme": "true" }, NEXUSMIND_THEME_CSS),
+      !isConnected ? h("div", { className: "nm-container" }, renderDisconnectedHero()) : h(
         "div",
-        {
-          style: {
-            width: "100%",
-            maxWidth: "100%",
-            display: "flex",
-            flexDirection: "column",
-            gap: "24px",
-            paddingBottom: "48px"
-          }
-        },
-        // 1. BUZZ-NATIVE MINIMALIST HEADER (SEM CARD DENTRO DE CARD, SEM NEON)
+        { className: "nm-container" },
+        // 1. HEADER CODEDEN + BUZZ THEME (herda acento e fonte do Buzz Desktop)
         h(
           "div",
-          {
-            style: {
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              flexWrap: "wrap",
-              gap: "12px",
-              paddingBottom: "14px",
-              borderBottom: "1px solid var(--border-primary, #333333)"
-            }
-          },
-          // Left: Title + Primary Tabs inline
+          { className: "nm-header" },
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" } },
+            { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" } },
             h(
               "div",
-              { style: { display: "flex", alignItems: "center", gap: "8px" } },
+              { style: { display: "flex", alignItems: "center", gap: "9px" } },
+              h("span", { className: "nm-brand-icon" }, SVG_ICONS.dashboard({ h, width: 14, height: 14 })),
               h(
                 "h1",
                 {
                   style: {
-                    fontSize: "16px",
-                    fontWeight: "600",
+                    fontSize: "15px",
+                    fontWeight: "700",
                     margin: 0,
-                    color: "var(--text-primary, #ffffff)",
-                    letterSpacing: "-0.01em"
+                    color: "var(--nm-fg)",
+                    letterSpacing: "-0.015em"
                   }
                 },
-                "NexusMind"
+                "NexusMind Gateway"
               ),
-              h("span", {
-                title: "Conectado",
-                style: {
-                  width: "7px",
-                  height: "7px",
-                  borderRadius: "50%",
-                  backgroundColor: "var(--green-11, #3dd68c)",
-                  display: "inline-block"
-                }
-              })
+              h("span", { className: "nm-pill", "data-tone": "ok", style: { fontSize: "10px", padding: "1px 6px" } }, "Online")
             ),
             h(
               "div",
-              {
-                style: {
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "2px",
-                  backgroundColor: "var(--bg-panel, #1a1a1a)",
-                  border: "1px solid var(--border-primary, #333333)",
-                  borderRadius: "8px",
-                  padding: "2px"
-                }
-              },
+              { className: "nm-segmented" },
               [
                 { id: "catalog", label: "Modelos" },
                 { id: "ranking", label: "Ranking & Roteamento" },
@@ -4187,45 +4351,26 @@ print("SYNC_SUCCESS")
                   "button",
                   {
                     key: tab.id,
-                    onClick: () => setActiveSection(tab.id),
-                    style: {
-                      borderRadius: "6px",
-                      padding: "5px 12px",
-                      border: "none",
-                      backgroundColor: active ? "var(--affordance-selected, #333333)" : "transparent",
-                      color: active ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
-                      fontSize: "12px",
-                      fontWeight: active ? "600" : "500",
-                      cursor: "pointer"
-                    }
+                    type: "button",
+                    className: "nm-seg-btn",
+                    "data-active": active ? "true" : "false",
+                    onClick: () => setActiveSection(tab.id)
                   },
                   tab.label
                 );
               })
             )
           ),
-          // Right: Compact Actions & Account
           h(
             "div",
             { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
             h(
               "button",
               {
+                type: "button",
+                className: "nm-btn",
                 onClick: handlePullModelsFromNexusMind,
-                disabled: loadingPull,
-                style: {
-                  borderRadius: "8px",
-                  padding: "6px 12px",
-                  backgroundColor: "var(--affordance-subtle, #232323)",
-                  color: "var(--text-primary, #ffffff)",
-                  border: "1px solid var(--border-primary, #333333)",
-                  cursor: loadingPull ? "not-allowed" : "pointer",
-                  fontWeight: "500",
-                  fontSize: "12px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px"
-                }
+                disabled: loadingPull
               },
               SVG_ICONS.pull({ h, width: 13, height: 13 }),
               loadingPull ? "Buscando..." : "Puxar"
@@ -4233,21 +4378,11 @@ print("SYNC_SUCCESS")
             h(
               "button",
               {
+                type: "button",
+                className: "nm-btn",
+                "data-variant": "primary",
                 onClick: handleSyncModelsToBuzz,
-                disabled: loadingSync,
-                style: {
-                  borderRadius: "8px",
-                  padding: "6px 14px",
-                  backgroundColor: "var(--affordance-prominent, #ffffff)",
-                  color: "var(--text-on-prominent, #000000)",
-                  border: "none",
-                  cursor: loadingSync ? "not-allowed" : "pointer",
-                  fontWeight: "600",
-                  fontSize: "12px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px"
-                }
+                disabled: loadingSync
               },
               SVG_ICONS.sync({ h, width: 13, height: 13 }),
               loadingSync ? "Sincronizando..." : "Sincronizar"
@@ -4255,37 +4390,30 @@ print("SYNC_SUCCESS")
             h(
               "div",
               {
+                className: "nm-surface",
                 style: {
-                  display: "flex",
+                  display: "inline-flex",
                   alignItems: "center",
-                  gap: "6px",
-                  backgroundColor: "var(--bg-panel, #1a1a1a)",
-                  border: "1px solid var(--border-primary, #333333)",
-                  borderRadius: "8px",
+                  gap: "7px",
                   padding: "5px 10px",
                   fontSize: "12px"
                 }
               },
-              h("span", { style: { color: "var(--text-secondary, #c7c7c7)" } }, profileData.username),
+              h("span", { style: { color: "var(--nm-fg-secondary)", fontWeight: 500 } }, profileData.username),
               h(
                 "span",
-                { style: { color: "var(--green-11, #3dd68c)", fontWeight: "600", fontFamily: "monospace" } },
+                { className: "nm-mono nm-num", style: { color: "var(--nm-primary-text)", fontWeight: "600" } },
                 `$${(profileData.balance || 0).toFixed(2)}`
               ),
               h(
                 "button",
                 {
+                  type: "button",
+                  className: "nm-btn",
+                  "data-variant": "ghost",
                   onClick: handleDisconnect,
                   title: "Desconectar",
-                  style: {
-                    background: "none",
-                    border: "none",
-                    color: "var(--text-tertiary, #a4a4a4)",
-                    cursor: "pointer",
-                    fontSize: "11px",
-                    padding: "0 2px",
-                    marginLeft: "2px"
-                  }
+                  style: { padding: "0 4px", fontSize: "11px" }
                 },
                 "✕"
               )
@@ -4339,60 +4467,72 @@ print("SYNC_SUCCESS")
         }) : h(
           React.Fragment,
           null,
-          // 3. ONE-LINE SUMMARY STRIP + COLLAPSIBLE GATEWAY & ENDPOINTS
-          h(
-            "div",
-            {
-              style: {
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                flexWrap: "wrap",
-                gap: "12px",
-                padding: "8px 12px",
-                backgroundColor: "var(--bg-panel, #1a1a1a)",
-                border: "1px solid var(--border-primary, #333333)",
-                borderRadius: "8px",
-                fontSize: "12px",
-                color: "var(--text-secondary, #c7c7c7)"
-              }
-            },
-            h(
+          // 3. KPI STRIP 4 CARDS (CodeDen Style + Buzz Accent Progress Bar)
+          (() => {
+            const activeCount = Math.max(0, models.length - disabledModels.length);
+            const activePct = models.length > 0 ? Math.round(activeCount / models.length * 100) : 0;
+            return h(
               "div",
-              { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" } },
+              { className: "nm-kpi-grid", "data-nexusmind-kpi-grid": "true" },
               h(
-                "span",
-                null,
-                "Ativos: ",
-                h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, `${models.length - disabledModels.length}`),
-                h("span", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, ` / ${models.length}`)
+                "div",
+                { className: "nm-kpi-card" },
+                h("span", { className: "nm-kpi-label" }, "SALDO DISPONÍVEL"),
+                h("div", { className: "nm-kpi-val" }, `$${(profileData.balance || 0).toFixed(2)}`),
+                h("div", { style: { fontSize: "11px", color: "var(--nm-muted)" } }, `${profileData.username} · ${profileData.activeApiKeys || 4} chaves ativas`)
               ),
               h(
-                "span",
-                null,
-                "Hoje: ",
-                h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, formatTokens(dashboardMetrics.today_tokens)),
-                ` (${formatNumber(dashboardMetrics.today_requests)} reqs)`
+                "div",
+                { className: "nm-kpi-card" },
+                h(
+                  "div",
+                  { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline" } },
+                  h("span", { className: "nm-kpi-label" }, "CATÁLOGO ATIVO"),
+                  h("span", { className: "nm-mono nm-num", style: { fontSize: "11px", color: "var(--nm-primary-text)" } }, `${activePct}%`)
+                ),
+                h(
+                  "div",
+                  { className: "nm-kpi-val" },
+                  `${activeCount}`,
+                  h("span", { style: { fontSize: "12px", fontWeight: 500, color: "var(--nm-muted)" } }, ` / ${models.length}`)
+                ),
+                h("div", { className: "nm-bar-track" }, h("div", { className: "nm-bar-fill", style: { width: `${activePct}%` } }))
               ),
-              lastSyncTime && h("span", { style: { color: "var(--text-tertiary, #a4a4a4)" } }, `Sync: ${lastSyncTime}`)
-            ),
-            h(
-              "button",
-              {
-                onClick: () => setShowGatewayDetails((v) => !v),
-                style: {
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-secondary, #c7c7c7)",
-                  cursor: "pointer",
-                  fontSize: "11px",
-                  fontWeight: "500",
-                  padding: "2px 6px"
-                }
-              },
-              showGatewayDetails ? "Ocultar Gateway & Endpoints ▾" : "Gateway & Endpoints ▸"
-            )
-          ),
+              h(
+                "div",
+                { className: "nm-kpi-card" },
+                h("span", { className: "nm-kpi-label" }, "CONSUMO HOJE"),
+                h("div", { className: "nm-kpi-val" }, formatTokens(dashboardMetrics.today_tokens)),
+                h("div", { className: "nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } }, `${formatNumber(dashboardMetrics.today_requests)} reqs · $${(dashboardMetrics.today_cost || 0).toFixed(2)}`)
+              ),
+              h(
+                "div",
+                { className: "nm-kpi-card", style: { justifyContent: "space-between" } },
+                h(
+                  "div",
+                  { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                  h("span", { className: "nm-kpi-label" }, "GATEWAY & ENDPOINTS"),
+                  h("span", { className: "nm-pill", "data-tone": "accent", style: { fontSize: "9.5px", padding: "1px 6px" } }, "4 grupos")
+                ),
+                h(
+                  "div",
+                  { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginTop: "4px" } },
+                  h("span", { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } }, lastSyncTime ? `Sync ${lastSyncTime}` : "api.nexusmind.digital"),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "nm-btn",
+                      "data-variant": "ghost",
+                      onClick: () => setShowGatewayDetails((v) => !v),
+                      style: { padding: "3px 7px", fontSize: "11px", color: "var(--nm-primary-text)" }
+                    },
+                    showGatewayDetails ? "Ocultar ▾" : "Endpoints ▸"
+                  )
+                )
+              )
+            );
+          })(),
           showGatewayDetails && h(
             "div",
             {
@@ -4745,9 +4885,9 @@ print("SYNC_SUCCESS")
                   },
                   h("input", {
                     type: "checkbox",
+                    className: "nm-check",
                     checked: allFilteredActive,
-                    onChange: handleToggleAllFiltered,
-                    style: { cursor: "pointer", accentColor: "#ffffff", width: "14px", height: "14px" }
+                    onChange: handleToggleAllFiltered
                   }),
                   h(
                     "span",
@@ -4874,12 +5014,8 @@ print("SYNC_SUCCESS")
                   "div",
                   {
                     key: mid,
+                    className: "nm-list-row",
                     style: {
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      padding: "9px 14px",
-                      borderTop: idx > 0 ? "1px solid var(--border-subtle, rgba(255,255,255,0.05))" : "none",
                       opacity: isDisabled ? 0.5 : 1
                     }
                   },
@@ -4889,9 +5025,9 @@ print("SYNC_SUCCESS")
                     { style: { display: "flex", alignItems: "center", gap: "10px", minWidth: 0 } },
                     h("input", {
                       type: "checkbox",
+                      className: "nm-check",
                       checked: !isDisabled,
-                      onChange: () => handleToggleModel(mid),
-                      style: { cursor: "pointer", accentColor: "#30a46c", width: "14px", height: "14px" }
+                      onChange: () => handleToggleModel(mid)
                     }),
                     h(
                       "div",
@@ -5707,6 +5843,7 @@ export {
   CANONICAL_GROUPS,
   GOOSE_MAX_MODELS_PER_GROUP,
   GOOSE_SECRETS_MERGE_PY,
+  NEXUSMIND_THEME_CSS,
   OFFICIAL_ENDPOINTS,
   SESSION_FILE_PATHS,
   apply,

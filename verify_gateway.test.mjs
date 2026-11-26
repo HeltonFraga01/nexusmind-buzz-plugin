@@ -290,7 +290,18 @@ assert.ok(rankedTop.nexusmind_openai.slice(0, 3).includes("z-gpt-5-turbo"), "C1:
 assert.ok(rankedTop.nexusmind_openai.slice(0, 3).includes("mistralai/mistral-large-4-1t-a52b"), "C1: defaultModel do grupo deve entrar no top 3");
 assert.equal(rankedTop.nexusmind_openai.includes("aaa-broken-free:free"), false, "C1: modelo :free com erro deve ficar fora dos 40");
 
-console.log("[NEXUSMIND GATEWAY v2.6 OK]", JSON.stringify({
+// 9. v2.8: Herança de cores e fontes do Buzz Desktop no NexusMind Gateway
+assert.equal(typeof nmMod.NEXUSMIND_THEME_CSS, "string", "NEXUSMIND_THEME_CSS deve ser exportado");
+assert.ok(nmMod.NEXUSMIND_THEME_CSS.includes("--affordance-accent-prominent"), "Tema deve herdar --affordance-accent-prominent do Buzz");
+assert.ok(nmMod.NEXUSMIND_THEME_CSS.includes("--text-on-accent"), "Tema deve herdar --text-on-accent do Buzz");
+assert.ok(nmMod.NEXUSMIND_THEME_CSS.includes("font-family: inherit"), "Tema deve herdar a fonte nativa do Buzz");
+for (const rel of ["src/index.tsx", "src/components/ModelRankingTab.tsx", "src/components/NexusMindAgentsTab.tsx"]) {
+  const srcText = fs.readFileSync(path.resolve(process.cwd(), rel), "utf8");
+  assert.ok(!srcText.includes("var(--affordance-prominent"), `${rel} não deve usar --affordance-prominent monocromático em CTAs`);
+  assert.ok(!srcText.includes("system-ui, -apple-system"), `${rel} não deve sobrescrever a fonte padrão do Buzz`);
+}
+
+console.log("[NEXUSMIND GATEWAY v2.8 OK]", JSON.stringify({
   tools: Array.from(tools.keys()),
   decisionProvider: registeredProvider.id,
   bestFast: bestFast.selectedModel,
