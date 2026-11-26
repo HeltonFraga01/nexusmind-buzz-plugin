@@ -22,12 +22,15 @@ nmMod.apply({
   host: {},
 });
 
-assert.equal(tools.size, 5, "devem existir exatamente 5 agentTools no NexusMind Gateway");
+assert.equal(tools.size, 8, "devem existir exatamente 8 agentTools no NexusMind Gateway v3.0");
 assert.ok(tools.has("nexusmind_models"));
 assert.ok(tools.has("nexusmind_status"));
 assert.ok(tools.has("nexusmind_best_model"));
 assert.ok(tools.has("nexusmind_apply_best_model"));
 assert.ok(tools.has("nexusmind_model_ranking"));
+assert.ok(tools.has("nexusmind_failover_agent"));
+assert.ok(tools.has("nexusmind_quality_bench"));
+assert.ok(tools.has("nexusmind_vip_policy"));
 assert.ok(registeredProvider && registeredProvider.id === "nexusmind-fast", "DecisionProvider 'nexusmind-fast' deve ser registrado");
 
 // 2. Testar selectBestModelByTier evitando :free por padrão e elegendo tier1_fast / tier3_frontier
@@ -295,20 +298,153 @@ assert.equal(typeof nmMod.NEXUSMIND_THEME_CSS, "string", "NEXUSMIND_THEME_CSS de
 assert.ok(nmMod.NEXUSMIND_THEME_CSS.includes("--affordance-accent-prominent"), "Tema deve herdar --affordance-accent-prominent do Buzz");
 assert.ok(nmMod.NEXUSMIND_THEME_CSS.includes("--text-on-accent"), "Tema deve herdar --text-on-accent do Buzz");
 assert.ok(nmMod.NEXUSMIND_THEME_CSS.includes("font-family: inherit"), "Tema deve herdar a fonte nativa do Buzz");
-for (const rel of ["src/index.tsx", "src/components/ModelRankingTab.tsx", "src/components/NexusMindAgentsTab.tsx"]) {
+for (const rel of [
+  "src/index.tsx",
+  "src/components/ModelRankingTab.tsx",
+  "src/components/NexusMindAgentsTab.tsx",
+  "src/components/AutopilotFailoverTab.tsx",
+]) {
   const srcText = fs.readFileSync(path.resolve(process.cwd(), rel), "utf8");
   assert.ok(!srcText.includes("var(--affordance-prominent"), `${rel} não deve usar --affordance-prominent monocromático em CTAs`);
   assert.ok(!srcText.includes("system-ui, -apple-system"), `${rel} não deve sobrescrever a fonte padrão do Buzz`);
 }
 
-console.log("[NEXUSMIND GATEWAY v2.8 OK]", JSON.stringify({
+// 10. v3.0: Proteção VIP (3 estados), Classificação de Erros, Circuit Breaker, Quality Probe e Failover Agêntico
+assert.equal(nmMod.classifyGatewayError("You've hit your weekly limit · resets Nov 30"), "weekly_limit");
+assert.equal(nmMod.classifyGatewayError("Server error: upstream_malformed_function_call"), "malformed_tool");
+assert.equal(nmMod.classifyGatewayError("Upstream response stream ended before completion"), "stream_cut");
+assert.equal(nmMod.classifyGatewayError("Resource not found (404)", 404), "not_found");
+
+const v3Groups = {
+  nexusmind_openai: { id: "nexusmind_openai", platformKey: "openai", groupName: "Saldo OpenAI", displayName: "NexusMind OpenAI", defaultKey: "sk-test", defaultModel: "mistralai/mistral-large-4-1t-a52b", defaultCtx: 131072, defaultOut: 8192 },
+  nexusmind_anthropic: { id: "nexusmind_anthropic", platformKey: "anthropic", groupName: "Saldo Claude", displayName: "NexusMind Anthropic", defaultKey: "sk-test", defaultModel: "claude-sonnet-4-6", defaultCtx: 200000, defaultOut: 8192 },
+  nexusmind_antigravity: { id: "nexusmind_antigravity", platformKey: "antigravity", groupName: "Antigravity", displayName: "NexusMind Anti-Gravity", defaultKey: "sk-test", defaultModel: "gemini-3.8-flash-medium", defaultCtx: 1048576, defaultOut: 65536 },
+};
+
+let vipPol = nmMod.loadVipPolicy();
+assert.equal(nmMod.isVipAgent("OrgFy Iris", vipPol), true, "OrgFy Iris deve ser VIP por padrão");
+assert.equal(nmMod.isVipAgent("Conselho COO", vipPol), true, "Conselho COO deve ser VIP por padrão");
+assert.equal(nmMod.isVipAgent("OrgFy Atlas", vipPol), false, "OrgFy Atlas deve ser worker (Pool Auto)");
+assert.equal(nmMod.getModelAccessMode("gpt-6.1-terra", "nexusmind_openai", vipPol), "vip", "gpt-6.1-terra deve ser VIP");
+assert.equal(nmMod.getModelAccessMode("claude-sonnet-4-6", "nexusmind_anthropic", vipPol), "vip", "Anthropic deve ser VIP");
+assert.equal(nmMod.getModelAccessMode("gemini-3.8-flash-medium", "nexusmind_antigravity", vipPol), "auto", "gemini-3.8-flash-medium deve ser Auto");
+
+vipPol = nmMod.setModelAccessMode(vipPol, "nex-n2-pro", "blocked");
+assert.equal(nmMod.getModelAccessMode("nex-n2-pro", "nexusmind_openai", vipPol), "blocked", "Bloqueio 1-clique deve marcar modelo como blocked");
+
+const v3Ranking = nmMod.buildModelRankingSnapshot({
+  catalogModels: [
+    { id: "claude-sonnet-4-6", primaryGroup: "nexusmind_anthropic" },
+    { id: "gpt-6.1-terra", primaryGroup: "nexusmind_openai" },
+    { id: "nex-n2-pro", primaryGroup: "nexusmind_openai" },
+    { id: "gemini-3.8-flash-medium", primaryGroup: "nexusmind_antigravity" },
+    { id: "mistralai/mistral-large-4-1t-a52b", primaryGroup: "nexusmind_openai" },
+  ],
+  groups: v3Groups,
+  usageByModel: {
+    "claude-sonnet-4-6": { calls: 900, avgDurationMs: 4000, avgFirstTokenMs: 600, totalCostUsd: 25, avgCostUsd: 0.02, cacheHitPct: 90, lastSeenAt: "2026-11-26T10:00:00Z" },
+    "gemini-3.8-flash-medium": { calls: 800, avgDurationMs: 5000, avgFirstTokenMs: 700, totalCostUsd: 8, avgCostUsd: 0.01, cacheHitPct: 85, lastSeenAt: "2026-11-26T10:00:00Z" },
+  },
+  usageSampleSize: 1700,
+  vipPolicy: vipPol,
+});
+
+// Worker Atlas falhando em nex-n2-pro NUNCA pode receber claude-sonnet-4-6 ou gpt-6.1-terra (VIP)
+const workerPick = nmMod.pickFailoverCandidate({
+  agentName: "OrgFy Atlas",
+  currentModel: "nex-n2-pro",
+  rankingSnapshot: v3Ranking,
+  vipPolicy: vipPol,
+  groups: v3Groups,
+});
+assert.equal(workerPick.ok, true);
+assert.equal(workerPick.isVip, false);
+assert.notEqual(workerPick.model, "claude-sonnet-4-6", "Worker NUNCA deve receber modelo VIP Anthropic");
+assert.notEqual(workerPick.model, "gpt-6.1-terra", "Worker NUNCA deve receber modelo VIP gpt-6.1-terra");
+assert.equal(workerPick.model, "gemini-3.8-flash-medium", "Worker deve receber melhor modelo Auto saudável");
+
+// VIP Iris falhando em gpt-6.1-terra deve ir estritamente para cadeia VIP (claude-sonnet-4-6)
+const vipPick = nmMod.pickFailoverCandidate({
+  agentName: "OrgFy Iris",
+  currentModel: "gpt-6.1-terra",
+  rankingSnapshot: v3Ranking,
+  vipPolicy: vipPol,
+  groups: v3Groups,
+});
+assert.equal(vipPick.ok, true);
+assert.equal(vipPick.isVip, true);
+assert.equal(vipPick.model, "claude-sonnet-4-6", "Iris deve fazer failover apenas dentro da cadeia VIP");
+
+// Quality Probe (Tool-Calling Fidelity)
+const qMockCtx = {
+  host: {
+    request: async ({ body }) => {
+      const parsed = JSON.parse(body);
+      if (parsed.model === "nex-n2-pro") {
+        return { status: 500, body: JSON.stringify({ error: "upstream_malformed_function_call" }) };
+      }
+      return {
+        status: 200,
+        body: JSON.stringify({
+          choices: [
+            {
+              message: {
+                tool_calls: [
+                  { id: "call_1", type: "function", function: { name: "check_status", arguments: '{"service":"orgfy"}' } },
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    },
+  },
+};
+const qOk = await nmMod.runModelQualityProbe(qMockCtx, "gemini-3.8-flash-medium", v3Groups.nexusmind_antigravity);
+assert.equal(qOk.online, true);
+assert.equal(qOk.toolCallOk, true);
+assert.ok(qOk.qualityScore >= 75, "Modelo com tool_call válido deve pontuar >= 75");
+const qBad = await nmMod.runModelQualityProbe(qMockCtx, "nex-n2-pro", v3Groups.nexusmind_openai);
+assert.equal(qBad.online, false);
+assert.equal(qBad.errorKind, "malformed_tool");
+
+// End-to-end executeAgentFailover com Quarentena + Wake
+const foSaved = [];
+const foWoken = [];
+const foCtx = {
+  agents: {
+    snapshot: () => ({
+      agents: [{ key: "local:orgfy-atlas", name: "OrgFy Atlas", config: { model: "mistralai/mistral-large-4-1t-a52b", provider: "nexusmind_openai" } }],
+    }),
+    save: async (k, p) => foSaved.push({ k, p }),
+    wake: async (k) => foWoken.push(k),
+  },
+};
+const foEvt = await nmMod.executeAgentFailover(foCtx, v3Groups, {
+  agentKeyOrName: "OrgFy Atlas",
+  errorText: "Server error: Upstream response stream ended before",
+  trigger: "watchdog",
+  rankingSnapshot: v3Ranking,
+  vipPolicy: vipPol,
+  wakeAfter: true,
+});
+assert.equal(foEvt.applied, true);
+assert.equal(foEvt.wokeAgent, true);
+assert.equal(foEvt.toModel, "gemini-3.8-flash-medium");
+assert.equal(foSaved.length, 1);
+assert.equal(foWoken.length, 1);
+assert.ok(nmMod.loadQuarantines()["mistralai/mistral-large-4-1t-a52b"], "Modelo que falhou deve entrar em quarentena");
+nmMod.releaseQuarantine();
+
+console.log("[NEXUSMIND GATEWAY v3.0 OK]", JSON.stringify({
   tools: Array.from(tools.keys()),
   decisionProvider: registeredProvider.id,
   bestFast: bestFast.selectedModel,
   appliedFrontier: applied.selectedModel,
   rankingTopGeral: rankingSnap.bestByTier.geral.model,
   forceFreeTop: snapForceFree.bestByTier.geral.model,
-  c2Hydrated: hydratedToken,
-  c3SecretsMode: mode.toString(8),
-  c1Top3Openai: rankedTop.nexusmind_openai.slice(0, 3),
+  workerFailover: workerPick.model,
+  vipFailover: vipPick.model,
+  qualityProbeOk: qOk.qualityScore,
+  endToEndFailover: `${foEvt.fromModel} -> ${foEvt.toModel}`,
 }));

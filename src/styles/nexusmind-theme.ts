@@ -394,6 +394,50 @@ export const NEXUSMIND_THEME_CSS = `
   height: 14px;
 }
 
+.nm-mode-group {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 7px;
+  border: 1px solid var(--nm-border);
+  background: var(--nm-inset);
+  padding: 2px;
+  gap: 2px;
+}
+
+.nm-mode-btn {
+  border: none;
+  background: transparent;
+  color: var(--nm-muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.nm-mode-btn:hover {
+  color: var(--nm-fg);
+}
+
+.nm-mode-btn[data-active="auto"] {
+  background: var(--nm-ok-soft);
+  color: var(--nm-ok);
+  font-weight: 600;
+}
+
+.nm-mode-btn[data-active="vip"] {
+  background: var(--nm-warn-soft);
+  color: var(--nm-warn);
+  font-weight: 600;
+}
+
+.nm-mode-btn[data-active="blocked"] {
+  background: var(--nm-danger-soft);
+  color: var(--nm-danger);
+  font-weight: 600;
+}
+
 .nm-mono { font-family: var(--nm-font-mono); }
 .nm-num { font-variant-numeric: tabular-nums; }
 `;

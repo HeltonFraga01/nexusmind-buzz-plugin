@@ -18,6 +18,13 @@ import {
   isUnsupportedAgentModel,
   scoreModelForTier,
 } from "./smart-router";
+import {
+  type ModelAccessMode,
+  type VipPolicyConfig,
+  getModelAccessMode,
+} from "./vip-policy";
+import type { QualityProbeResult } from "./quality-bench";
+import type { QuarantineEntry } from "./agentic-failover";
 
 export type RankingTier = "geral" | NexusTier;
 export type RoutingStrategy = "balanced" | "speed" | "quality" | "cost";
@@ -62,6 +69,11 @@ export interface RankedGatewayModel {
   isFree: boolean;
   isDisabled: boolean;
   autoAssignBlocked: boolean;
+  accessMode: ModelAccessMode;
+  quarantined: boolean;
+  quarantineReason?: string;
+  qualityScore: number | null;
+  toolCallOk: boolean | null;
   eligibleForAuto: boolean;
   score: number;
   capabilityScore: number;
@@ -353,6 +365,9 @@ export function buildModelRankingSnapshot(params: {
   tier?: RankingTier;
   avoidFree?: boolean;
   policy?: Partial<RoutingPolicy>;
+  vipPolicy?: VipPolicyConfig;
+  qualityBench?: Record<string, QualityProbeResult>;
+  quarantines?: Record<string, QuarantineEntry>;
 }): ModelRankingSnapshot {
   const tier: RankingTier = params.tier || "geral";
   const policy: RoutingPolicy = {
@@ -366,6 +381,8 @@ export function buildModelRankingSnapshot(params: {
   const disabledSet = new Set(params.disabledModels || []);
   const blockedSet = new Set(policy.autoAssignBlocked.map((m) => m.toLowerCase()));
   const liveProbes = params.liveProbes || {};
+  const qualityBench = params.qualityBench || {};
+  const quarantines = params.quarantines || {};
 
   const pool = new Map<string, { id: string; group: CanonicalGroupDef }>();
   for (const m of params.catalogModels || []) {
@@ -393,17 +410,49 @@ export function buildModelRankingSnapshot(params: {
     for (const item of pool.values()) {
       const usage = params.usageByModel[item.id];
       const probe = liveProbes[item.id];
+      const qBench = qualityBench[item.id];
+      const qEntry = quarantines[item.id];
       const isDisabled = disabledSet.has(item.id);
       const unsupported = isUnsupportedAgentModel(item.id);
-      const isBlocked = unsupported || blockedSet.has(item.id.toLowerCase());
+      const accessMode: ModelAccessMode = params.vipPolicy
+        ? getModelAccessMode(item.id, item.group.id, params.vipPolicy, params.disabledModels)
+        : isDisabled || blockedSet.has(item.id.toLowerCase())
+        ? "blocked"
+        : "auto";
+      const isBlocked = unsupported || blockedSet.has(item.id.toLowerCase()) || accessMode !== "auto";
+      const quarantined = Boolean(qEntry);
       const free = isFreeModel(item.id);
       const avgCost = usage?.avgCostUsd ?? 0;
       const exceedsCostCap =
         policy.maxCostPerReqUsd !== null && avgCost > 0 && avgCost > policy.maxCostPerReqUsd;
       const freeMismatch = policy.forceFree ? !free : false;
-      const eligibleForAuto = !isDisabled && !isBlocked && probe?.status !== "error" && !exceedsCostCap && !freeMismatch;
+      const effectiveOnline =
+        probe?.status === "ok"
+          ? true
+          : probe?.status === "error"
+          ? false
+          : qBench
+          ? qBench.online
+          : null;
+      const eligibleForAuto =
+        !isDisabled &&
+        !isBlocked &&
+        !quarantined &&
+        effectiveOnline !== false &&
+        !exceedsCostCap &&
+        !freeMismatch;
 
       const scored = computeModelRowScore(item.id, targetTier, usage, probe, policy);
+      let blendedScore = scored.score;
+      if (qBench) {
+        blendedScore = qBench.online
+          ? Number(Math.max(0, Math.min(100, scored.score * 0.55 + qBench.qualityScore * 0.45 + (qBench.toolCallOk ? 6 : -10))).toFixed(1))
+          : Math.max(0, Number((scored.score - 50).toFixed(1)));
+      }
+      if (quarantined) {
+        blendedScore = Math.max(0, Number((blendedScore - 45).toFixed(1)));
+      }
+
       rows.push({
         rank: 0,
         model: item.id,
@@ -412,15 +461,20 @@ export function buildModelRankingSnapshot(params: {
         isFree: free,
         isDisabled,
         autoAssignBlocked: isBlocked,
+        accessMode,
+        quarantined,
+        quarantineReason: qEntry?.reason,
+        qualityScore: qBench ? qBench.qualityScore : null,
+        toolCallOk: qBench ? qBench.toolCallOk : null,
         eligibleForAuto,
-        score: isDisabled ? -1 : scored.score,
+        score: isDisabled ? -1 : blendedScore,
         capabilityScore: scored.capabilityScore,
         tierMatchScore: scored.tierMatchScore,
         adoptionScore: scored.adoptionScore,
         speedScore: scored.speedScore,
-        online: probe?.status === "ok" ? true : probe?.status === "error" ? false : null,
-        pingLatencyMs: typeof probe?.latency === "number" ? probe.latency : null,
-        pingError: probe?.errorMsg,
+        online: effectiveOnline,
+        pingLatencyMs: typeof probe?.latency === "number" ? probe.latency : (qBench?.latencyMs ?? null),
+        pingError: probe?.errorMsg || (!qBench?.online ? qBench?.errorMsg : undefined),
         calls: usage?.calls ?? 0,
         avgDurationMs: usage?.avgDurationMs ?? null,
         avgFirstTokenMs: usage?.avgFirstTokenMs ?? null,

@@ -752,6 +752,209 @@ function createNexusMindDecisionProvider(ctx, groups) {
     }
   };
 }
+const LOCAL_STORAGE_VIP_POLICY_KEY = "nexusmind_vip_policy_v1";
+const SHARED_ROUTING_POLICY_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-routing-policy.json";
+const DEFAULT_VIP_MODELS = [
+  "gpt-6.1-terra",
+  "claude-sonnet-4-6",
+  "claude-sonnet-5-5",
+  "claude-opus-4-6",
+  "claude-opus-4-6-thinking",
+  "claude-opus-5-5"
+];
+const DEFAULT_VIP_AGENT_PATTERNS = [
+  "OrgFy Iris",
+  "Conselho *"
+];
+const DEFAULT_VIP_FALLBACK_CHAIN = [
+  "claude-sonnet-4-6",
+  "claude-sonnet-5-5",
+  "claude-opus-4-6",
+  "gpt-6.1-terra"
+];
+const DEFAULT_VIP_POLICY = {
+  version: 1,
+  vipModels: [...DEFAULT_VIP_MODELS],
+  blockedModels: [],
+  vipAgentPatterns: [...DEFAULT_VIP_AGENT_PATTERNS],
+  vipFallbackChain: [...DEFAULT_VIP_FALLBACK_CHAIN],
+  autoProtectAnthropic: true,
+  explicitAutoOverrides: []
+};
+function normalizeId(value) {
+  return String(value || "").trim().toLowerCase();
+}
+function uniqueStrings(list) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const item of list) {
+    const clean = String(item || "").trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
+function isDefaultVipModelId(modelId, groupId) {
+  const m = normalizeId(modelId);
+  if (!m) return false;
+  if (groupId === "nexusmind_anthropic") return true;
+  return m === "gpt-6.1-terra" || m.startsWith("claude-opus") || m.startsWith("claude-sonnet-5") || m === "claude-sonnet-4-6" || m.startsWith("gpt-6") || m.startsWith("gpt-5");
+}
+function loadVipPolicy() {
+  var _a, _b, _c, _d;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_VIP_POLICY_KEY);
+    if (!raw) {
+      const legacyBlocked = [];
+      try {
+        const rawPol = (_d = (_c = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _c.getItem) == null ? void 0 : _d.call(_c, "nexusmind_routing_policy");
+        if (rawPol) {
+          const parsedPol = JSON.parse(rawPol);
+          if (Array.isArray(parsedPol == null ? void 0 : parsedPol.autoAssignBlocked)) {
+            legacyBlocked.push(...parsedPol.autoAssignBlocked.map(String));
+          }
+        }
+      } catch {
+      }
+      return {
+        ...DEFAULT_VIP_POLICY,
+        blockedModels: uniqueStrings(legacyBlocked)
+      };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      version: 1,
+      vipModels: Array.isArray(parsed == null ? void 0 : parsed.vipModels) ? uniqueStrings(parsed.vipModels) : [...DEFAULT_VIP_MODELS],
+      blockedModels: Array.isArray(parsed == null ? void 0 : parsed.blockedModels) ? uniqueStrings(parsed.blockedModels) : [],
+      vipAgentPatterns: Array.isArray(parsed == null ? void 0 : parsed.vipAgentPatterns) && parsed.vipAgentPatterns.length > 0 ? uniqueStrings(parsed.vipAgentPatterns) : [...DEFAULT_VIP_AGENT_PATTERNS],
+      vipFallbackChain: Array.isArray(parsed == null ? void 0 : parsed.vipFallbackChain) && parsed.vipFallbackChain.length > 0 ? uniqueStrings(parsed.vipFallbackChain) : [...DEFAULT_VIP_FALLBACK_CHAIN],
+      autoProtectAnthropic: (parsed == null ? void 0 : parsed.autoProtectAnthropic) !== false,
+      explicitAutoOverrides: Array.isArray(parsed == null ? void 0 : parsed.explicitAutoOverrides) ? uniqueStrings(parsed.explicitAutoOverrides) : []
+    };
+  } catch {
+    return { ...DEFAULT_VIP_POLICY };
+  }
+}
+async function saveVipPolicy(ctx, cfg) {
+  var _a, _b;
+  const clean = {
+    version: 1,
+    vipModels: uniqueStrings(cfg.vipModels || []),
+    blockedModels: uniqueStrings(cfg.blockedModels || []),
+    vipAgentPatterns: uniqueStrings(cfg.vipAgentPatterns || DEFAULT_VIP_AGENT_PATTERNS),
+    vipFallbackChain: uniqueStrings(cfg.vipFallbackChain || DEFAULT_VIP_FALLBACK_CHAIN),
+    autoProtectAnthropic: cfg.autoProtectAnthropic !== false,
+    explicitAutoOverrides: uniqueStrings(cfg.explicitAutoOverrides || [])
+  };
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_VIP_POLICY_KEY, JSON.stringify(clean));
+  } catch {
+  }
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.writeFile) === "function") {
+    try {
+      await host.writeFile(
+        SHARED_ROUTING_POLICY_PATH,
+        JSON.stringify(
+          {
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            vipPolicy: clean
+          },
+          null,
+          2
+        )
+      );
+    } catch {
+    }
+  }
+}
+function isVipAgent(agentNameOrKey, cfg = DEFAULT_VIP_POLICY) {
+  const target = normalizeId(agentNameOrKey);
+  if (!target) return false;
+  for (const rawPattern of cfg.vipAgentPatterns || DEFAULT_VIP_AGENT_PATTERNS) {
+    const pat = normalizeId(rawPattern);
+    if (!pat) continue;
+    if (pat.endsWith("*")) {
+      const prefix = pat.slice(0, -1).trim();
+      if (prefix && (target.startsWith(prefix) || target.includes(prefix))) return true;
+    } else if (target === pat || target.includes(pat)) {
+      return true;
+    }
+  }
+  return false;
+}
+function getModelAccessMode(modelId, groupId, cfg, disabledModels) {
+  const m = normalizeId(modelId);
+  if (!m) return "blocked";
+  if ((disabledModels || []).some((d) => normalizeId(d) === m)) {
+    return "blocked";
+  }
+  if ((cfg.blockedModels || []).some((b) => normalizeId(b) === m)) {
+    return "blocked";
+  }
+  if ((cfg.explicitAutoOverrides || []).some((a) => normalizeId(a) === m)) {
+    return "auto";
+  }
+  if ((cfg.vipModels || []).some((v) => normalizeId(v) === m)) {
+    return "vip";
+  }
+  if (cfg.autoProtectAnthropic && groupId === "nexusmind_anthropic") {
+    return "vip";
+  }
+  return "auto";
+}
+function setModelAccessMode(cfg, modelId, mode) {
+  const target = normalizeId(modelId);
+  const strip = (arr) => (arr || []).filter((x) => normalizeId(x) !== target);
+  const nextVip = strip(cfg.vipModels);
+  const nextBlocked = strip(cfg.blockedModels);
+  const nextAutoOverrides = strip(cfg.explicitAutoOverrides);
+  if (mode === "vip") {
+    nextVip.push(modelId);
+  } else if (mode === "blocked") {
+    nextBlocked.push(modelId);
+  } else {
+    nextAutoOverrides.push(modelId);
+  }
+  return {
+    ...cfg,
+    vipModels: uniqueStrings(nextVip),
+    blockedModels: uniqueStrings(nextBlocked),
+    explicitAutoOverrides: uniqueStrings(nextAutoOverrides)
+  };
+}
+function applyQuickVipPreset(cfg, catalogModels) {
+  let next = {
+    ...cfg,
+    autoProtectAnthropic: true,
+    vipModels: uniqueStrings([...cfg.vipModels, ...DEFAULT_VIP_MODELS])
+  };
+  for (const m of catalogModels || []) {
+    if (isDefaultVipModelId(m.id, m.primaryGroup)) {
+      next = setModelAccessMode(next, m.id, "vip");
+    }
+  }
+  return next;
+}
+function toggleVipAgent(cfg, agentName) {
+  const clean = String(agentName || "").trim();
+  if (!clean) return cfg;
+  const target = normalizeId(clean);
+  const existsExact = (cfg.vipAgentPatterns || []).some((p) => normalizeId(p) === target);
+  if (existsExact) {
+    return {
+      ...cfg,
+      vipAgentPatterns: cfg.vipAgentPatterns.filter((p) => normalizeId(p) !== target)
+    };
+  }
+  return {
+    ...cfg,
+    vipAgentPatterns: uniqueStrings([...cfg.vipAgentPatterns, clean])
+  };
+}
 const DEFAULT_ROUTING_POLICY = {
   strategy: "balanced",
   forceFree: false,
@@ -949,6 +1152,8 @@ function buildModelRankingSnapshot(params) {
   const disabledSet = new Set(params.disabledModels || []);
   const blockedSet = new Set(policy.autoAssignBlocked.map((m) => m.toLowerCase()));
   const liveProbes = params.liveProbes || {};
+  const qualityBench = params.qualityBench || {};
+  const quarantines = params.quarantines || {};
   const pool = /* @__PURE__ */ new Map();
   for (const m of params.catalogModels || []) {
     const mid = String((m == null ? void 0 : m.id) || "").trim();
@@ -971,15 +1176,27 @@ function buildModelRankingSnapshot(params) {
     for (const item of pool.values()) {
       const usage = params.usageByModel[item.id];
       const probe = liveProbes[item.id];
+      const qBench = qualityBench[item.id];
+      const qEntry = quarantines[item.id];
       const isDisabled = disabledSet.has(item.id);
       const unsupported = isUnsupportedAgentModel(item.id);
-      const isBlocked = unsupported || blockedSet.has(item.id.toLowerCase());
+      const accessMode = params.vipPolicy ? getModelAccessMode(item.id, item.group.id, params.vipPolicy, params.disabledModels) : isDisabled || blockedSet.has(item.id.toLowerCase()) ? "blocked" : "auto";
+      const isBlocked = unsupported || blockedSet.has(item.id.toLowerCase()) || accessMode !== "auto";
+      const quarantined = Boolean(qEntry);
       const free = isFreeModel$1(item.id);
       const avgCost = (usage == null ? void 0 : usage.avgCostUsd) ?? 0;
       const exceedsCostCap = policy.maxCostPerReqUsd !== null && avgCost > 0 && avgCost > policy.maxCostPerReqUsd;
       const freeMismatch = policy.forceFree ? !free : false;
-      const eligibleForAuto = !isDisabled && !isBlocked && (probe == null ? void 0 : probe.status) !== "error" && !exceedsCostCap && !freeMismatch;
+      const effectiveOnline = (probe == null ? void 0 : probe.status) === "ok" ? true : (probe == null ? void 0 : probe.status) === "error" ? false : qBench ? qBench.online : null;
+      const eligibleForAuto = !isDisabled && !isBlocked && !quarantined && effectiveOnline !== false && !exceedsCostCap && !freeMismatch;
       const scored = computeModelRowScore(item.id, targetTier, usage, probe, policy);
+      let blendedScore = scored.score;
+      if (qBench) {
+        blendedScore = qBench.online ? Number(Math.max(0, Math.min(100, scored.score * 0.55 + qBench.qualityScore * 0.45 + (qBench.toolCallOk ? 6 : -10))).toFixed(1)) : Math.max(0, Number((scored.score - 50).toFixed(1)));
+      }
+      if (quarantined) {
+        blendedScore = Math.max(0, Number((blendedScore - 45).toFixed(1)));
+      }
       rows.push({
         rank: 0,
         model: item.id,
@@ -988,15 +1205,20 @@ function buildModelRankingSnapshot(params) {
         isFree: free,
         isDisabled,
         autoAssignBlocked: isBlocked,
+        accessMode,
+        quarantined,
+        quarantineReason: qEntry == null ? void 0 : qEntry.reason,
+        qualityScore: qBench ? qBench.qualityScore : null,
+        toolCallOk: qBench ? qBench.toolCallOk : null,
         eligibleForAuto,
-        score: isDisabled ? -1 : scored.score,
+        score: isDisabled ? -1 : blendedScore,
         capabilityScore: scored.capabilityScore,
         tierMatchScore: scored.tierMatchScore,
         adoptionScore: scored.adoptionScore,
         speedScore: scored.speedScore,
-        online: (probe == null ? void 0 : probe.status) === "ok" ? true : (probe == null ? void 0 : probe.status) === "error" ? false : null,
-        pingLatencyMs: typeof (probe == null ? void 0 : probe.latency) === "number" ? probe.latency : null,
-        pingError: probe == null ? void 0 : probe.errorMsg,
+        online: effectiveOnline,
+        pingLatencyMs: typeof (probe == null ? void 0 : probe.latency) === "number" ? probe.latency : (qBench == null ? void 0 : qBench.latencyMs) ?? null,
+        pingError: (probe == null ? void 0 : probe.errorMsg) || (!(qBench == null ? void 0 : qBench.online) ? qBench == null ? void 0 : qBench.errorMsg : void 0),
         calls: (usage == null ? void 0 : usage.calls) ?? 0,
         avgDurationMs: (usage == null ? void 0 : usage.avgDurationMs) ?? null,
         avgFirstTokenMs: (usage == null ? void 0 : usage.avgFirstTokenMs) ?? null,
@@ -1119,7 +1341,12 @@ function createModelRankingTabComponent(ctx, groups) {
     disabledModels,
     modelTests,
     onTestSingleModel,
-    onNotify
+    onNotify,
+    vipPolicy,
+    onSetModelAccessMode,
+    onQuickProtectVips,
+    qualityBench,
+    quarantines
   }) {
     const [selectedTier, setSelectedTier] = React.useState("geral");
     const [policy, setPolicy] = React.useState(() => loadSavedRoutingPolicy());
@@ -1178,9 +1405,12 @@ function createModelRankingTabComponent(ctx, groups) {
         liveProbes: modelTests,
         disabledModels,
         tier: selectedTier,
-        policy
+        policy,
+        vipPolicy,
+        qualityBench,
+        quarantines
       });
-    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy]);
+    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy, vipPolicy, qualityBench, quarantines]);
     React.useEffect(() => {
       if (snapshot.models.length === 0) return;
       persistModelRankingSnapshot(ctx, snapshot);
@@ -1284,15 +1514,29 @@ function createModelRankingTabComponent(ctx, groups) {
             })
           ),
           h(
-            "button",
-            {
-              type: "button",
-              className: "nm-btn",
-              "data-variant": "primary",
-              onClick: handleProbeTopCandidates,
-              disabled: probingTop
-            },
-            probingTop ? "Testando..." : "Testar Top 6"
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "8px" } },
+            onQuickProtectVips && h(
+              "button",
+              {
+                type: "button",
+                className: "nm-btn",
+                "data-variant": "soft",
+                onClick: onQuickProtectVips
+              },
+              "Proteger VIPs"
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "nm-btn",
+                "data-variant": "primary",
+                onClick: handleProbeTopCandidates,
+                disabled: probingTop
+              },
+              probingTop ? "Testando..." : "Testar Top 6"
+            )
           )
         ),
         // Linha 2: Critérios de Política (Estratégia, Teto de Custo, Forçar :free, Busca)
@@ -1554,31 +1798,61 @@ function createModelRankingTabComponent(ctx, groups) {
                     "FIXADO"
                   )
                 ),
-                // Toggle 1-clique Auto vs Manual (Proibido p/ auto-designação)
+                // Controle 1-clique em 3 estados: Auto | VIP | Bloq.
                 h(
                   "td",
                   { style: { padding: "8px 12px" } },
-                  h(
+                  onSetModelAccessMode ? h(
+                    "div",
+                    { className: "nm-mode-group" },
+                    [
+                      { id: "auto", label: "Auto" },
+                      { id: "vip", label: "VIP" },
+                      { id: "blocked", label: "Bloq." }
+                    ].map(
+                      (opt) => h(
+                        "button",
+                        {
+                          key: opt.id,
+                          type: "button",
+                          className: "nm-mode-btn",
+                          "data-active": row.accessMode === opt.id ? opt.id : void 0,
+                          onClick: () => onSetModelAccessMode(row.model, opt.id),
+                          title: opt.id === "auto" ? "Liberado para pool automático dos agentes" : opt.id === "vip" ? "Reservado apenas para Iris e Conselho" : "Bloqueado para roteamento automático"
+                        },
+                        opt.label
+                      )
+                    )
+                  ) : h(
                     "button",
                     {
                       onClick: () => toggleAutoAssignBlock(row.model),
-                      title: row.autoAssignBlocked ? "Bloqueado para designação automática (clique para liberar)" : "Permitido para designação automática (clique para restringir a uso manual)",
-                      style: {
-                        padding: "3px 8px",
-                        borderRadius: "5px",
-                        border: `1px solid ${row.autoAssignBlocked ? "var(--amber-7, #714f19)" : "var(--border-primary, #333333)"}`,
-                        backgroundColor: row.autoAssignBlocked ? "var(--amber-3, #302008)" : "transparent",
-                        color: row.autoAssignBlocked ? "var(--amber-11, #ffca16)" : "var(--text-secondary, #c7c7c7)",
-                        fontSize: "11px",
-                        fontWeight: "500",
-                        cursor: "pointer"
-                      }
+                      className: "nm-btn",
+                      style: { padding: "3px 8px", fontSize: "11px" }
                     },
-                    row.autoAssignBlocked ? "Manual (Bloq.)" : "Auto ✓"
+                    row.autoAssignBlocked ? "Bloq." : "Auto"
                   )
                 ),
-                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, `${row.score}`),
-                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", fontSize: "11px", color: healthColor } }, healthLabel),
+                h(
+                  "td",
+                  { style: { padding: "8px 12px", fontFamily: "monospace", fontWeight: "600", color: "var(--nm-fg)" } },
+                  `${row.score}`,
+                  row.toolCallOk !== null && h(
+                    "span",
+                    {
+                      className: "nm-pill",
+                      "data-tone": row.toolCallOk ? "ok" : "danger",
+                      style: { marginLeft: "6px", fontSize: "9.5px", padding: "1px 5px" },
+                      title: row.toolCallOk ? "Tool-Calling validado" : "Falha no Tool-Calling"
+                    },
+                    row.toolCallOk ? "TC" : "TC!"
+                  )
+                ),
+                h(
+                  "td",
+                  { style: { padding: "8px 12px", fontFamily: "monospace", fontSize: "11px", color: row.quarantined ? "var(--nm-danger)" : healthColor } },
+                  row.quarantined ? "Quarentena" : healthLabel
+                ),
                 h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-secondary, #c7c7c7)" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
                 h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs)),
                 h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd)),
@@ -1696,7 +1970,10 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
     models,
     disabledModels,
     modelTests,
-    onNotify
+    onNotify,
+    vipPolicy,
+    onToggleVipAgent,
+    onFailoverAgent
   }) {
     const [agents, setAgents] = React.useState(() => readBuzzAgents(ctx));
     const [search, setSearch] = React.useState("");
@@ -2021,8 +2298,13 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
                     h(
                       "div",
                       null,
-                      h("div", { style: { fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, agent.name),
-                      h("div", { style: { fontSize: "10px", color: "var(--text-tertiary, #808080)", fontFamily: "monospace" } }, agent.harness)
+                      h(
+                        "div",
+                        { style: { display: "flex", alignItems: "center", gap: "6px" } },
+                        h("span", { style: { fontWeight: "600", color: "var(--nm-fg)" } }, agent.name),
+                        vipPolicy && isVipAgent(agent.name, vipPolicy) && h("span", { className: "nm-pill", "data-tone": "warn", style: { fontSize: "9.5px", padding: "1px 5px" } }, "VIP")
+                      ),
+                      h("div", { style: { fontSize: "10px", color: "var(--nm-muted)", fontFamily: "monospace" } }, agent.harness)
                     )
                   )
                 ),
@@ -2127,7 +2409,39 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
                       },
                       isSaving ? "..." : "Salvar"
                     ),
-                    bestModelInfo && agent.model !== bestModelInfo.model && h(
+                    onToggleVipAgent && vipPolicy && h(
+                      "button",
+                      {
+                        type: "button",
+                        className: "nm-btn",
+                        "data-variant": isVipAgent(agent.name, vipPolicy) ? "soft" : void 0,
+                        onClick: () => onToggleVipAgent(agent.name),
+                        title: isVipAgent(agent.name, vipPolicy) ? "Agente VIP protegido contra troca automática (clique para liberar)" : "Proteger como agente VIP (Iris/Conselho)",
+                        style: { padding: "4px 8px", fontSize: "10.5px" }
+                      },
+                      isVipAgent(agent.name, vipPolicy) ? "VIP ✓" : "VIP"
+                    ),
+                    onFailoverAgent && h(
+                      "button",
+                      {
+                        type: "button",
+                        className: "nm-btn",
+                        onClick: async () => {
+                          setSavingKey(agent.key);
+                          try {
+                            await onFailoverAgent(agent.key);
+                            refreshAgents();
+                          } finally {
+                            setSavingKey(null);
+                          }
+                        },
+                        disabled: isSaving,
+                        title: "Executar failover inteligente respeitando isolamento VIP",
+                        style: { padding: "4px 8px", fontSize: "10.5px" }
+                      },
+                      "Failover"
+                    ),
+                    bestModelInfo && !(vipPolicy && isVipAgent(agent.name, vipPolicy)) && agent.model !== bestModelInfo.model && h(
                       "button",
                       {
                         type: "button",
@@ -2144,6 +2458,1214 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
                 )
               );
             })
+          )
+        )
+      )
+    );
+  };
+}
+const LOCAL_STORAGE_QUALITY_BENCH_KEY = "nexusmind_quality_bench_v1";
+const SHARED_QUALITY_BENCH_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-quality-bench.json";
+function classifyGatewayError(errorText, httpStatus) {
+  const txt = String(errorText || "").toLowerCase();
+  if (txt.includes("weekly limit") || txt.includes("limit") && txt.includes("resets")) {
+    return "weekly_limit";
+  }
+  if (txt.includes("malformed_function_call") || txt.includes("malformed function") || txt.includes("invalid tool") || txt.includes("tool_use") && txt.includes("invalid")) {
+    return "malformed_tool";
+  }
+  if (txt.includes("stream ended") || txt.includes("upstream response stream") || txt.includes("unexpected eof") || txt.includes("premature close")) {
+    return "stream_cut";
+  }
+  if (httpStatus === 404 || txt.includes("resource not found") || txt.includes("(404)") || txt.includes("model not found")) {
+    return "not_found";
+  }
+  if (httpStatus === 429 || txt.includes("429") || txt.includes("rate limit") || txt.includes("too many requests") || txt.includes("quota")) {
+    return "rate_limit";
+  }
+  if (httpStatus === 401 || httpStatus === 403 || txt.includes("unauthorized") || txt.includes("invalid api key") || txt.includes("forbidden")) {
+    return "auth_error";
+  }
+  if (txt.includes("timeout") || txt.includes("timed out") || txt.includes("aborted") || txt.includes("etimedout")) {
+    return "timeout";
+  }
+  if (typeof httpStatus === "number" && httpStatus >= 500 || /\b50[0234]\b/.test(txt) || txt.includes("server error") || txt.includes("bad gateway")) {
+    return "server_error";
+  }
+  return "unknown";
+}
+function loadSavedQualityBench() {
+  var _a, _b;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_QUALITY_BENCH_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+async function saveQualityBench(ctx, results) {
+  var _a, _b;
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_QUALITY_BENCH_KEY, JSON.stringify(results));
+  } catch {
+  }
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.writeFile) === "function") {
+    try {
+      await host.writeFile(
+        SHARED_QUALITY_BENCH_PATH,
+        JSON.stringify(
+          {
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            count: Object.keys(results).length,
+            results
+          },
+          null,
+          2
+        )
+      );
+    } catch {
+    }
+  }
+}
+async function runModelQualityProbe(ctx, modelId, group) {
+  var _a, _b;
+  const testedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.request) !== "function") {
+    return {
+      model: modelId,
+      group: group.id,
+      testedAt,
+      online: false,
+      toolCallOk: false,
+      streamOk: false,
+      latencyMs: null,
+      qualityScore: 0,
+      errorKind: "unknown",
+      errorMsg: "ctx.host.request indisponível"
+    };
+  }
+  const isAnthropic = group.id === "nexusmind_anthropic";
+  const url = isAnthropic ? "https://api.nexusmind.digital/v1/messages" : "https://api.nexusmind.digital/v1/chat/completions";
+  const headers = isAnthropic ? {
+    "x-api-key": group.defaultKey,
+    Authorization: `Bearer ${group.defaultKey}`,
+    "anthropic-version": "2023-06-01",
+    "Content-Type": "application/json",
+    "User-Agent": "BuzzDesktop/NexusMindQualityBench"
+  } : {
+    Authorization: `Bearer ${group.defaultKey}`,
+    "Content-Type": "application/json",
+    "User-Agent": "BuzzDesktop/NexusMindQualityBench"
+  };
+  const body = isAnthropic ? {
+    model: modelId,
+    max_tokens: 120,
+    messages: [
+      {
+        role: "user",
+        content: 'Chame a ferramenta check_status com {"service":"orgfy"} agora.'
+      }
+    ],
+    tools: [
+      {
+        name: "check_status",
+        description: "Verifica o status de um serviço da fábrica",
+        input_schema: {
+          type: "object",
+          properties: { service: { type: "string" } },
+          required: ["service"]
+        }
+      }
+    ]
+  } : {
+    model: modelId,
+    max_tokens: 120,
+    temperature: 0,
+    messages: [
+      {
+        role: "user",
+        content: 'Chame a ferramenta check_status com {"service":"orgfy"} agora.'
+      }
+    ],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "check_status",
+          description: "Verifica o status de um serviço da fábrica",
+          parameters: {
+            type: "object",
+            properties: { service: { type: "string" } },
+            required: ["service"]
+          }
+        }
+      }
+    ],
+    tool_choice: "auto"
+  };
+  const t0 = Date.now();
+  try {
+    const res = await host.request({
+      url,
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      timeoutMs: 14e3
+    });
+    const latencyMs = Date.now() - t0;
+    const rawBody = String((res == null ? void 0 : res.body) || "");
+    if (!res || res.status < 200 || res.status >= 300) {
+      const errKind = classifyGatewayError(rawBody, res == null ? void 0 : res.status);
+      return {
+        model: modelId,
+        group: group.id,
+        testedAt,
+        online: false,
+        toolCallOk: false,
+        streamOk: false,
+        latencyMs,
+        qualityScore: 0,
+        errorKind: errKind,
+        errorMsg: `HTTP ${(res == null ? void 0 : res.status) ?? "err"} · ${rawBody.slice(0, 120)}`
+      };
+    }
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      return {
+        model: modelId,
+        group: group.id,
+        testedAt,
+        online: false,
+        toolCallOk: false,
+        streamOk: false,
+        latencyMs,
+        qualityScore: 0,
+        errorKind: "stream_cut",
+        errorMsg: "Resposta JSON truncada/inválida"
+      };
+    }
+    if (parsed == null ? void 0 : parsed.error) {
+      const errText = typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error);
+      const errKind = classifyGatewayError(errText, res.status);
+      return {
+        model: modelId,
+        group: group.id,
+        testedAt,
+        online: false,
+        toolCallOk: false,
+        streamOk: false,
+        latencyMs,
+        qualityScore: 0,
+        errorKind: errKind,
+        errorMsg: errText.slice(0, 140)
+      };
+    }
+    let toolCallOk = false;
+    let streamOk = false;
+    if (isAnthropic) {
+      const blocks = Array.isArray(parsed == null ? void 0 : parsed.content) ? parsed.content : [];
+      const toolUse = blocks.find((b) => (b == null ? void 0 : b.type) === "tool_use" && (b == null ? void 0 : b.name) === "check_status");
+      if (toolUse && toolUse.input && typeof toolUse.input === "object") {
+        toolCallOk = true;
+        streamOk = true;
+      } else if (blocks.some((b) => (b == null ? void 0 : b.type) === "text" && String((b == null ? void 0 : b.text) || "").trim().length > 0)) {
+        streamOk = true;
+      }
+    } else {
+      const msg = (_b = (_a = parsed == null ? void 0 : parsed.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message;
+      const toolCalls = Array.isArray(msg == null ? void 0 : msg.tool_calls) ? msg.tool_calls : [];
+      const tc = toolCalls.find((c) => {
+        var _a2;
+        return ((_a2 = c == null ? void 0 : c.function) == null ? void 0 : _a2.name) === "check_status";
+      });
+      if (tc) {
+        try {
+          const args = typeof tc.function.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function.arguments;
+          if (args && typeof args === "object") {
+            toolCallOk = true;
+            streamOk = true;
+          }
+        } catch {
+          toolCallOk = false;
+          streamOk = true;
+        }
+      } else if (typeof (msg == null ? void 0 : msg.content) === "string" && msg.content.trim().length > 0) {
+        streamOk = true;
+      }
+    }
+    const speedPts = Math.max(0, Math.min(25, Math.round(25 - latencyMs / 1e3 * 2.5)));
+    const qualityScore = (toolCallOk ? 45 : 0) + (streamOk ? 30 : 0) + speedPts;
+    return {
+      model: modelId,
+      group: group.id,
+      testedAt,
+      online: true,
+      toolCallOk,
+      streamOk,
+      latencyMs,
+      qualityScore,
+      errorKind: "ok",
+      ...toolCallOk ? {} : { errorMsg: "Respondeu texto mas não executou tool_call estruturado" }
+    };
+  } catch (err) {
+    const latencyMs = Date.now() - t0;
+    const msg = String((err == null ? void 0 : err.message) || err);
+    return {
+      model: modelId,
+      group: group.id,
+      testedAt,
+      online: false,
+      toolCallOk: false,
+      streamOk: false,
+      latencyMs,
+      qualityScore: 0,
+      errorKind: classifyGatewayError(msg),
+      errorMsg: msg.slice(0, 140)
+    };
+  }
+}
+async function runBatchQualityBench(ctx, candidates, onProgress) {
+  const existing = loadSavedQualityBench();
+  const next = { ...existing };
+  const total = candidates.length;
+  let done = 0;
+  const queue = [...candidates];
+  const worker = async () => {
+    while (queue.length > 0) {
+      const item = queue.shift();
+      if (!item) break;
+      const res = await runModelQualityProbe(ctx, item.model, item.group);
+      next[item.model] = res;
+      done += 1;
+      try {
+        onProgress == null ? void 0 : onProgress(done, total, res);
+      } catch {
+      }
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  await saveQualityBench(ctx, next);
+  return next;
+}
+const DEFAULT_AUTOPILOT_CONFIG = {
+  enabled: true,
+  wakeOnFailover: true,
+  notifyOnFailover: true,
+  benchIntervalMin: 30,
+  pollIntervalSec: 12
+};
+const QUARANTINE_TTL_MS = {
+  ok: 0,
+  weekly_limit: 60 * 60 * 1e3,
+  not_found: 120 * 60 * 1e3,
+  auth_error: 120 * 60 * 1e3,
+  malformed_tool: 30 * 60 * 1e3,
+  stream_cut: 10 * 60 * 1e3,
+  rate_limit: 10 * 60 * 1e3,
+  server_error: 10 * 60 * 1e3,
+  timeout: 5 * 60 * 1e3,
+  unknown: 10 * 60 * 1e3
+};
+const LOCAL_STORAGE_QUARANTINE_KEY = "nexusmind_quarantine_v1";
+const LOCAL_STORAGE_FAILOVER_LOG_KEY = "nexusmind_failover_log_v1";
+const LOCAL_STORAGE_AUTOPILOT_KEY = "nexusmind_autopilot_cfg_v1";
+const SHARED_FAILOVER_LOG_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-failover-log.json";
+function loadAutopilotConfig() {
+  var _a, _b;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_AUTOPILOT_KEY);
+    if (!raw) return { ...DEFAULT_AUTOPILOT_CONFIG };
+    const p = JSON.parse(raw);
+    return {
+      enabled: (p == null ? void 0 : p.enabled) !== false,
+      wakeOnFailover: (p == null ? void 0 : p.wakeOnFailover) !== false,
+      notifyOnFailover: (p == null ? void 0 : p.notifyOnFailover) !== false,
+      benchIntervalMin: Math.max(5, Math.min(240, Number((p == null ? void 0 : p.benchIntervalMin) || 30))),
+      pollIntervalSec: Math.max(5, Math.min(120, Number((p == null ? void 0 : p.pollIntervalSec) || 12)))
+    };
+  } catch {
+    return { ...DEFAULT_AUTOPILOT_CONFIG };
+  }
+}
+function saveAutopilotConfig(cfg) {
+  var _a, _b;
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_AUTOPILOT_KEY, JSON.stringify(cfg));
+  } catch {
+  }
+}
+function loadQuarantines(nowMs = Date.now()) {
+  var _a, _b;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_QUARANTINE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const active = {};
+    for (const [model, entry] of Object.entries(parsed)) {
+      const exp = Date.parse((entry == null ? void 0 : entry.expiresAt) || "");
+      if (Number.isFinite(exp) && exp > nowMs) {
+        active[model] = entry;
+      }
+    }
+    return active;
+  } catch {
+    return {};
+  }
+}
+function saveQuarantines(map) {
+  var _a, _b;
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_QUARANTINE_KEY, JSON.stringify(map));
+  } catch {
+  }
+}
+function quarantineModel(model, group, errorText, httpStatus, agentName, nowMs = Date.now()) {
+  const errorKind = classifyGatewayError(errorText, httpStatus);
+  const ttl = QUARANTINE_TTL_MS[errorKind] || QUARANTINE_TTL_MS.unknown;
+  const current = loadQuarantines(nowMs);
+  const prev = current[model];
+  const entry = {
+    model,
+    group,
+    reason: String(errorText || errorKind).slice(0, 180),
+    errorKind,
+    quarantinedAt: new Date(nowMs).toISOString(),
+    expiresAt: new Date(nowMs + ttl).toISOString(),
+    hitCount: ((prev == null ? void 0 : prev.hitCount) || 0) + 1,
+    lastAgent: agentName || (prev == null ? void 0 : prev.lastAgent)
+  };
+  current[model] = entry;
+  saveQuarantines(current);
+  return entry;
+}
+function releaseQuarantine(model) {
+  if (!model) {
+    saveQuarantines({});
+    return {};
+  }
+  const current = loadQuarantines();
+  delete current[model];
+  saveQuarantines(current);
+  return current;
+}
+function loadFailoverLog() {
+  var _a, _b;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_FAILOVER_LOG_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+async function appendFailoverLog(ctx, evt) {
+  var _a, _b;
+  const prev = loadFailoverLog();
+  const next = [evt, ...prev].slice(0, 60);
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_FAILOVER_LOG_KEY, JSON.stringify(next));
+  } catch {
+  }
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.writeFile) === "function") {
+    try {
+      await host.writeFile(
+        SHARED_FAILOVER_LOG_PATH,
+        JSON.stringify({ updatedAt: (/* @__PURE__ */ new Date()).toISOString(), events: next }, null, 2)
+      );
+    } catch {
+    }
+  }
+  return next;
+}
+function pickFailoverCandidate(input) {
+  var _a, _b;
+  const vipPolicy = input.vipPolicy || loadVipPolicy();
+  const qualityBench = input.qualityBench || loadSavedQualityBench();
+  const quarantines = input.quarantines || loadQuarantines();
+  const disabledModels = input.disabledModels || [];
+  const vip = isVipAgent(input.agentName, vipPolicy);
+  const currentLower = String(input.currentModel || "").trim().toLowerCase();
+  const isQuarantined = (m) => Boolean(quarantines[m]);
+  const isBrokenInBench = (m) => {
+    const q = qualityBench[m];
+    return Boolean(q && !q.online);
+  };
+  if (vip) {
+    const vipPool = Array.from(
+      /* @__PURE__ */ new Set([...vipPolicy.vipFallbackChain || [], ...vipPolicy.vipModels || []])
+    );
+    const viableVip = vipPool.filter((m) => {
+      if (!m || isUnsupportedAgentModel(m)) return false;
+      if (m.toLowerCase() === currentLower) return false;
+      const grp = inferCanonicalGroupForModel(m, input.groups);
+      const mode = getModelAccessMode(m, grp == null ? void 0 : grp.id, vipPolicy, disabledModels);
+      if (mode === "blocked") return false;
+      if (isQuarantined(m) || isBrokenInBench(m)) return false;
+      return true;
+    });
+    if (viableVip.length > 0) {
+      viableVip.sort((a, b) => {
+        const qa = qualityBench[a];
+        const qb = qualityBench[b];
+        const sa = ((qa == null ? void 0 : qa.toolCallOk) ? 50 : 0) + ((qa == null ? void 0 : qa.qualityScore) ?? 0);
+        const sb = ((qb == null ? void 0 : qb.toolCallOk) ? 50 : 0) + ((qb == null ? void 0 : qb.qualityScore) ?? 0);
+        return sb - sa;
+      });
+      const chosen = viableVip[0];
+      const grp = inferCanonicalGroupForModel(chosen, input.groups);
+      return {
+        ok: true,
+        isVip: true,
+        model: chosen,
+        group: (grp == null ? void 0 : grp.id) || "nexusmind_anthropic",
+        score: ((_a = qualityBench[chosen]) == null ? void 0 : _a.qualityScore) ?? 95,
+        reason: `Failover VIP seguro para ${input.agentName}: ${chosen} (${(grp == null ? void 0 : grp.id) || "vip"}).`
+      };
+    }
+    return {
+      ok: false,
+      isVip: true,
+      model: null,
+      group: null,
+      score: null,
+      reason: `Nenhum modelo VIP saudável disponível para ${input.agentName} (proteção anti-downgrade ativa).`
+    };
+  }
+  const candidates = [];
+  const seen = /* @__PURE__ */ new Set();
+  const pushCandidate = (modelId, groupId, baseScore) => {
+    var _a2;
+    const clean = String(modelId || "").trim();
+    if (!clean || seen.has(clean.toLowerCase()) || clean.toLowerCase() === currentLower) return;
+    if (isUnsupportedAgentModel(clean)) return;
+    seen.add(clean.toLowerCase());
+    const resolvedGroup = groupId || ((_a2 = inferCanonicalGroupForModel(clean, input.groups)) == null ? void 0 : _a2.id) || "nexusmind_openai";
+    const mode = getModelAccessMode(clean, resolvedGroup, vipPolicy, disabledModels);
+    if (mode !== "auto") return;
+    if (isQuarantined(clean) || isBrokenInBench(clean)) return;
+    const q = qualityBench[clean];
+    const toolBonus = (q == null ? void 0 : q.toolCallOk) === true ? 30 : (q == null ? void 0 : q.toolCallOk) === false ? -25 : 0;
+    const qualityBlend = q ? q.qualityScore * 0.6 + baseScore * 0.4 : baseScore;
+    candidates.push({
+      model: clean,
+      group: resolvedGroup,
+      score: Number((qualityBlend + toolBonus).toFixed(1)),
+      toolCallOk: q ? q.toolCallOk : null
+    });
+  };
+  for (const row of ((_b = input.rankingSnapshot) == null ? void 0 : _b.models) || []) {
+    if (row.isDisabled || row.online === false) continue;
+    pushCandidate(row.model, row.group, row.score);
+  }
+  for (const grp of Object.values(input.groups)) {
+    if (grp == null ? void 0 : grp.defaultModel) {
+      pushCandidate(grp.defaultModel, grp.id, 65);
+    }
+  }
+  candidates.sort((a, b) => {
+    if (a.toolCallOk === true !== (b.toolCallOk === true)) return a.toolCallOk === true ? -1 : 1;
+    return b.score - a.score;
+  });
+  const winner = candidates[0];
+  if (!winner) {
+    return {
+      ok: false,
+      isVip: false,
+      model: null,
+      group: null,
+      score: null,
+      reason: `Nenhum modelo econômico ('auto') saudável e fora de quarentena disponível para ${input.agentName}.`
+    };
+  }
+  return {
+    ok: true,
+    isVip: false,
+    model: winner.model,
+    group: winner.group,
+    score: winner.score,
+    reason: `Failover inteligente para ${input.agentName}: ${winner.model} (${winner.group}, score ${winner.score}).`
+  };
+}
+async function executeAgentFailover(ctx, groups, params) {
+  var _a, _b, _c, _d, _e;
+  const agentsApi = ctx == null ? void 0 : ctx.agents;
+  const snap = ((_a = agentsApi == null ? void 0 : agentsApi.snapshot) == null ? void 0 : _a.call(agentsApi)) || {};
+  const allAgents = [...snap.running || [], ...snap.agents || []];
+  const q = String(params.agentKeyOrName || "").trim().toLowerCase();
+  const target = allAgents.find(
+    (a) => String((a == null ? void 0 : a.key) || "").toLowerCase() === q || String((a == null ? void 0 : a.name) || "").toLowerCase() === q || String((a == null ? void 0 : a.name) || "").toLowerCase().includes(q)
+  );
+  const agentName = (target == null ? void 0 : target.name) || params.agentKeyOrName;
+  const agentKey = (target == null ? void 0 : target.key) || params.agentKeyOrName;
+  const fromModel = ((_b = target == null ? void 0 : target.config) == null ? void 0 : _b.model) || null;
+  const fromGroup = ((_c = target == null ? void 0 : target.config) == null ? void 0 : _c.provider) || ((_d = inferCanonicalGroupForModel(fromModel || "", groups)) == null ? void 0 : _d.id) || "nexusmind_openai";
+  const vipPolicy = params.vipPolicy || loadVipPolicy();
+  const vip = isVipAgent(agentName, vipPolicy);
+  const errorKind = params.errorText ? classifyGatewayError(params.errorText, params.httpStatus) : "unknown";
+  if (fromModel && params.errorText) {
+    quarantineModel(fromModel, fromGroup, params.errorText, params.httpStatus, agentName);
+  }
+  const pick = pickFailoverCandidate({
+    agentName,
+    currentModel: fromModel,
+    rankingSnapshot: params.rankingSnapshot,
+    vipPolicy,
+    qualityBench: params.qualityBench,
+    disabledModels: params.disabledModels,
+    groups
+  });
+  let applied = false;
+  let wokeAgent = false;
+  let note = pick.reason;
+  if (pick.ok && pick.model && target && typeof (agentsApi == null ? void 0 : agentsApi.save) === "function") {
+    try {
+      const nextCfg = {
+        ...target.config && typeof target.config === "object" ? target.config : {},
+        model: pick.model,
+        provider: pick.group || "nexusmind_openai"
+      };
+      await agentsApi.save(target.key, { config: nextCfg });
+      applied = true;
+      if (params.wakeAfter && typeof (agentsApi == null ? void 0 : agentsApi.wake) === "function") {
+        try {
+          await agentsApi.wake(target.key);
+          wokeAgent = true;
+        } catch {
+        }
+      }
+      if (params.notify && typeof ((_e = ctx == null ? void 0 : ctx.notifications) == null ? void 0 : _e.send) === "function") {
+        try {
+          ctx.notifications.send({
+            title: vip ? `Failover VIP · ${agentName}` : `Failover Automático · ${agentName}`,
+            body: `${fromModel || "anterior"} → ${pick.model} (${errorKind})`
+          });
+        } catch {
+        }
+      }
+    } catch (err) {
+      note = `Falha ao salvar agente: ${(err == null ? void 0 : err.message) || err}`;
+    }
+  } else if (!target) {
+    note = `Agente '${params.agentKeyOrName}' não encontrado no Buzz.`;
+  }
+  const evt = {
+    id: `fo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    agentKey,
+    agentName,
+    isVip: vip,
+    fromModel,
+    toModel: pick.model,
+    toGroup: pick.group,
+    reason: params.errorText || "Failover acionado manualmente",
+    errorKind,
+    trigger: params.trigger,
+    applied,
+    wokeAgent,
+    note
+  };
+  await appendFailoverLog(ctx, evt);
+  try {
+    const win = globalThis;
+    if (typeof (win == null ? void 0 : win.dispatchEvent) === "function" && typeof (win == null ? void 0 : win.CustomEvent) === "function") {
+      win.dispatchEvent(new win.CustomEvent("nexusmind.failover.completed", { detail: evt }));
+    }
+  } catch {
+  }
+  return evt;
+}
+function scanLiveAgentErrors(ctx) {
+  var _a, _b, _c, _d, _e;
+  const out = [];
+  const relaySnap = (_b = (_a = ctx == null ? void 0 : ctx.relay) == null ? void 0 : _a.snapshot) == null ? void 0 : _b.call(_a);
+  const activityMap = (_c = relaySnap == null ? void 0 : relaySnap.session) == null ? void 0 : _c.agentActivity;
+  if (!activityMap || typeof activityMap !== "object") return out;
+  const agentsSnap = ((_e = (_d = ctx == null ? void 0 : ctx.agents) == null ? void 0 : _d.snapshot) == null ? void 0 : _e.call(_d)) || {};
+  const allAgents = [...agentsSnap.running || [], ...agentsSnap.agents || []];
+  const byPubkey = /* @__PURE__ */ new Map();
+  for (const a of allAgents) {
+    if (a == null ? void 0 : a.pubkey) byPubkey.set(String(a.pubkey).toLowerCase(), a);
+    if (a == null ? void 0 : a.key) byPubkey.set(String(a.key).toLowerCase(), a);
+  }
+  const entries = activityMap instanceof Map ? Array.from(activityMap.entries()) : Object.entries(activityMap);
+  for (const [key, val] of entries) {
+    const items = Array.isArray(val) ? val : val && typeof val === "object" ? [val] : [];
+    for (const item of items) {
+      const errText = String((item == null ? void 0 : item.error) || (item == null ? void 0 : item.statusText) || (item == null ? void 0 : item.message) || "");
+      const isErr = (item == null ? void 0 : item.status) === "error" || /ran into this error|weekly limit|malformed_function_call|stream ended|resource not found \(404\)|http 429|50[234]/i.test(errText);
+      if (!isErr || !errText) continue;
+      const kind = classifyGatewayError(errText);
+      if (kind === "ok" || kind === "unknown") continue;
+      const pub = String((item == null ? void 0 : item.agentPubkey) || (item == null ? void 0 : item.pubkey) || key || "").toLowerCase();
+      const agent = byPubkey.get(pub);
+      const agentKey = (agent == null ? void 0 : agent.key) || key;
+      const agentName = (agent == null ? void 0 : agent.name) || (item == null ? void 0 : item.agentName) || key;
+      const turnId = String((item == null ? void 0 : item.turnId) || (item == null ? void 0 : item.id) || (item == null ? void 0 : item.updatedAt) || "");
+      const signature = `${agentKey}:${kind}:${turnId || errText.slice(0, 48)}`;
+      out.push({
+        agentKey,
+        agentName,
+        errorText: errText.slice(0, 220),
+        errorKind: kind,
+        signature
+      });
+    }
+  }
+  return out;
+}
+function fmtRemaining(expiresAt) {
+  const diff = Date.parse(expiresAt) - Date.now();
+  if (!Number.isFinite(diff) || diff <= 0) return "expirando";
+  const mins = Math.ceil(diff / 6e4);
+  if (mins >= 60) return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  return `${mins}m`;
+}
+function fmtTime(iso) {
+  try {
+    return new Date(iso).toLocaleTimeString("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  } catch {
+    return iso;
+  }
+}
+function createAutopilotFailoverTabComponent(ctx, groups) {
+  const React = ctx.react;
+  const h = React.createElement;
+  return function AutopilotFailoverTab({
+    models,
+    disabledModels,
+    vipPolicy,
+    onUpdateVipPolicy,
+    autopilotCfg,
+    onUpdateAutopilotCfg,
+    quarantines,
+    onRefreshQuarantines,
+    qualityBench,
+    onUpdateQualityBench,
+    failoverLog,
+    onRefreshFailoverLog,
+    rankingSnapshot,
+    onNotify
+  }) {
+    const [benchRunning, setBenchRunning] = React.useState(false);
+    const [benchProgress, setBenchProgress] = React.useState("");
+    const [failoverBusyAgent, setFailoverBusyAgent] = React.useState(null);
+    const [vipChainInput, setVipChainInput] = React.useState(
+      () => (vipPolicy.vipFallbackChain || []).join(", ")
+    );
+    React.useEffect(() => {
+      setVipChainInput((vipPolicy.vipFallbackChain || []).join(", "));
+    }, [vipPolicy.vipFallbackChain]);
+    const buzzAgents = React.useMemo(() => {
+      var _a, _b;
+      try {
+        const snap = ((_b = (_a = ctx == null ? void 0 : ctx.agents) == null ? void 0 : _a.snapshot) == null ? void 0 : _b.call(_a)) || {};
+        const seen = /* @__PURE__ */ new Set();
+        const list = [];
+        for (const pool of [snap.running, snap.agents]) {
+          if (!Array.isArray(pool)) continue;
+          for (const a of pool) {
+            if (!(a == null ? void 0 : a.key) || seen.has(a.key)) continue;
+            seen.add(a.key);
+            list.push(a);
+          }
+        }
+        return list.sort((a, b) => String(a.name || a.key).localeCompare(String(b.name || b.key)));
+      } catch {
+        return [];
+      }
+    }, [failoverLog.length, failoverBusyAgent]);
+    const vipAgents = buzzAgents.filter((a) => isVipAgent(a.name || a.key, vipPolicy));
+    const workerAgents = buzzAgents.filter((a) => !isVipAgent(a.name || a.key, vipPolicy));
+    const quarantineList = Object.values(quarantines || {});
+    const benchList = Object.values(qualityBench || {}).sort((a, b) => b.qualityScore - a.qualityScore);
+    const toolOkCount = benchList.filter((b) => b.toolCallOk).length;
+    const handleRunQualityBench = async (scope) => {
+      setBenchRunning(true);
+      try {
+        let targetModels = [];
+        if (scope === "vip_chain") {
+          targetModels = Array.from(
+            /* @__PURE__ */ new Set([...vipPolicy.vipFallbackChain || [], ...vipPolicy.vipModels || []])
+          ).slice(0, 6);
+        } else {
+          const fromRank = ((rankingSnapshot == null ? void 0 : rankingSnapshot.models) || []).filter((r) => r.accessMode === "auto" && !r.isDisabled).slice(0, 8).map((r) => r.model);
+          targetModels = fromRank.length > 0 ? fromRank : Object.values(groups).filter((g) => g.id !== "nexusmind_anthropic").map((g) => g.defaultModel);
+        }
+        if (targetModels.length === 0) {
+          onNotify({ type: "info", text: "Nenhum modelo elegível encontrado para benchmark." });
+          return;
+        }
+        const candidates = targetModels.map((m) => ({
+          model: m,
+          group: inferCanonicalGroupForModel(m, groups)
+        }));
+        setBenchProgress(`Testando 0/${candidates.length} (Tool-Calling + Stream)...`);
+        const updated = await runBatchQualityBench(ctx, candidates, (done, total, latest) => {
+          setBenchProgress(
+            `${done}/${total} · ${latest.model} (${latest.online ? `Score ${latest.qualityScore}` : latest.errorKind})`
+          );
+        });
+        onUpdateQualityBench(updated);
+        onNotify({
+          type: "success",
+          text: `Benchmark de qualidade concluído (${candidates.length} modelos testados).`
+        });
+      } finally {
+        setBenchRunning(false);
+        setBenchProgress("");
+      }
+    };
+    const handleManualFailover = async (agent) => {
+      setFailoverBusyAgent(agent.key);
+      try {
+        const evt = await executeAgentFailover(ctx, groups, {
+          agentKeyOrName: agent.key,
+          errorText: "Failover manual acionado no Cockpit NexusMind",
+          trigger: "manual",
+          rankingSnapshot,
+          vipPolicy,
+          qualityBench,
+          disabledModels,
+          wakeAfter: autopilotCfg.wakeOnFailover,
+          notify: autopilotCfg.notifyOnFailover
+        });
+        onRefreshQuarantines();
+        onRefreshFailoverLog();
+        onNotify({
+          type: evt.applied ? "success" : "error",
+          text: evt.applied ? `${evt.agentName}: ${evt.fromModel || "anterior"} → ${evt.toModel}` : evt.note || `Não foi possível trocar ${evt.agentName}.`
+        });
+      } finally {
+        setFailoverBusyAgent(null);
+      }
+    };
+    const handleSaveVipChain = () => {
+      const nextChain = vipChainInput.split(/[,\n]+/).map((s) => s.trim()).filter(Boolean);
+      onUpdateVipPolicy({
+        ...vipPolicy,
+        vipFallbackChain: nextChain.length > 0 ? nextChain : vipPolicy.vipFallbackChain
+      });
+      onNotify({ type: "success", text: `Cadeia VIP salva (${nextChain.length} modelos).` });
+    };
+    const handleQuickProtectVips = () => {
+      const next = applyQuickVipPreset(vipPolicy, models);
+      onUpdateVipPolicy(next);
+      onNotify({
+        type: "success",
+        text: "Escudo VIP aplicado: Anthropic + GPT-6.1 Terra + modelos frontier travados para Iris e Conselho."
+      });
+    };
+    return h(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: "14px" } },
+      // 1. KPI Strip do Autopiloto
+      h(
+        "div",
+        { className: "nm-kpi-grid" },
+        h(
+          "div",
+          { className: "nm-kpi-card" },
+          h(
+            "div",
+            { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+            h("span", { className: "nm-kpi-label" }, "AUTOPILOTO FAILOVER"),
+            h(
+              "span",
+              { className: "nm-pill", "data-tone": autopilotCfg.enabled ? "ok" : "warn" },
+              autopilotCfg.enabled ? "ATIVO" : "PAUSADO"
+            )
+          ),
+          h("div", { className: "nm-kpi-val" }, autopilotCfg.enabled ? "Vigilância 24/7" : "Manual"),
+          h(
+            "div",
+            { style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `Poll ${autopilotCfg.pollIntervalSec}s · ${failoverLog.length} eventos registrados`
+          )
+        ),
+        h(
+          "div",
+          { className: "nm-kpi-card" },
+          h("span", { className: "nm-kpi-label" }, "ESCUDO VIP (IRIS & CONSELHO)"),
+          h("div", { className: "nm-kpi-val" }, `${vipAgents.length} VIP · ${workerAgents.length} Pool`),
+          h(
+            "div",
+            { style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `${vipPolicy.vipModels.length} modelos VIP · ${vipPolicy.blockedModels.length} bloqueados`
+          )
+        ),
+        h(
+          "div",
+          { className: "nm-kpi-card" },
+          h("span", { className: "nm-kpi-label" }, "CIRCUIT BREAKER (QUARENTENA)"),
+          h(
+            "div",
+            { className: "nm-kpi-val", style: { color: quarantineList.length > 0 ? "var(--nm-danger)" : "var(--nm-ok)" } },
+            `${quarantineList.length} isolado${quarantineList.length === 1 ? "" : "s"}`
+          ),
+          h(
+            "div",
+            { style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            quarantineList.length > 0 ? "Auto-expira após TTL de cooldown" : "Nenhum modelo em quarentena"
+          )
+        ),
+        h(
+          "div",
+          { className: "nm-kpi-card" },
+          h("span", { className: "nm-kpi-label" }, "BENCHMARK TOOL-CALLING"),
+          h("div", { className: "nm-kpi-val" }, benchList.length > 0 ? `${toolOkCount}/${benchList.length} OK` : "Não rodado"),
+          h(
+            "div",
+            { style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            benchProgress || "Valida tool_calls + stream + latência"
+          )
+        )
+      ),
+      // 2. Controles do Autopiloto + Ações Rápidas
+      h(
+        "div",
+        {
+          className: "nm-card-pad",
+          style: {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "10px"
+          }
+        },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" } },
+          h(
+            "label",
+            { style: { display: "inline-flex", alignItems: "center", gap: "7px", fontSize: "12px", fontWeight: 600, cursor: "pointer" } },
+            h("input", {
+              type: "checkbox",
+              className: "nm-check",
+              checked: autopilotCfg.enabled,
+              onChange: (e) => onUpdateAutopilotCfg({ ...autopilotCfg, enabled: Boolean(e.target.checked) })
+            }),
+            "Auto-Failover Inteligente"
+          ),
+          h(
+            "label",
+            { style: { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "11.5px", color: "var(--nm-fg-secondary)", cursor: "pointer" } },
+            h("input", {
+              type: "checkbox",
+              className: "nm-check",
+              checked: autopilotCfg.wakeOnFailover,
+              onChange: (e) => onUpdateAutopilotCfg({ ...autopilotCfg, wakeOnFailover: Boolean(e.target.checked) })
+            }),
+            "Acordar agente após troca"
+          ),
+          h(
+            "label",
+            { style: { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "11.5px", color: "var(--nm-fg-secondary)", cursor: "pointer" } },
+            h("input", {
+              type: "checkbox",
+              className: "nm-check",
+              checked: vipPolicy.autoProtectAnthropic,
+              onChange: (e) => onUpdateVipPolicy({ ...vipPolicy, autoProtectAnthropic: Boolean(e.target.checked) })
+            }),
+            "Travar toda Anthropic como VIP"
+          )
+        ),
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "soft",
+              onClick: handleQuickProtectVips
+            },
+            "Proteger VIPs (1-clique)"
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "primary",
+              disabled: benchRunning,
+              onClick: () => handleRunQualityBench("auto_top")
+            },
+            benchRunning ? "Testando..." : "Rodar Bench Qualidade (Top 8)"
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              disabled: benchRunning,
+              onClick: () => handleRunQualityBench("vip_chain")
+            },
+            "Testar Cadeia VIP"
+          )
+        )
+      ),
+      // 3. Quarentena / Circuit Breaker (se houver modelos isolados)
+      quarantineList.length > 0 && h(
+        "div",
+        { className: "nm-card" },
+        h(
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "10px 14px",
+              borderBottom: "1px solid var(--nm-border)"
+            }
+          },
+          h("span", { style: { fontSize: "12px", fontWeight: 600, color: "var(--nm-danger)" } }, `Circuit Breaker — ${quarantineList.length} modelo(s) em quarentena`),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              onClick: () => {
+                releaseQuarantine();
+                onRefreshQuarantines();
+                onNotify({ type: "info", text: "Quarentena limpa para todos os modelos." });
+              },
+              style: { padding: "4px 9px", fontSize: "11px" }
+            },
+            "Liberar Todos"
+          )
+        ),
+        quarantineList.map(
+          (q) => h(
+            "div",
+            { key: q.model, className: "nm-list-row" },
+            h(
+              "div",
+              { style: { display: "flex", flexDirection: "column", gap: "2px" } },
+              h(
+                "div",
+                { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                h("span", { className: "nm-mono", style: { fontSize: "12px", fontWeight: 600 } }, q.model),
+                h("span", { className: "nm-pill", "data-tone": "danger" }, q.errorKind),
+                h("span", { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } }, `expira em ${fmtRemaining(q.expiresAt)}`)
+              ),
+              h("div", { style: { fontSize: "11px", color: "var(--nm-muted)" } }, `${q.reason}${q.lastAgent ? ` · ${q.lastAgent}` : ""}`)
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "nm-btn",
+                onClick: () => {
+                  releaseQuarantine(q.model);
+                  onRefreshQuarantines();
+                },
+                style: { padding: "4px 9px", fontSize: "11px" }
+              },
+              "Liberar"
+            )
+          )
+        )
+      ),
+      // 4. Escudo VIP: Cadeia VIP + Agentes VIP vs Pool Automático
+      h(
+        "div",
+        { className: "nm-card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+          h("span", { style: { fontSize: "12.5px", fontWeight: 600 } }, "Cadeia de Fallback Exclusiva VIP (Iris & Conselho)"),
+          h("span", { style: { fontSize: "11px", color: "var(--nm-muted)" } }, "Agentes VIP só trocam se falharem, e nunca caem para modelos fracos")
+        ),
+        h(
+          "div",
+          { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
+          h("input", {
+            type: "text",
+            className: "nm-input nm-mono",
+            value: vipChainInput,
+            onChange: (e) => setVipChainInput(e.target.value),
+            placeholder: "claude-sonnet-4-6, claude-sonnet-5-5, claude-opus-4-6, gpt-6.1-terra",
+            style: { flex: "1", minWidth: "260px" }
+          }),
+          h(
+            "button",
+            { type: "button", className: "nm-btn", "data-variant": "soft", onClick: handleSaveVipChain },
+            "Salvar Cadeia VIP"
+          )
+        ),
+        buzzAgents.length > 0 && h(
+          "div",
+          { style: { display: "flex", flexWrap: "wrap", gap: "6px", paddingTop: "4px" } },
+          buzzAgents.map((a) => {
+            var _a;
+            const vip = isVipAgent(a.name || a.key, vipPolicy);
+            return h(
+              "div",
+              {
+                key: a.key,
+                className: "nm-surface",
+                style: {
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "7px",
+                  padding: "4px 8px",
+                  fontSize: "11px",
+                  borderColor: vip ? "var(--nm-warn-border)" : "var(--nm-border)"
+                }
+              },
+              h("span", { style: { fontWeight: 600 } }, a.name || a.key),
+              h("span", { className: "nm-mono", style: { fontSize: "10px", color: "var(--nm-muted)" } }, String(((_a = a.config) == null ? void 0 : _a.model) || "padrão").split("/").pop()),
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "nm-pill",
+                  "data-tone": vip ? "warn" : "info",
+                  onClick: () => onUpdateVipPolicy(toggleVipAgent(vipPolicy, a.name || a.key)),
+                  title: vip ? "Agente VIP protegido (clique para mover ao Pool Auto)" : "Agente no Pool Auto (clique para promover a VIP)",
+                  style: { cursor: "pointer" }
+                },
+                vip ? "VIP" : "Pool"
+              ),
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "nm-btn",
+                  "data-variant": "ghost",
+                  disabled: failoverBusyAgent === a.key,
+                  onClick: () => handleManualFailover(a),
+                  title: "Forçar failover inteligente agora",
+                  style: { padding: "1px 5px", fontSize: "10px" }
+                },
+                failoverBusyAgent === a.key ? "..." : "Trocar"
+              )
+            );
+          })
+        )
+      ),
+      // 5. Resultados do Benchmark de Qualidade (Tool-Calling + Stream)
+      benchList.length > 0 && h(
+        "div",
+        { className: "nm-card", style: { overflowX: "auto" } },
+        h(
+          "div",
+          { style: { padding: "10px 14px", borderBottom: "1px solid var(--nm-border)", fontSize: "12px", fontWeight: 600 } },
+          `Benchmark de Qualidade Real (${benchList.length} modelos testados)`
+        ),
+        h(
+          "table",
+          { className: "nm-table" },
+          h(
+            "thead",
+            null,
+            h(
+              "tr",
+              null,
+              ["Modelo", "Qualidade", "Tool-Call", "Stream", "Latência", "Status / Erro"].map(
+                (col) => h("th", { key: col }, col)
+              )
+            )
+          ),
+          h(
+            "tbody",
+            null,
+            benchList.slice(0, 16).map(
+              (b) => h(
+                "tr",
+                { key: b.model },
+                h("td", { className: "nm-mono", style: { fontWeight: 500 } }, b.model),
+                h(
+                  "td",
+                  { className: "nm-mono nm-num", style: { fontWeight: 700, color: b.qualityScore >= 75 ? "var(--nm-ok)" : b.qualityScore >= 40 ? "var(--nm-warn)" : "var(--nm-danger)" } },
+                  `${b.qualityScore}/100`
+                ),
+                h(
+                  "td",
+                  null,
+                  h("span", { className: "nm-pill", "data-tone": b.toolCallOk ? "ok" : "danger" }, b.toolCallOk ? "OK" : "Falhou")
+                ),
+                h(
+                  "td",
+                  null,
+                  h("span", { className: "nm-pill", "data-tone": b.streamOk ? "ok" : "danger" }, b.streamOk ? "Íntegro" : "Corte")
+                ),
+                h("td", { className: "nm-mono nm-num", style: { color: "var(--nm-muted)" } }, b.latencyMs !== null ? `${b.latencyMs}ms` : "—"),
+                h("td", { style: { fontSize: "11px", color: b.online ? "var(--nm-muted)" : "var(--nm-danger)" } }, b.errorMsg || "Saudável")
+              )
+            )
+          )
+        )
+      ),
+      // 6. Histórico de Failovers
+      h(
+        "div",
+        { className: "nm-card", style: { overflowX: "auto" } },
+        h(
+          "div",
+          { style: { padding: "10px 14px", borderBottom: "1px solid var(--nm-border)", fontSize: "12px", fontWeight: 600 } },
+          `Telemetria de Failovers (${failoverLog.length})`
+        ),
+        failoverLog.length === 0 ? h(
+          "div",
+          { style: { padding: "20px", textAlign: "center", fontSize: "12px", color: "var(--nm-muted)" } },
+          "Nenhum failover disparado ainda. O watchdog monitora erros reais (404, weekly limit, stream ended, malformed_function_call) e troca automaticamente."
+        ) : h(
+          "table",
+          { className: "nm-table" },
+          h(
+            "thead",
+            null,
+            h("tr", null, ["Hora", "Agente", "Troca", "Erro", "Origem", "Resultado"].map((c) => h("th", { key: c }, c)))
+          ),
+          h(
+            "tbody",
+            null,
+            failoverLog.slice(0, 15).map(
+              (ev) => h(
+                "tr",
+                { key: ev.id },
+                h("td", { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } }, fmtTime(ev.timestamp)),
+                h(
+                  "td",
+                  null,
+                  h("span", { style: { fontWeight: 600 } }, ev.agentName),
+                  ev.isVip && h("span", { className: "nm-pill", "data-tone": "warn", style: { marginLeft: "6px", fontSize: "9.5px" } }, "VIP")
+                ),
+                h(
+                  "td",
+                  { className: "nm-mono", style: { fontSize: "11px" } },
+                  `${ev.fromModel || "—"} → ${ev.toModel || "bloqueado"}`
+                ),
+                h("td", null, h("span", { className: "nm-pill", "data-tone": "danger" }, ev.errorKind)),
+                h("td", { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } }, ev.trigger),
+                h(
+                  "td",
+                  null,
+                  h(
+                    "span",
+                    { className: "nm-pill", "data-tone": ev.applied ? "ok" : "warn" },
+                    ev.applied ? ev.wokeAgent ? "Aplicado + Wake" : "Aplicado" : "Protegido"
+                  )
+                )
+              )
+            )
           )
         )
       )
@@ -2539,6 +4061,50 @@ const NEXUSMIND_THEME_CSS = `
   height: 14px;
 }
 
+.nm-mode-group {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 7px;
+  border: 1px solid var(--nm-border);
+  background: var(--nm-inset);
+  padding: 2px;
+  gap: 2px;
+}
+
+.nm-mode-btn {
+  border: none;
+  background: transparent;
+  color: var(--nm-muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.nm-mode-btn:hover {
+  color: var(--nm-fg);
+}
+
+.nm-mode-btn[data-active="auto"] {
+  background: var(--nm-ok-soft);
+  color: var(--nm-ok);
+  font-weight: 600;
+}
+
+.nm-mode-btn[data-active="vip"] {
+  background: var(--nm-warn-soft);
+  color: var(--nm-warn);
+  font-weight: 600;
+}
+
+.nm-mode-btn[data-active="blocked"] {
+  background: var(--nm-danger-soft);
+  color: var(--nm-danger);
+  font-weight: 600;
+}
+
 .nm-mono { font-family: var(--nm-font-mono); }
 .nm-num { font-variant-numeric: tabular-nums; }
 `;
@@ -2887,7 +4453,7 @@ const SVG_ICONS = {
     props.h("line", { x1: 12, y1: 2, x2: 12, y2: 12 })
   )
 };
-const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions", "navigation", "notifications", "shortcuts"];
+const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions", "navigation", "notifications", "shortcuts", "relay"];
 const ICON = "data:image/svg+xml;base64," + btoa(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M5 18V6l14 12V6"/><circle cx="5" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="19" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>'
 );
@@ -3155,6 +4721,14 @@ function apply(ctx) {
     const [modelTests, setModelTests] = React.useState({});
     const [activeSection, setActiveSection] = React.useState("catalog");
     const [showGatewayDetails, setShowGatewayDetails] = React.useState(false);
+    const [vipPolicy, setVipPolicy] = React.useState(() => loadVipPolicy());
+    const [autopilotCfg, setAutopilotCfg] = React.useState(() => loadAutopilotConfig());
+    const [quarantines, setQuarantines] = React.useState(() => loadQuarantines());
+    const [qualityBench, setQualityBench] = React.useState(() => loadSavedQualityBench());
+    const [failoverLog, setFailoverLog] = React.useState(() => loadFailoverLog());
+    const [usageByModelCache, setUsageByModelCache] = React.useState({});
+    const [usageSampleSizeCache, setUsageSampleSizeCache] = React.useState(0);
+    const handledErrorSigsRef = React.useRef(/* @__PURE__ */ new Set());
     const ModelRankingTab = React.useMemo(
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS),
       []
@@ -3163,6 +4737,118 @@ function apply(ctx) {
       () => createNexusMindAgentsTabComponent(ctx, CANONICAL_GROUPS),
       []
     );
+    const AutopilotFailoverTab = React.useMemo(
+      () => createAutopilotFailoverTabComponent(ctx, CANONICAL_GROUPS),
+      []
+    );
+    React.useEffect(() => {
+      loadGatewayUsageByModel(ctx).then((u) => {
+        setUsageByModelCache(u.byModel);
+        setUsageSampleSizeCache(u.sampleSize);
+      }).catch(() => {
+      });
+    }, [models.length]);
+    const liveRankingSnapshot = React.useMemo(() => {
+      return buildModelRankingSnapshot({
+        catalogModels: models,
+        groups: CANONICAL_GROUPS,
+        usageByModel: usageByModelCache,
+        usageSampleSize: usageSampleSizeCache,
+        liveProbes: modelTests,
+        disabledModels,
+        tier: "geral",
+        policy: loadSavedRoutingPolicy(),
+        vipPolicy,
+        qualityBench,
+        quarantines
+      });
+    }, [models, usageByModelCache, usageSampleSizeCache, modelTests, disabledModels, vipPolicy, qualityBench, quarantines]);
+    const handleUpdateVipPolicy = (next) => {
+      setVipPolicy(next);
+      void saveVipPolicy(ctx, next);
+    };
+    const handleSetModelAccessMode = (modelId, mode) => {
+      const next = setModelAccessMode(vipPolicy, modelId, mode);
+      handleUpdateVipPolicy(next);
+      if (mode !== "blocked" && disabledModels.includes(modelId)) {
+        const nextDis = disabledModels.filter((id) => id !== modelId);
+        setDisabledModels(nextDis);
+        try {
+          localStorage.setItem("nexusmind_disabled_models", JSON.stringify(nextDis));
+        } catch {
+        }
+      }
+      setStatusMessage({
+        type: "info",
+        text: mode === "vip" ? `${modelId} travado como VIP (exclusivo Iris e Conselho).` : mode === "blocked" ? `${modelId} bloqueado para roteamento automático.` : `${modelId} liberado no pool Auto dos agentes.`
+      });
+    };
+    const handleQuickProtectVips = () => {
+      const next = applyQuickVipPreset(vipPolicy, models);
+      handleUpdateVipPolicy(next);
+      setStatusMessage({
+        type: "success",
+        text: "Escudo VIP aplicado: Anthropic + GPT-6.1 Terra + frontier reservados para Iris e Conselho."
+      });
+    };
+    const handleToggleVipAgent = (agentName) => {
+      const next = toggleVipAgent(vipPolicy, agentName);
+      handleUpdateVipPolicy(next);
+    };
+    const handleFailoverAgent = async (agentKey, errorText, trigger = "manual") => {
+      const evt = await executeAgentFailover(ctx, CANONICAL_GROUPS, {
+        agentKeyOrName: agentKey,
+        errorText,
+        trigger,
+        rankingSnapshot: liveRankingSnapshot,
+        vipPolicy,
+        qualityBench,
+        disabledModels,
+        wakeAfter: autopilotCfg.wakeOnFailover,
+        notify: autopilotCfg.notifyOnFailover
+      });
+      setQuarantines(loadQuarantines());
+      setFailoverLog(loadFailoverLog());
+      setStatusMessage({
+        type: evt.applied ? "success" : "error",
+        text: evt.applied ? `Failover: ${evt.agentName} (${evt.fromModel || "anterior"} → ${evt.toModel})` : evt.note || `Não foi possível trocar ${evt.agentName}.`
+      });
+    };
+    React.useEffect(() => {
+      const onOrgfyFailover = (e) => {
+        const detail = (e == null ? void 0 : e.detail) || {};
+        const target = detail.agentKey || detail.agente || detail.agentName;
+        if (!target) return;
+        void handleFailoverAgent(String(target), String(detail.error || detail.reason || "orgfy.failover.requested"), "orgfy_event");
+      };
+      try {
+        if (typeof window !== "undefined" && window.addEventListener) {
+          window.addEventListener("orgfy.failover.requested", onOrgfyFailover);
+        }
+      } catch {
+      }
+      let timer = null;
+      if (autopilotCfg.enabled) {
+        timer = setInterval(() => {
+          setQuarantines(loadQuarantines());
+          const detected = scanLiveAgentErrors(ctx);
+          for (const err of detected) {
+            if (handledErrorSigsRef.current.has(err.signature)) continue;
+            handledErrorSigsRef.current.add(err.signature);
+            void handleFailoverAgent(err.agentKey, err.errorText, "watchdog");
+          }
+        }, Math.max(5, autopilotCfg.pollIntervalSec) * 1e3);
+      }
+      return () => {
+        if (timer) clearInterval(timer);
+        try {
+          if (typeof window !== "undefined" && window.removeEventListener) {
+            window.removeEventListener("orgfy.failover.requested", onOrgfyFailover);
+          }
+        } catch {
+        }
+      };
+    }, [autopilotCfg, vipPolicy, qualityBench, liveRankingSnapshot]);
     const buzzAgentsCount = React.useMemo(() => {
       var _a2, _b2;
       try {
@@ -4344,6 +6030,10 @@ print("SYNC_SUCCESS")
               [
                 { id: "catalog", label: "Modelos" },
                 { id: "ranking", label: "Ranking & Roteamento" },
+                {
+                  id: "autopilot",
+                  label: Object.keys(quarantines).length > 0 ? `Autopiloto (${Object.keys(quarantines).length})` : "Autopiloto & VIP"
+                },
                 { id: "agents", label: buzzAgentsCount > 0 ? `Agentes (${buzzAgentsCount})` : "Agentes" }
               ].map((tab) => {
                 const active = activeSection === tab.id;
@@ -4458,12 +6148,38 @@ print("SYNC_SUCCESS")
           disabledModels,
           modelTests,
           onTestSingleModel: handleTestSingleModel,
+          onNotify: setStatusMessage,
+          vipPolicy,
+          onSetModelAccessMode: handleSetModelAccessMode,
+          onQuickProtectVips: handleQuickProtectVips,
+          qualityBench,
+          quarantines
+        }) : activeSection === "autopilot" ? h(AutopilotFailoverTab, {
+          models,
+          disabledModels,
+          vipPolicy,
+          onUpdateVipPolicy: handleUpdateVipPolicy,
+          autopilotCfg,
+          onUpdateAutopilotCfg: (next) => {
+            setAutopilotCfg(next);
+            saveAutopilotConfig(next);
+          },
+          quarantines,
+          onRefreshQuarantines: () => setQuarantines(loadQuarantines()),
+          qualityBench,
+          onUpdateQualityBench: setQualityBench,
+          failoverLog,
+          onRefreshFailoverLog: () => setFailoverLog(loadFailoverLog()),
+          rankingSnapshot: liveRankingSnapshot,
           onNotify: setStatusMessage
         }) : activeSection === "agents" ? h(NexusMindAgentsTab, {
           models,
           disabledModels,
           modelTests,
-          onNotify: setStatusMessage
+          onNotify: setStatusMessage,
+          vipPolicy,
+          onToggleVipAgent: handleToggleVipAgent,
+          onFailoverAgent: (agentKey) => handleFailoverAgent(agentKey, "Failover manual pela aba Agentes", "manual")
         }) : h(
           React.Fragment,
           null,
@@ -4915,6 +6631,18 @@ print("SYNC_SUCCESS")
                   h(
                     "button",
                     {
+                      onClick: handleQuickProtectVips,
+                      style: {
+                        ...btnNeutral,
+                        color: "var(--nm-warn)",
+                        borderColor: "var(--nm-warn-border)"
+                      }
+                    },
+                    "Proteger VIPs"
+                  ),
+                  h(
+                    "button",
+                    {
                       onClick: handleBatchDisableUnavailable,
                       style: {
                         ...btnNeutral,
@@ -5125,19 +6853,32 @@ print("SYNC_SUCCESS")
                       SVG_ICONS.pulse({ h, width: 11, height: 11 }),
                       "Testar"
                     ),
-                    h(
-                      "span",
-                      {
-                        style: {
-                          fontSize: "11px",
-                          fontWeight: "500",
-                          color: isDisabled ? "var(--text-tertiary, #808080)" : "var(--green-11, #3dd68c)",
-                          minWidth: "76px",
-                          textAlign: "right"
-                        }
-                      },
-                      isDisabled ? "Desativado" : "Ativo"
-                    )
+                    (() => {
+                      const rowGroup = item.primaryGroup || getModelGroups(item)[0];
+                      const mode = getModelAccessMode(mid, rowGroup, vipPolicy, disabledModels);
+                      return h(
+                        "div",
+                        { className: "nm-mode-group" },
+                        [
+                          { id: "auto", label: "Auto" },
+                          { id: "vip", label: "VIP" },
+                          { id: "blocked", label: "Bloq." }
+                        ].map(
+                          (opt) => h(
+                            "button",
+                            {
+                              key: opt.id,
+                              type: "button",
+                              className: "nm-mode-btn",
+                              "data-active": mode === opt.id ? opt.id : void 0,
+                              onClick: () => handleSetModelAccessMode(mid, opt.id),
+                              title: opt.id === "auto" ? "Liberado no pool automático dos agentes" : opt.id === "vip" ? "Reservado para Iris e Conselho" : "Bloqueado para roteamento automático"
+                            },
+                            opt.label
+                          )
+                        )
+                      );
+                    })()
                   )
                 );
               })
@@ -5831,7 +7572,96 @@ Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model 
           );
         }
       });
-      console.log("[NEXUSMIND] 5 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
+      ctx.agents.addTool({
+        name: "nexusmind_failover_agent",
+        description: "Executa failover inteligente com Circuit Breaker e proteção estrita VIP: coloca o modelo que falhou em quarentena (TTL por classe de erro) e troca o agente para o melhor candidato saudável do pool apropriado (Auto para workers, cadeia VIP para Iris/Conselho).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agente: { type: "string", description: "Nome ou key do agente alvo no Buzz" },
+            erro: { type: "string", description: "Mensagem de erro observada (ex: weekly limit, 404, malformed_function_call, stream ended)" },
+            wake: { type: "boolean", description: "Se true, acorda o agente após aplicar o novo modelo (default: true)" }
+          },
+          required: ["agente"]
+        },
+        call: async (_client, _context, args) => {
+          const usage = await loadGatewayUsageByModel(ctx);
+          let cachedModels = [];
+          try {
+            const raw = localStorage.getItem("nexusmind_cached_models");
+            if (raw) cachedModels = JSON.parse(raw);
+          } catch {
+          }
+          const vipPol = loadVipPolicy();
+          const qBench = loadSavedQualityBench();
+          const rankSnap = buildModelRankingSnapshot({
+            catalogModels: cachedModels,
+            groups: CANONICAL_GROUPS,
+            usageByModel: usage.byModel,
+            usageSampleSize: usage.sampleSize,
+            tier: "geral",
+            policy: loadSavedRoutingPolicy(),
+            vipPolicy: vipPol,
+            qualityBench: qBench,
+            quarantines: loadQuarantines()
+          });
+          const evt = await executeAgentFailover(ctx, CANONICAL_GROUPS, {
+            agentKeyOrName: String((args == null ? void 0 : args.agente) || ""),
+            errorText: (args == null ? void 0 : args.erro) ? String(args.erro) : void 0,
+            trigger: "tool",
+            rankingSnapshot: rankSnap,
+            vipPolicy: vipPol,
+            qualityBench: qBench,
+            wakeAfter: (args == null ? void 0 : args.wake) !== false,
+            notify: true
+          });
+          return JSON.stringify(evt, null, 2);
+        }
+      });
+      ctx.agents.addTool({
+        name: "nexusmind_quality_bench",
+        description: "Roda sonda real de qualidade (Tool-Calling Fidelity + integridade de resposta + latência) nos modelos informados ou nos principais do catálogo, salvando o resultado em ~/.buzz/.scratch/nexusmind-quality-bench.json.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            modelos: { type: "array", items: { type: "string" }, description: "Lista opcional de modelos a testar" }
+          }
+        },
+        call: async (_client, _context, args) => {
+          const list = Array.isArray(args == null ? void 0 : args.modelos) && args.modelos.length > 0 ? args.modelos.map(String) : Object.values(CANONICAL_GROUPS).map((g) => g.defaultModel);
+          const candidates = list.slice(0, 8).map((m) => ({
+            model: m,
+            group: CANONICAL_GROUPS[getModelGroups(m)[0]] || CANONICAL_GROUPS.nexusmind_openai
+          }));
+          const results = await runBatchQualityBench(ctx, candidates);
+          return JSON.stringify({ tested: candidates.length, results }, null, 2);
+        }
+      });
+      ctx.agents.addTool({
+        name: "nexusmind_vip_policy",
+        description: "Consulta ou atualiza a política de proteção VIP (3 estados: auto | vip | blocked) e agentes protegidos (OrgFy Iris, Conselho).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["get", "set_model_mode", "toggle_vip_agent"], description: "Ação (default: 'get')" },
+            model: { type: "string", description: "ID do modelo quando action='set_model_mode'" },
+            mode: { type: "string", enum: ["auto", "vip", "blocked"], description: "Novo modo do modelo" },
+            agent: { type: "string", description: "Nome do agente quando action='toggle_vip_agent'" }
+          }
+        },
+        call: async (_client, _context, args) => {
+          let pol = loadVipPolicy();
+          if ((args == null ? void 0 : args.action) === "set_model_mode" && (args == null ? void 0 : args.model) && (args == null ? void 0 : args.mode)) {
+            pol = setModelAccessMode(pol, String(args.model), args.mode);
+            await saveVipPolicy(ctx, pol);
+          } else if ((args == null ? void 0 : args.action) === "toggle_vip_agent" && (args == null ? void 0 : args.agent)) {
+            pol = toggleVipAgent(pol, String(args.agent));
+            await saveVipPolicy(ctx, pol);
+          }
+          return JSON.stringify(pol, null, 2);
+        }
+      });
+      console.log("[NEXUSMIND] 8 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar agentTools:", err);
     }
@@ -5848,16 +7678,32 @@ export {
   SESSION_FILE_PATHS,
   apply,
   applyBestModelToAgent,
+  applyQuickVipPreset,
   buildModelRankingSnapshot,
+  classifyGatewayError,
   createNexusMindDecisionProvider,
+  executeAgentFailover,
+  getModelAccessMode,
   getModelGroups,
   inject,
+  isVipAgent,
   loadGatewayUsageByModel,
   loadPersistedAccountToken,
+  loadQuarantines,
+  loadVipPolicy,
   persistModelRankingSnapshot,
+  pickFailoverCandidate,
+  quarantineModel,
   readPrivateSessionFile,
+  releaseQuarantine,
+  runBatchQualityBench,
+  runModelQualityProbe,
+  saveVipPolicy,
+  scanLiveAgentErrors,
   scoreModelForTier,
   selectBestModelByTier,
   selectTopGooseModelsByGroup,
+  setModelAccessMode,
+  toggleVipAgent,
   writePrivateSessionData
 };

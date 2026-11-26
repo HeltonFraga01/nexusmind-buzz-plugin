@@ -23,6 +23,9 @@ import {
   persistModelRankingSnapshot,
   saveRoutingPolicy,
 } from "../services/model-ranking";
+import type { ModelAccessMode, VipPolicyConfig } from "../services/vip-policy";
+import type { QualityProbeResult } from "../services/quality-bench";
+import type { QuarantineEntry } from "../services/agentic-failover";
 
 const TIER_OPTIONS: Array<{ id: RankingTier; label: string }> = [
   { id: "geral", label: "Geral" },
@@ -65,12 +68,22 @@ export function createModelRankingTabComponent(
     modelTests,
     onTestSingleModel,
     onNotify,
+    vipPolicy,
+    onSetModelAccessMode,
+    onQuickProtectVips,
+    qualityBench,
+    quarantines,
   }: {
     models: any[];
     disabledModels: string[];
     modelTests: Record<string, LiveProbeState>;
     onTestSingleModel: (mid: string) => Promise<void>;
     onNotify: (msg: { type: "success" | "error" | "info"; text: string }) => void;
+    vipPolicy?: VipPolicyConfig;
+    onSetModelAccessMode?: (modelId: string, mode: ModelAccessMode) => void;
+    onQuickProtectVips?: () => void;
+    qualityBench?: Record<string, QualityProbeResult>;
+    quarantines?: Record<string, QuarantineEntry>;
   }) {
     const [selectedTier, setSelectedTier] = React.useState<RankingTier>("geral");
     const [policy, setPolicy] = React.useState<RoutingPolicy>(() => loadSavedRoutingPolicy());
@@ -135,8 +148,11 @@ export function createModelRankingTabComponent(
         disabledModels,
         tier: selectedTier,
         policy,
+        vipPolicy,
+        qualityBench,
+        quarantines,
       });
-    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy]);
+    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy, vipPolicy, qualityBench, quarantines]);
 
     React.useEffect(() => {
       if (snapshot.models.length === 0) return;
@@ -253,15 +269,30 @@ export function createModelRankingTabComponent(
             })
           ),
           h(
-            "button",
-            {
-              type: "button",
-              className: "nm-btn",
-              "data-variant": "primary",
-              onClick: handleProbeTopCandidates,
-              disabled: probingTop,
-            },
-            probingTop ? "Testando..." : "Testar Top 6"
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "8px" } },
+            onQuickProtectVips &&
+              h(
+                "button",
+                {
+                  type: "button",
+                  className: "nm-btn",
+                  "data-variant": "soft",
+                  onClick: onQuickProtectVips,
+                },
+                "Proteger VIPs"
+              ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "nm-btn",
+                "data-variant": "primary",
+                onClick: handleProbeTopCandidates,
+                disabled: probingTop,
+              },
+              probingTop ? "Testando..." : "Testar Top 6"
+            )
           )
         ),
 
@@ -537,33 +568,69 @@ export function createModelRankingTabComponent(
                           "FIXADO"
                         )
                     ),
-                    // Toggle 1-clique Auto vs Manual (Proibido p/ auto-designação)
+                    // Controle 1-clique em 3 estados: Auto | VIP | Bloq.
                     h(
                       "td",
                       { style: { padding: "8px 12px" } },
-                      h(
-                        "button",
-                        {
-                          onClick: () => toggleAutoAssignBlock(row.model),
-                          title: row.autoAssignBlocked
-                            ? "Bloqueado para designação automática (clique para liberar)"
-                            : "Permitido para designação automática (clique para restringir a uso manual)",
-                          style: {
-                            padding: "3px 8px",
-                            borderRadius: "5px",
-                            border: `1px solid ${row.autoAssignBlocked ? "var(--amber-7, #714f19)" : "var(--border-primary, #333333)"}`,
-                            backgroundColor: row.autoAssignBlocked ? "var(--amber-3, #302008)" : "transparent",
-                            color: row.autoAssignBlocked ? "var(--amber-11, #ffca16)" : "var(--text-secondary, #c7c7c7)",
-                            fontSize: "11px",
-                            fontWeight: "500",
-                            cursor: "pointer",
-                          },
-                        },
-                        row.autoAssignBlocked ? "Manual (Bloq.)" : "Auto ✓"
-                      )
+                      onSetModelAccessMode
+                        ? h(
+                            "div",
+                            { className: "nm-mode-group" },
+                            ([
+                              { id: "auto", label: "Auto" },
+                              { id: "vip", label: "VIP" },
+                              { id: "blocked", label: "Bloq." },
+                            ] as Array<{ id: ModelAccessMode; label: string }>).map((opt) =>
+                              h(
+                                "button",
+                                {
+                                  key: opt.id,
+                                  type: "button",
+                                  className: "nm-mode-btn",
+                                  "data-active": row.accessMode === opt.id ? opt.id : undefined,
+                                  onClick: () => onSetModelAccessMode(row.model, opt.id),
+                                  title:
+                                    opt.id === "auto"
+                                      ? "Liberado para pool automático dos agentes"
+                                      : opt.id === "vip"
+                                      ? "Reservado apenas para Iris e Conselho"
+                                      : "Bloqueado para roteamento automático",
+                                },
+                                opt.label
+                              )
+                            )
+                          )
+                        : h(
+                            "button",
+                            {
+                              onClick: () => toggleAutoAssignBlock(row.model),
+                              className: "nm-btn",
+                              style: { padding: "3px 8px", fontSize: "11px" },
+                            },
+                            row.autoAssignBlocked ? "Bloq." : "Auto"
+                          )
                     ),
-                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, `${row.score}`),
-                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", fontSize: "11px", color: healthColor } }, healthLabel),
+                    h(
+                      "td",
+                      { style: { padding: "8px 12px", fontFamily: "monospace", fontWeight: "600", color: "var(--nm-fg)" } },
+                      `${row.score}`,
+                      row.toolCallOk !== null &&
+                        h(
+                          "span",
+                          {
+                            className: "nm-pill",
+                            "data-tone": row.toolCallOk ? "ok" : "danger",
+                            style: { marginLeft: "6px", fontSize: "9.5px", padding: "1px 5px" },
+                            title: row.toolCallOk ? "Tool-Calling validado" : "Falha no Tool-Calling",
+                          },
+                          row.toolCallOk ? "TC" : "TC!"
+                        )
+                    ),
+                    h(
+                      "td",
+                      { style: { padding: "8px 12px", fontFamily: "monospace", fontSize: "11px", color: row.quarantined ? "var(--nm-danger)" : healthColor } },
+                      row.quarantined ? "Quarentena" : healthLabel
+                    ),
                     h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-secondary, #c7c7c7)" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
                     h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs)),
                     h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd)),

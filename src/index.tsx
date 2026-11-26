@@ -14,7 +14,40 @@ import {
 } from "./services/model-ranking";
 import { createModelRankingTabComponent } from "./components/ModelRankingTab";
 import { createNexusMindAgentsTabComponent } from "./components/NexusMindAgentsTab";
+import { createAutopilotFailoverTabComponent } from "./components/AutopilotFailoverTab";
 import { NEXUSMIND_THEME_CSS } from "./styles/nexusmind-theme";
+import {
+  type ModelAccessMode,
+  type VipPolicyConfig,
+  applyQuickVipPreset,
+  getModelAccessMode,
+  isVipAgent,
+  loadVipPolicy,
+  saveVipPolicy,
+  setModelAccessMode,
+  toggleVipAgent,
+} from "./services/vip-policy";
+import {
+  type QualityProbeResult,
+  classifyGatewayError,
+  loadSavedQualityBench,
+  runBatchQualityBench,
+  runModelQualityProbe,
+} from "./services/quality-bench";
+import {
+  type AutopilotConfig,
+  type FailoverEvent,
+  type QuarantineEntry,
+  executeAgentFailover,
+  loadAutopilotConfig,
+  loadFailoverLog,
+  loadQuarantines,
+  pickFailoverCandidate,
+  quarantineModel,
+  releaseQuarantine,
+  saveAutopilotConfig,
+  scanLiveAgentErrors,
+} from "./services/agentic-failover";
 
 export {
   selectBestModelByTier,
@@ -25,6 +58,22 @@ export {
   loadGatewayUsageByModel,
   persistModelRankingSnapshot,
   NEXUSMIND_THEME_CSS,
+  loadVipPolicy,
+  saveVipPolicy,
+  getModelAccessMode,
+  setModelAccessMode,
+  applyQuickVipPreset,
+  isVipAgent,
+  toggleVipAgent,
+  classifyGatewayError,
+  runModelQualityProbe,
+  runBatchQualityBench,
+  quarantineModel,
+  releaseQuarantine,
+  loadQuarantines,
+  pickFailoverCandidate,
+  executeAgentFailover,
+  scanLiveAgentErrors,
 };
 
 export const GOOSE_MAX_MODELS_PER_GROUP = 40;
@@ -370,7 +419,7 @@ const SVG_ICONS = {
     ),
 };
 
-export const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions", "navigation", "notifications", "shortcuts"];
+export const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions", "navigation", "notifications", "shortcuts", "relay"];
 
 // Ícone monocromático padrão Buzz com currentColor (branco inativo, preto quando selecionado)
 const ICON =
@@ -745,9 +794,18 @@ export function apply(ctx: Context) {
       Record<string, { status: "testing" | "ok" | "error"; latency?: number; errorMsg?: string }>
     >({});
 
-    // Primary Workspace Section (Modelos | Ranking & Roteamento | Agentes Buzz)
-    const [activeSection, setActiveSection] = React.useState<"catalog" | "ranking" | "agents">("catalog");
+    // Primary Workspace Section (Modelos | Ranking & Roteamento | Autopiloto & VIP | Agentes Buzz)
+    const [activeSection, setActiveSection] = React.useState<"catalog" | "ranking" | "autopilot" | "agents">("catalog");
     const [showGatewayDetails, setShowGatewayDetails] = React.useState<boolean>(false);
+    const [vipPolicy, setVipPolicy] = React.useState<VipPolicyConfig>(() => loadVipPolicy());
+    const [autopilotCfg, setAutopilotCfg] = React.useState<AutopilotConfig>(() => loadAutopilotConfig());
+    const [quarantines, setQuarantines] = React.useState<Record<string, QuarantineEntry>>(() => loadQuarantines());
+    const [qualityBench, setQualityBench] = React.useState<Record<string, QualityProbeResult>>(() => loadSavedQualityBench());
+    const [failoverLog, setFailoverLog] = React.useState<FailoverEvent[]>(() => loadFailoverLog());
+    const [usageByModelCache, setUsageByModelCache] = React.useState<Record<string, any>>({});
+    const [usageSampleSizeCache, setUsageSampleSizeCache] = React.useState<number>(0);
+    const handledErrorSigsRef = React.useRef<Set<string>>(new Set());
+
     const ModelRankingTab = React.useMemo(
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS as any),
       []
@@ -756,6 +814,132 @@ export function apply(ctx: Context) {
       () => createNexusMindAgentsTabComponent(ctx, CANONICAL_GROUPS as any),
       []
     );
+    const AutopilotFailoverTab = React.useMemo(
+      () => createAutopilotFailoverTabComponent(ctx, CANONICAL_GROUPS as any),
+      []
+    );
+
+    React.useEffect(() => {
+      loadGatewayUsageByModel(ctx)
+        .then((u) => {
+          setUsageByModelCache(u.byModel);
+          setUsageSampleSizeCache(u.sampleSize);
+        })
+        .catch(() => {});
+    }, [models.length]);
+
+    const liveRankingSnapshot = React.useMemo(() => {
+      return buildModelRankingSnapshot({
+        catalogModels: models,
+        groups: CANONICAL_GROUPS as any,
+        usageByModel: usageByModelCache,
+        usageSampleSize: usageSampleSizeCache,
+        liveProbes: modelTests,
+        disabledModels,
+        tier: "geral",
+        policy: loadSavedRoutingPolicy(),
+        vipPolicy,
+        qualityBench,
+        quarantines,
+      });
+    }, [models, usageByModelCache, usageSampleSizeCache, modelTests, disabledModels, vipPolicy, qualityBench, quarantines]);
+
+    const handleUpdateVipPolicy = (next: VipPolicyConfig) => {
+      setVipPolicy(next);
+      void saveVipPolicy(ctx, next);
+    };
+
+    const handleSetModelAccessMode = (modelId: string, mode: ModelAccessMode) => {
+      const next = setModelAccessMode(vipPolicy, modelId, mode);
+      handleUpdateVipPolicy(next);
+      if (mode !== "blocked" && disabledModels.includes(modelId)) {
+        const nextDis = disabledModels.filter((id) => id !== modelId);
+        setDisabledModels(nextDis);
+        try { localStorage.setItem("nexusmind_disabled_models", JSON.stringify(nextDis)); } catch {}
+      }
+      setStatusMessage({
+        type: "info",
+        text:
+          mode === "vip"
+            ? `${modelId} travado como VIP (exclusivo Iris e Conselho).`
+            : mode === "blocked"
+            ? `${modelId} bloqueado para roteamento automático.`
+            : `${modelId} liberado no pool Auto dos agentes.`,
+      });
+    };
+
+    const handleQuickProtectVips = () => {
+      const next = applyQuickVipPreset(vipPolicy, models);
+      handleUpdateVipPolicy(next);
+      setStatusMessage({
+        type: "success",
+        text: "Escudo VIP aplicado: Anthropic + GPT-6.1 Terra + frontier reservados para Iris e Conselho.",
+      });
+    };
+
+    const handleToggleVipAgent = (agentName: string) => {
+      const next = toggleVipAgent(vipPolicy, agentName);
+      handleUpdateVipPolicy(next);
+    };
+
+    const handleFailoverAgent = async (agentKey: string, errorText?: string, trigger: FailoverEvent["trigger"] = "manual") => {
+      const evt = await executeAgentFailover(ctx, CANONICAL_GROUPS as any, {
+        agentKeyOrName: agentKey,
+        errorText,
+        trigger,
+        rankingSnapshot: liveRankingSnapshot,
+        vipPolicy,
+        qualityBench,
+        disabledModels,
+        wakeAfter: autopilotCfg.wakeOnFailover,
+        notify: autopilotCfg.notifyOnFailover,
+      });
+      setQuarantines(loadQuarantines());
+      setFailoverLog(loadFailoverLog());
+      setStatusMessage({
+        type: evt.applied ? "success" : "error",
+        text: evt.applied
+          ? `Failover: ${evt.agentName} (${evt.fromModel || "anterior"} → ${evt.toModel})`
+          : evt.note || `Não foi possível trocar ${evt.agentName}.`,
+      });
+    };
+
+    // Watchdog ao vivo (ctx.relay) + Listener do barramento OrgFy ('orgfy.failover.requested')
+    React.useEffect(() => {
+      const onOrgfyFailover = (e: any) => {
+        const detail = e?.detail || {};
+        const target = detail.agentKey || detail.agente || detail.agentName;
+        if (!target) return;
+        void handleFailoverAgent(String(target), String(detail.error || detail.reason || "orgfy.failover.requested"), "orgfy_event");
+      };
+      try {
+        if (typeof window !== "undefined" && window.addEventListener) {
+          window.addEventListener("orgfy.failover.requested", onOrgfyFailover);
+        }
+      } catch {}
+
+      let timer: any = null;
+      if (autopilotCfg.enabled) {
+        timer = setInterval(() => {
+          setQuarantines(loadQuarantines());
+          const detected = scanLiveAgentErrors(ctx);
+          for (const err of detected) {
+            if (handledErrorSigsRef.current.has(err.signature)) continue;
+            handledErrorSigsRef.current.add(err.signature);
+            void handleFailoverAgent(err.agentKey, err.errorText, "watchdog");
+          }
+        }, Math.max(5, autopilotCfg.pollIntervalSec) * 1000);
+      }
+
+      return () => {
+        if (timer) clearInterval(timer);
+        try {
+          if (typeof window !== "undefined" && window.removeEventListener) {
+            window.removeEventListener("orgfy.failover.requested", onOrgfyFailover);
+          }
+        } catch {}
+      };
+    }, [autopilotCfg, vipPolicy, qualityBench, liveRankingSnapshot]);
     const buzzAgentsCount = React.useMemo(() => {
       try {
         const snap = (ctx as any)?.agents?.snapshot?.() || {};
@@ -2053,6 +2237,13 @@ print("SYNC_SUCCESS")
                   [
                     { id: "catalog", label: "Modelos" },
                     { id: "ranking", label: "Ranking & Roteamento" },
+                    {
+                      id: "autopilot",
+                      label:
+                        Object.keys(quarantines).length > 0
+                          ? `Autopiloto (${Object.keys(quarantines).length})`
+                          : "Autopiloto & VIP",
+                    },
                     { id: "agents", label: buzzAgentsCount > 0 ? `Agentes (${buzzAgentsCount})` : "Agentes" },
                   ].map((tab) => {
                     const active = activeSection === tab.id;
@@ -2063,7 +2254,7 @@ print("SYNC_SUCCESS")
                         type: "button",
                         className: "nm-seg-btn",
                         "data-active": active ? "true" : "false",
-                        onClick: () => setActiveSection(tab.id as "catalog" | "ranking" | "agents"),
+                        onClick: () => setActiveSection(tab.id as "catalog" | "ranking" | "autopilot" | "agents"),
                       },
                       tab.label
                     );
@@ -2184,6 +2375,31 @@ print("SYNC_SUCCESS")
                   modelTests,
                   onTestSingleModel: handleTestSingleModel,
                   onNotify: setStatusMessage,
+                  vipPolicy,
+                  onSetModelAccessMode: handleSetModelAccessMode,
+                  onQuickProtectVips: handleQuickProtectVips,
+                  qualityBench,
+                  quarantines,
+                })
+              : activeSection === "autopilot"
+              ? h(AutopilotFailoverTab, {
+                  models,
+                  disabledModels,
+                  vipPolicy,
+                  onUpdateVipPolicy: handleUpdateVipPolicy,
+                  autopilotCfg,
+                  onUpdateAutopilotCfg: (next: AutopilotConfig) => {
+                    setAutopilotCfg(next);
+                    saveAutopilotConfig(next);
+                  },
+                  quarantines,
+                  onRefreshQuarantines: () => setQuarantines(loadQuarantines()),
+                  qualityBench,
+                  onUpdateQualityBench: setQualityBench,
+                  failoverLog,
+                  onRefreshFailoverLog: () => setFailoverLog(loadFailoverLog()),
+                  rankingSnapshot: liveRankingSnapshot,
+                  onNotify: setStatusMessage,
                 })
               : activeSection === "agents"
               ? h(NexusMindAgentsTab, {
@@ -2191,6 +2407,9 @@ print("SYNC_SUCCESS")
                   disabledModels,
                   modelTests,
                   onNotify: setStatusMessage,
+                  vipPolicy,
+                  onToggleVipAgent: handleToggleVipAgent,
+                  onFailoverAgent: (agentKey: string) => handleFailoverAgent(agentKey, "Failover manual pela aba Agentes", "manual"),
                 })
               : h(
                   React.Fragment,
@@ -2656,6 +2875,18 @@ print("SYNC_SUCCESS")
                     h(
                       "button",
                       {
+                        onClick: handleQuickProtectVips,
+                        style: {
+                          ...btnNeutral,
+                          color: "var(--nm-warn)",
+                          borderColor: "var(--nm-warn-border)",
+                        },
+                      },
+                      "Proteger VIPs"
+                    ),
+                    h(
+                      "button",
+                      {
                         onClick: handleBatchDisableUnavailable,
                         style: {
                           ...btnNeutral,
@@ -2901,19 +3132,37 @@ print("SYNC_SUCCESS")
                         SVG_ICONS.pulse({ h, width: 11, height: 11 }),
                         "Testar"
                       ),
-                      h(
-                        "span",
-                        {
-                          style: {
-                            fontSize: "11px",
-                            fontWeight: "500",
-                            color: isDisabled ? "var(--text-tertiary, #808080)" : "var(--green-11, #3dd68c)",
-                            minWidth: "76px",
-                            textAlign: "right",
-                          },
-                        },
-                        isDisabled ? "Desativado" : "Ativo"
-                      )
+                      (() => {
+                        const rowGroup = item.primaryGroup || getModelGroups(item)[0];
+                        const mode = getModelAccessMode(mid, rowGroup, vipPolicy, disabledModels);
+                        return h(
+                          "div",
+                          { className: "nm-mode-group" },
+                          ([
+                            { id: "auto", label: "Auto" },
+                            { id: "vip", label: "VIP" },
+                            { id: "blocked", label: "Bloq." },
+                          ] as Array<{ id: ModelAccessMode; label: string }>).map((opt) =>
+                            h(
+                              "button",
+                              {
+                                key: opt.id,
+                                type: "button",
+                                className: "nm-mode-btn",
+                                "data-active": mode === opt.id ? opt.id : undefined,
+                                onClick: () => handleSetModelAccessMode(mid, opt.id),
+                                title:
+                                  opt.id === "auto"
+                                    ? "Liberado no pool automático dos agentes"
+                                    : opt.id === "vip"
+                                    ? "Reservado para Iris e Conselho"
+                                    : "Bloqueado para roteamento automático",
+                              },
+                              opt.label
+                            )
+                          )
+                        );
+                      })()
                     )
                   );
                 })
@@ -3654,7 +3903,101 @@ Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model 
         },
       });
 
-      console.log("[NEXUSMIND] 5 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
+      (ctx.agents as any).addTool({
+        name: "nexusmind_failover_agent",
+        description: "Executa failover inteligente com Circuit Breaker e proteção estrita VIP: coloca o modelo que falhou em quarentena (TTL por classe de erro) e troca o agente para o melhor candidato saudável do pool apropriado (Auto para workers, cadeia VIP para Iris/Conselho).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            agente: { type: "string", description: "Nome ou key do agente alvo no Buzz" },
+            erro: { type: "string", description: "Mensagem de erro observada (ex: weekly limit, 404, malformed_function_call, stream ended)" },
+            wake: { type: "boolean", description: "Se true, acorda o agente após aplicar o novo modelo (default: true)" },
+          },
+          required: ["agente"],
+        },
+        call: async (_client: any, _context: any, args: any) => {
+          const usage = await loadGatewayUsageByModel(ctx);
+          let cachedModels: any[] = [];
+          try {
+            const raw = localStorage.getItem("nexusmind_cached_models");
+            if (raw) cachedModels = JSON.parse(raw);
+          } catch {}
+          const vipPol = loadVipPolicy();
+          const qBench = loadSavedQualityBench();
+          const rankSnap = buildModelRankingSnapshot({
+            catalogModels: cachedModels,
+            groups: CANONICAL_GROUPS as any,
+            usageByModel: usage.byModel,
+            usageSampleSize: usage.sampleSize,
+            tier: "geral",
+            policy: loadSavedRoutingPolicy(),
+            vipPolicy: vipPol,
+            qualityBench: qBench,
+            quarantines: loadQuarantines(),
+          });
+          const evt = await executeAgentFailover(ctx, CANONICAL_GROUPS as any, {
+            agentKeyOrName: String(args?.agente || ""),
+            errorText: args?.erro ? String(args.erro) : undefined,
+            trigger: "tool",
+            rankingSnapshot: rankSnap,
+            vipPolicy: vipPol,
+            qualityBench: qBench,
+            wakeAfter: args?.wake !== false,
+            notify: true,
+          });
+          return JSON.stringify(evt, null, 2);
+        },
+      });
+
+      (ctx.agents as any).addTool({
+        name: "nexusmind_quality_bench",
+        description: "Roda sonda real de qualidade (Tool-Calling Fidelity + integridade de resposta + latência) nos modelos informados ou nos principais do catálogo, salvando o resultado em ~/.buzz/.scratch/nexusmind-quality-bench.json.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            modelos: { type: "array", items: { type: "string" }, description: "Lista opcional de modelos a testar" },
+          },
+        },
+        call: async (_client: any, _context: any, args: any) => {
+          const list: string[] =
+            Array.isArray(args?.modelos) && args.modelos.length > 0
+              ? args.modelos.map(String)
+              : Object.values(CANONICAL_GROUPS).map((g) => g.defaultModel);
+          const candidates = list.slice(0, 8).map((m) => ({
+            model: m,
+            group: (CANONICAL_GROUPS as any)[getModelGroups(m)[0]] || CANONICAL_GROUPS.nexusmind_openai,
+          }));
+          const results = await runBatchQualityBench(ctx, candidates);
+          return JSON.stringify({ tested: candidates.length, results }, null, 2);
+        },
+      });
+
+      (ctx.agents as any).addTool({
+        name: "nexusmind_vip_policy",
+        description: "Consulta ou atualiza a política de proteção VIP (3 estados: auto | vip | blocked) e agentes protegidos (OrgFy Iris, Conselho).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["get", "set_model_mode", "toggle_vip_agent"], description: "Ação (default: 'get')" },
+            model: { type: "string", description: "ID do modelo quando action='set_model_mode'" },
+            mode: { type: "string", enum: ["auto", "vip", "blocked"], description: "Novo modo do modelo" },
+            agent: { type: "string", description: "Nome do agente quando action='toggle_vip_agent'" },
+          },
+        },
+        call: async (_client: any, _context: any, args: any) => {
+          let pol = loadVipPolicy();
+          if (args?.action === "set_model_mode" && args?.model && args?.mode) {
+            pol = setModelAccessMode(pol, String(args.model), args.mode as ModelAccessMode);
+            await saveVipPolicy(ctx, pol);
+          } else if (args?.action === "toggle_vip_agent" && args?.agent) {
+            pol = toggleVipAgent(pol, String(args.agent));
+            await saveVipPolicy(ctx, pol);
+          }
+          return JSON.stringify(pol, null, 2);
+        },
+      });
+
+      console.log("[NEXUSMIND] 8 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar agentTools:", err);
     }

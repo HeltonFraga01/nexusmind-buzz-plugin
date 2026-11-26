@@ -15,6 +15,7 @@ import {
   loadSavedRoutingPolicy,
   type LiveProbeState,
 } from "../services/model-ranking";
+import { type VipPolicyConfig, isVipAgent } from "../services/vip-policy";
 
 interface BuzzAgentRow {
   key: string;
@@ -82,11 +83,17 @@ export function createNexusMindAgentsTabComponent(
     disabledModels,
     modelTests,
     onNotify,
+    vipPolicy,
+    onToggleVipAgent,
+    onFailoverAgent,
   }: {
     models: any[];
     disabledModels: string[];
     modelTests: Record<string, LiveProbeState>;
     onNotify: (msg: { type: "success" | "error" | "info"; text: string }) => void;
+    vipPolicy?: VipPolicyConfig;
+    onToggleVipAgent?: (agentName: string) => void;
+    onFailoverAgent?: (agentKey: string) => Promise<void>;
   }) {
     const [agents, setAgents] = React.useState<BuzzAgentRow[]>(() => readBuzzAgents(ctx));
     const [search, setSearch] = React.useState<string>("");
@@ -439,8 +446,14 @@ export function createNexusMindAgentsTabComponent(
                         h(
                           "div",
                           null,
-                          h("div", { style: { fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, agent.name),
-                          h("div", { style: { fontSize: "10px", color: "var(--text-tertiary, #808080)", fontFamily: "monospace" } }, agent.harness)
+                          h(
+                            "div",
+                            { style: { display: "flex", alignItems: "center", gap: "6px" } },
+                            h("span", { style: { fontWeight: "600", color: "var(--nm-fg)" } }, agent.name),
+                            vipPolicy && isVipAgent(agent.name, vipPolicy) &&
+                              h("span", { className: "nm-pill", "data-tone": "warn", style: { fontSize: "9.5px", padding: "1px 5px" } }, "VIP")
+                          ),
+                          h("div", { style: { fontSize: "10px", color: "var(--nm-muted)", fontFamily: "monospace" } }, agent.harness)
                         )
                       )
                     ),
@@ -548,7 +561,44 @@ export function createNexusMindAgentsTabComponent(
                           },
                           isSaving ? "..." : "Salvar"
                         ),
+                        onToggleVipAgent && vipPolicy &&
+                          h(
+                            "button",
+                            {
+                              type: "button",
+                              className: "nm-btn",
+                              "data-variant": isVipAgent(agent.name, vipPolicy) ? "soft" : undefined,
+                              onClick: () => onToggleVipAgent(agent.name),
+                              title: isVipAgent(agent.name, vipPolicy)
+                                ? "Agente VIP protegido contra troca automática (clique para liberar)"
+                                : "Proteger como agente VIP (Iris/Conselho)",
+                              style: { padding: "4px 8px", fontSize: "10.5px" },
+                            },
+                            isVipAgent(agent.name, vipPolicy) ? "VIP ✓" : "VIP"
+                          ),
+                        onFailoverAgent &&
+                          h(
+                            "button",
+                            {
+                              type: "button",
+                              className: "nm-btn",
+                              onClick: async () => {
+                                setSavingKey(agent.key);
+                                try {
+                                  await onFailoverAgent(agent.key);
+                                  refreshAgents();
+                                } finally {
+                                  setSavingKey(null);
+                                }
+                              },
+                              disabled: isSaving,
+                              title: "Executar failover inteligente respeitando isolamento VIP",
+                              style: { padding: "4px 8px", fontSize: "10.5px" },
+                            },
+                            "Failover"
+                          ),
                         bestModelInfo &&
+                          !(vipPolicy && isVipAgent(agent.name, vipPolicy)) &&
                           agent.model !== bestModelInfo.model &&
                           h(
                             "button",
