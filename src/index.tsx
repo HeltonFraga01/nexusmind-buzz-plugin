@@ -13,6 +13,7 @@ import {
   type RankingTier,
 } from "./services/model-ranking";
 import { createModelRankingTabComponent } from "./components/ModelRankingTab";
+import { createNexusMindAgentsTabComponent } from "./components/NexusMindAgentsTab";
 
 export {
   selectBestModelByTier,
@@ -367,7 +368,7 @@ const SVG_ICONS = {
     ),
 };
 
-export const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions"];
+export const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions", "navigation", "notifications", "shortcuts"];
 
 // Ícone monocromático padrão Buzz com currentColor (branco inativo, preto quando selecionado)
 const ICON =
@@ -742,13 +743,30 @@ export function apply(ctx: Context) {
       Record<string, { status: "testing" | "ok" | "error"; latency?: number; errorMsg?: string }>
     >({});
 
-    // Primary Workspace Section (Modelos vs. Ranking & Roteamento)
-    const [activeSection, setActiveSection] = React.useState<"catalog" | "ranking">("catalog");
+    // Primary Workspace Section (Modelos | Ranking & Roteamento | Agentes Buzz)
+    const [activeSection, setActiveSection] = React.useState<"catalog" | "ranking" | "agents">("catalog");
     const [showGatewayDetails, setShowGatewayDetails] = React.useState<boolean>(false);
     const ModelRankingTab = React.useMemo(
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS as any),
       []
     );
+    const NexusMindAgentsTab = React.useMemo(
+      () => createNexusMindAgentsTabComponent(ctx, CANONICAL_GROUPS as any),
+      []
+    );
+    const buzzAgentsCount = React.useMemo(() => {
+      try {
+        const snap = (ctx as any)?.agents?.snapshot?.() || {};
+        const keys = new Set<string>();
+        for (const list of [snap.agents, snap.running]) {
+          if (!Array.isArray(list)) continue;
+          for (const a of list) if (a?.key) keys.add(String(a.key));
+        }
+        return keys.size;
+      } catch {
+        return 0;
+      }
+    }, [activeSection, models.length]);
 
     // Filter & Pagination States
     const [selectedGroupTab, setSelectedGroupTab] = React.useState<string>("all");
@@ -885,6 +903,15 @@ export function apply(ctx: Context) {
           };
           setDashboardMetrics(metrics);
           localStorage.setItem("nexusmind_metrics_cache", JSON.stringify(metrics));
+          // Persiste snapshot leve de telemetria ao vivo para o ecossistema (OrgFy / scripts)
+          try {
+            if ((ctx.host as any)?.writeFile) {
+              void (ctx.host as any).writeFile(
+                "~/.buzz/.scratch/nm_dashboard_live.json",
+                JSON.stringify({ fetched_at: new Date().toISOString(), ...metrics }, null, 2)
+              );
+            }
+          } catch {}
         }
       } catch {
         // Fallback gracefully to canonical data so the dashboard never breaks
@@ -1599,6 +1626,12 @@ print("SYNC_SUCCESS")
           type: "success",
           text: `Sincronização concluída! Goose: ${gooseTotal} modelos (top ${GOOSE_MAX_MODELS_PER_GROUP} por provedor por uso/qualidade). Pi: ${totalActive} ativos (${disabledModels.length} desativados expurgados).`,
         });
+        try {
+          (ctx as any)?.notifications?.notify?.({
+            title: "NexusMind Gateway",
+            body: `Sincronizado: ${gooseTotal} modelos no Goose e ${totalActive} ativos no Pi.`,
+          });
+        } catch {}
       } catch (err: any) {
         setStatusMessage({
           type: "error",
@@ -1721,27 +1754,34 @@ print("SYNC_SUCCESS")
     if (isSettingsCard) {
       const openFullPage = () => {
         try {
+          if ((ctx as any).navigation?.open) {
+            (ctx as any).navigation.open({
+              version: 1,
+              kind: "page",
+              pluginId: "digital.nexusmind.buzz",
+              pageId: "nexusmind",
+            });
+            return;
+          }
           if ((ctx as any).navigation?.navigate) {
             (ctx as any).navigation.navigate("nexusmind");
-          } else {
-            window.location.hash = "#/nexusmind";
+            return;
           }
-        } catch {
-          window.location.hash = "#/nexusmind";
-        }
+        } catch {}
+        window.location.hash = "#/nexusmind";
       };
 
       return h(
         "div",
         {
           style: {
-            backgroundColor: "rgba(255, 255, 255, 0.03)",
-            border: "1px solid rgba(255, 255, 255, 0.08)",
-            borderRadius: "16px",
-            padding: "20px 24px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+            borderRadius: "10px",
+            padding: "14px 16px",
             display: "flex",
             flexDirection: "column",
-            gap: "16px",
+            gap: "12px",
           },
         },
         h(
@@ -1751,26 +1791,29 @@ print("SYNC_SUCCESS")
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
+              gap: "10px",
+              flexWrap: "wrap",
             },
           },
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "12px" } },
+            { style: { display: "flex", alignItems: "center", gap: "10px" } },
             h(
               "div",
               {
                 style: {
-                  width: "40px",
-                  height: "40px",
-                  borderRadius: "12px",
-                  background: "linear-gradient(135deg, #10b981 0%, #06b6d4 100%)",
+                  width: "32px",
+                  height: "32px",
+                  borderRadius: "8px",
+                  backgroundColor: "var(--affordance-subtle, #282828)",
+                  border: "1px solid var(--border-primary, #333333)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "#000000",
+                  color: "var(--text-primary, #ffffff)",
                 },
               },
-              SVG_ICONS.dashboard({ h, width: 20, height: 20 })
+              SVG_ICONS.dashboard({ h, width: 16, height: 16 })
             ),
             h(
               "div",
@@ -1778,26 +1821,26 @@ print("SYNC_SUCCESS")
               h(
                 "div",
                 { style: { display: "flex", alignItems: "center", gap: "6px" } },
-                h("span", { style: { fontWeight: "600", fontSize: "14px" } }, "NexusMind Gateway"),
+                h("span", { style: { fontWeight: "600", fontSize: "13px", color: "var(--text-primary, #ffffff)" } }, "NexusMind Gateway"),
                 h(
                   "span",
                   {
                     style: {
                       fontSize: "10px",
                       padding: "1px 6px",
-                      borderRadius: "9999px",
-                      backgroundColor: "rgba(16, 185, 129, 0.2)",
-                      color: "#10b981",
+                      borderRadius: "4px",
+                      backgroundColor: "var(--green-3, #132d21)",
+                      color: "var(--green-11, #3dd68c)",
                       fontWeight: "600",
                     },
                   },
-                  "v2.3"
+                  "v2.7"
                 )
               ),
               h(
                 "div",
-                { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
-                `Conectado como ${profileData.username} ($${(profileData.balance || 0).toFixed(2)}) • ${models.length} modelos`
+                { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
+                `${profileData.username} · $${(profileData.balance || 0).toFixed(2)} · ${models.length} modelos`
               )
             )
           ),
@@ -1806,17 +1849,17 @@ print("SYNC_SUCCESS")
             {
               onClick: openFullPage,
               style: {
-                borderRadius: "9999px",
-                backgroundColor: "rgba(255, 255, 255, 0.08)",
-                color: "#ffffff",
-                border: "none",
+                borderRadius: "6px",
+                backgroundColor: "var(--affordance-subtle, #282828)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
                 cursor: "pointer",
-                padding: "7px 16px",
+                padding: "6px 12px",
                 fontSize: "12px",
                 fontWeight: "500",
               },
             },
-            "Abrir Cockpit →"
+            "Abrir Cockpit ↗"
           )
         ),
         h(
@@ -1828,11 +1871,11 @@ print("SYNC_SUCCESS")
               onClick: handlePullModelsFromNexusMind,
               disabled: loadingPull,
               style: {
-                borderRadius: "9999px",
-                padding: "6px 14px",
-                backgroundColor: "rgba(255, 255, 255, 0.08)",
-                color: "#ffffff",
-                border: "none",
+                borderRadius: "6px",
+                padding: "6px 12px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
                 cursor: loadingPull ? "not-allowed" : "pointer",
                 fontSize: "12px",
                 fontWeight: "500",
@@ -1846,10 +1889,10 @@ print("SYNC_SUCCESS")
               onClick: handleSyncModelsToBuzz,
               disabled: loadingSync,
               style: {
-                borderRadius: "9999px",
-                padding: "6px 16px",
-                backgroundColor: "#10b981",
-                color: "#000000",
+                borderRadius: "6px",
+                padding: "6px 14px",
+                backgroundColor: "var(--affordance-prominent, #ffffff)",
+                color: "var(--text-on-prominent, #000000)",
                 border: "none",
                 cursor: loadingSync ? "not-allowed" : "pointer",
                 fontSize: "12px",
@@ -1870,55 +1913,53 @@ print("SYNC_SUCCESS")
         "div",
         {
           style: {
-            maxWidth: "580px",
-            margin: "60px auto",
-            backgroundColor: "rgba(255, 255, 255, 0.03)",
-            border: "1px solid rgba(255, 255, 255, 0.08)",
-            borderRadius: "20px",
-            padding: "36px 40px",
+            maxWidth: "520px",
+            margin: "48px auto",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+            borderRadius: "12px",
+            padding: "28px 32px",
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
             textAlign: "center",
-            boxShadow: "0 20px 40px rgba(0, 0, 0, 0.4)",
           },
         },
         h(
           "div",
           {
             style: {
-              width: "64px",
-              height: "64px",
-              borderRadius: "18px",
-              background: "linear-gradient(135deg, #10b981 0%, #06b6d4 100%)",
+              width: "44px",
+              height: "44px",
+              borderRadius: "10px",
+              backgroundColor: "var(--affordance-subtle, #282828)",
+              border: "1px solid var(--border-primary, #333333)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: "#000000",
-              marginBottom: "20px",
-              boxShadow: "0 8px 24px rgba(16, 185, 129, 0.35)",
+              color: "var(--text-primary, #ffffff)",
+              marginBottom: "14px",
             },
           },
-          SVG_ICONS.plug({ h, width: 32, height: 32 })
+          SVG_ICONS.plug({ h, width: 22, height: 22 })
         ),
         h(
           "h1",
-          { style: { fontSize: "24px", fontWeight: "700", margin: "0 0 8px", color: "#ffffff" } },
+          { style: { fontSize: "18px", fontWeight: "600", margin: "0 0 6px", color: "var(--text-primary, #ffffff)" } },
           "NexusMind Gateway"
         ),
         h(
           "p",
           {
             style: {
-              fontSize: "14px",
-              color: "var(--text-subtle, #8e8e96)",
-              lineHeight: "1.6",
-              margin: "0 0 28px",
+              fontSize: "13px",
+              color: "var(--text-tertiary, #a4a4a4)",
+              lineHeight: "1.5",
+              margin: "0 0 22px",
             },
           },
-          "Conecte sua conta do NexusMind para liberar mais de 180 modelos corporativos (OpenAI, Anthropic Claude, Google Gemini e xAI Grok) para os agentes do Buzz Desktop."
+          "Conecte sua conta NexusMind para sincronizar modelos OpenAI, Anthropic Claude, Google Gemini e xAI Grok com os agentes do Buzz Desktop."
         ),
-        // Primary Connect Button
         h(
           "button",
           {
@@ -1926,40 +1967,38 @@ print("SYNC_SUCCESS")
             disabled: authInFlight,
             style: {
               width: "100%",
-              borderRadius: "9999px",
-              padding: "13px 24px",
-              background: "linear-gradient(135deg, #a855f7 0%, #6366f1 100%)",
-              color: "#ffffff",
+              borderRadius: "8px",
+              padding: "10px 18px",
+              backgroundColor: "var(--affordance-prominent, #ffffff)",
+              color: "var(--text-on-prominent, #000000)",
               border: "none",
               cursor: authInFlight ? "not-allowed" : "pointer",
               fontWeight: "600",
-              fontSize: "14px",
+              fontSize: "13px",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               gap: "8px",
-              marginBottom: "16px",
-              boxShadow: "0 4px 16px rgba(168, 85, 247, 0.3)",
+              marginBottom: "10px",
             },
           },
-          SVG_ICONS.plug({ h, width: 16, height: 16 }),
+          SVG_ICONS.plug({ h, width: 15, height: 15 }),
           authInFlight ? "Aguardando no Navegador..." : "Conectar via OAuth / MCP"
         ),
-        // Secondary Action Buttons
         h(
           "div",
-          { style: { display: "flex", gap: "10px", width: "100%", marginBottom: "24px" } },
+          { style: { display: "flex", gap: "8px", width: "100%", marginBottom: "20px" } },
           h(
             "button",
             {
               onClick: handleOpenInBrowser,
               style: {
                 flex: "1",
-                borderRadius: "9999px",
-                padding: "9px 14px",
-                backgroundColor: "rgba(255, 255, 255, 0.06)",
-                color: "#ffffff",
-                border: "1px solid rgba(255, 255, 255, 0.1)",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
                 cursor: "pointer",
                 fontSize: "12px",
                 display: "flex",
@@ -1977,11 +2016,11 @@ print("SYNC_SUCCESS")
               onClick: handleCopyAuthUrl,
               style: {
                 flex: "1",
-                borderRadius: "9999px",
-                padding: "9px 14px",
-                backgroundColor: "rgba(255, 255, 255, 0.06)",
-                color: "#ffffff",
-                border: "1px solid rgba(255, 255, 255, 0.1)",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
                 cursor: "pointer",
                 fontSize: "12px",
                 display: "flex",
@@ -1994,26 +2033,24 @@ print("SYNC_SUCCESS")
             "Copiar Link"
           )
         ),
-        // Divider
         h(
           "div",
           {
             style: {
               width: "100%",
               height: "1px",
-              backgroundColor: "rgba(255, 255, 255, 0.08)",
-              marginBottom: "20px",
+              backgroundColor: "var(--border-primary, #2e2e2e)",
+              marginBottom: "16px",
             },
           }
         ),
-        // Manual Input Option
         h(
           "div",
           { style: { width: "100%", textAlign: "left" } },
           h(
             "label",
-            { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)", display: "block", marginBottom: "8px" } },
-            "Ou conecte manualmente com sua API Key (sk-...) ou Token:"
+            { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", display: "block", marginBottom: "6px" } },
+            "Ou conecte manualmente com API Key (sk-...) ou Token:"
           ),
           h(
             "div",
@@ -2025,12 +2062,12 @@ print("SYNC_SUCCESS")
               onChange: (e: any) => setManualKeyInput(e.target.value),
               style: {
                 flex: "1",
-                backgroundColor: "rgba(0, 0, 0, 0.4)",
-                border: "1px solid rgba(255, 255, 255, 0.12)",
-                borderRadius: "10px",
-                padding: "9px 14px",
-                color: "#ffffff",
-                fontSize: "13px",
+                backgroundColor: "var(--surface-inset, #101010)",
+                border: "1px solid var(--border-primary, #333333)",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                color: "var(--text-primary, #ffffff)",
+                fontSize: "12px",
                 outline: "none",
               },
             }),
@@ -2039,14 +2076,14 @@ print("SYNC_SUCCESS")
               {
                 onClick: handleManualKeyConnect,
                 style: {
-                  borderRadius: "9999px",
-                  padding: "9px 18px",
-                  backgroundColor: "#10b981",
-                  color: "#000000",
+                  borderRadius: "6px",
+                  padding: "8px 14px",
+                  backgroundColor: "var(--affordance-prominent, #ffffff)",
+                  color: "var(--text-on-prominent, #000000)",
                   border: "none",
                   cursor: "pointer",
                   fontWeight: "600",
-                  fontSize: "13px",
+                  fontSize: "12px",
                 },
               },
               "Conectar"
@@ -2150,13 +2187,14 @@ print("SYNC_SUCCESS")
                   [
                     { id: "catalog", label: "Modelos" },
                     { id: "ranking", label: "Ranking & Roteamento" },
+                    { id: "agents", label: buzzAgentsCount > 0 ? `Agentes (${buzzAgentsCount})` : "Agentes" },
                   ].map((tab) => {
                     const active = activeSection === tab.id;
                     return h(
                       "button",
                       {
                         key: tab.id,
-                        onClick: () => setActiveSection(tab.id as "catalog" | "ranking"),
+                        onClick: () => setActiveSection(tab.id as "catalog" | "ranking" | "agents"),
                         style: {
                           borderRadius: "6px",
                           padding: "5px 12px",
@@ -2315,6 +2353,13 @@ print("SYNC_SUCCESS")
                   disabledModels,
                   modelTests,
                   onTestSingleModel: handleTestSingleModel,
+                  onNotify: setStatusMessage,
+                })
+              : activeSection === "agents"
+              ? h(NexusMindAgentsTab, {
+                  models,
+                  disabledModels,
+                  modelTests,
                   onNotify: setStatusMessage,
                 })
               : h(
@@ -2502,12 +2547,12 @@ print("SYNC_SUCCESS")
                           setCurrentPage(1);
                         },
                         style: {
-                          borderRadius: "9999px",
-                          padding: "6px 14px",
+                          borderRadius: "6px",
+                          padding: "5px 10px",
                           border: "none",
                           backgroundColor:
-                            selectedGroupTab === tab.id ? "rgba(255, 255, 255, 0.15)" : "transparent",
-                          color: selectedGroupTab === tab.id ? "#ffffff" : "var(--text-subtle, #8e8e96)",
+                            selectedGroupTab === tab.id ? "var(--affordance-selected, #333333)" : "transparent",
+                          color: selectedGroupTab === tab.id ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
                           cursor: "pointer",
                           fontSize: "12px",
                           fontWeight: selectedGroupTab === tab.id ? "600" : "500",
@@ -2521,7 +2566,7 @@ print("SYNC_SUCCESS")
                 // Search Input & Filter Toggles
                 h(
                   "div",
-                  { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } },
+                  { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } },
                   h(
                     "div",
                     {
@@ -2540,11 +2585,11 @@ print("SYNC_SUCCESS")
                         setCurrentPage(1);
                       },
                       style: {
-                        borderRadius: "9999px",
-                        backgroundColor: "rgba(0, 0, 0, 0.3)",
-                        border: "1px solid rgba(255, 255, 255, 0.1)",
-                        color: "#ffffff",
-                        padding: "6px 14px 6px 32px",
+                        borderRadius: "6px",
+                        backgroundColor: "var(--surface-inset, #101010)",
+                        border: "1px solid var(--border-primary, #333333)",
+                        color: "var(--text-primary, #ffffff)",
+                        padding: "5px 10px 5px 28px",
                         fontSize: "12px",
                         outline: "none",
                         width: "180px",
@@ -2555,13 +2600,13 @@ print("SYNC_SUCCESS")
                       {
                         style: {
                           position: "absolute",
-                          left: "10px",
-                          color: "var(--text-subtle, #8e8e96)",
+                          left: "9px",
+                          color: "var(--text-tertiary, #a4a4a4)",
                           pointerEvents: "none",
                           display: "flex",
                         },
                       },
-                      SVG_ICONS.search({ h, width: 14, height: 14 })
+                      SVG_ICONS.search({ h, width: 13, height: 13 })
                     )
                   ),
                   h(
@@ -2572,12 +2617,11 @@ print("SYNC_SUCCESS")
                         setCurrentPage(1);
                       },
                       style: {
-                        borderRadius: "9999px",
-                        padding: "6px 12px",
-                        border: "1px solid",
-                        borderColor: filterReasoning ? "#a855f7" : "rgba(255, 255, 255, 0.1)",
-                        backgroundColor: filterReasoning ? "rgba(168, 85, 247, 0.15)" : "transparent",
-                        color: filterReasoning ? "#c084fc" : "var(--text-subtle, #8e8e96)",
+                        borderRadius: "6px",
+                        padding: "5px 10px",
+                        border: `1px solid ${filterReasoning ? "var(--blue-7, #3b6ea5)" : "var(--border-primary, #333333)"}`,
+                        backgroundColor: filterReasoning ? "var(--blue-3, #13253a)" : "transparent",
+                        color: filterReasoning ? "var(--blue-11, #70b8ff)" : "var(--text-tertiary, #a4a4a4)",
                         cursor: "pointer",
                         fontSize: "11px",
                         fontWeight: "500",
@@ -2593,12 +2637,11 @@ print("SYNC_SUCCESS")
                         setCurrentPage(1);
                       },
                       style: {
-                        borderRadius: "9999px",
-                        padding: "6px 12px",
-                        border: "1px solid",
-                        borderColor: filterFree ? "#10b981" : "rgba(255, 255, 255, 0.1)",
-                        backgroundColor: filterFree ? "rgba(168, 185, 129, 0.15)" : "transparent",
-                        color: filterFree ? "#10b981" : "var(--text-subtle, #8e8e96)",
+                        borderRadius: "6px",
+                        padding: "5px 10px",
+                        border: `1px solid ${filterFree ? "var(--green-7, #28714f)" : "var(--border-primary, #333333)"}`,
+                        backgroundColor: filterFree ? "var(--green-3, #132d21)" : "transparent",
+                        color: filterFree ? "var(--green-11, #3dd68c)" : "var(--text-tertiary, #a4a4a4)",
                         cursor: "pointer",
                         fontSize: "11px",
                         fontWeight: "500",
@@ -2619,11 +2662,11 @@ print("SYNC_SUCCESS")
                           setCurrentPage(1);
                         },
                         style: {
-                          borderRadius: "9999px",
-                          padding: "6px 10px",
-                          border: "1px solid rgba(255, 255, 255, 0.12)",
-                          backgroundColor: "rgba(255, 255, 255, 0.04)",
-                          color: "#e4e4e7",
+                          borderRadius: "6px",
+                          padding: "5px 10px",
+                          border: "1px solid var(--border-primary, #333333)",
+                          backgroundColor: "var(--affordance-subtle, #232323)",
+                          color: "var(--text-secondary, #c7c7c7)",
                           cursor: "pointer",
                           fontSize: "11px",
                           fontWeight: "500",
@@ -2653,7 +2696,7 @@ print("SYNC_SUCCESS")
                       alignItems: "center",
                       gap: "5px",
                       fontSize: "11px",
-                      color: "var(--text-subtle, #8e8e96)",
+                      color: "var(--text-tertiary, #a4a4a4)",
                       marginRight: "4px",
                     },
                   },
@@ -2661,11 +2704,11 @@ print("SYNC_SUCCESS")
                   "Status:"
                 ),
                 [
-                  { id: "all", label: `Todos (${statusCounts.all})`, accent: "#ffffff" },
-                  { id: "active", label: `Ativos (${statusCounts.active})`, accent: "#10b981" },
-                  { id: "disabled", label: `Desativados (${statusCounts.disabled})`, accent: "#9ca3af" },
-                  { id: "online", label: `Online (${statusCounts.online})`, accent: "#34d399" },
-                  { id: "error", label: `Com Erro (${statusCounts.error})`, accent: "#f87171" },
+                  { id: "all", label: `Todos (${statusCounts.all})`, accent: "var(--text-primary, #ffffff)" },
+                  { id: "active", label: `Ativos (${statusCounts.active})`, accent: "var(--green-11, #3dd68c)" },
+                  { id: "disabled", label: `Desativados (${statusCounts.disabled})`, accent: "var(--text-secondary, #c7c7c7)" },
+                  { id: "online", label: `Online (${statusCounts.online})`, accent: "var(--green-11, #3dd68c)" },
+                  { id: "error", label: `Com Erro (${statusCounts.error})`, accent: "var(--red-11, #ff9592)" },
                 ].map((st) => {
                   const active = statusFilter === st.id;
                   return h(
@@ -2677,15 +2720,14 @@ print("SYNC_SUCCESS")
                         setCurrentPage(1);
                       },
                       style: {
-                        borderRadius: "9999px",
-                        padding: "4px 12px",
-                        border: `1px solid ${active ? st.accent : "rgba(255, 255, 255, 0.08)"}`,
-                        backgroundColor: active ? "rgba(255, 255, 255, 0.1)" : "transparent",
-                        color: active ? st.accent : "var(--text-subtle, #8e8e96)",
+                        borderRadius: "6px",
+                        padding: "4px 10px",
+                        border: `1px solid ${active ? st.accent : "var(--border-primary, #2e2e2e)"}`,
+                        backgroundColor: active ? "var(--affordance-selected, #2e2e2e)" : "transparent",
+                        color: active ? st.accent : "var(--text-tertiary, #a4a4a4)",
                         cursor: "pointer",
                         fontSize: "11px",
                         fontWeight: active ? "600" : "500",
-                        transition: "all 0.15s ease",
                       },
                     },
                     st.label
@@ -2804,31 +2846,31 @@ print("SYNC_SUCCESS")
                       justifyContent: "space-between",
                       flexWrap: "wrap",
                       gap: "10px",
-                      padding: "8px 14px",
-                      borderRadius: "10px",
-                      backgroundColor: "rgba(16, 185, 129, 0.06)",
-                      border: "1px solid rgba(16, 185, 129, 0.2)",
+                      padding: "8px 12px",
+                      borderRadius: "8px",
+                      backgroundColor: "var(--bg-panel, #1a1a1a)",
+                      border: "1px solid var(--border-primary, #2e2e2e)",
                       fontSize: "11px",
                     },
                   },
                   h(
                     "div",
                     { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-                    h("span", { style: { fontWeight: "700", color: "#10b981" } }, "Ranking Ping Real:"),
+                    h("span", { style: { fontWeight: "600", color: "var(--green-11, #3dd68c)" } }, "Ping Real:"),
                     top3.length === 0
-                      ? h("span", { style: { color: "#f87171" } }, "Nenhum modelo online nos testes recentes.")
+                      ? h("span", { style: { color: "var(--red-11, #ff9592)" } }, "Nenhum modelo online nos testes recentes.")
                       : top3.map(([mid, t], idx) =>
                           h(
                             "span",
                             {
                               key: mid,
                               style: {
-                                padding: "2px 8px",
-                                borderRadius: "9999px",
-                                backgroundColor: idx === 0 ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.06)",
-                                color: idx === 0 ? "#34d399" : "#e4e4e7",
+                                padding: "2px 7px",
+                                borderRadius: "5px",
+                                backgroundColor: idx === 0 ? "var(--green-3, #132d21)" : "var(--affordance-subtle, #232323)",
+                                color: idx === 0 ? "var(--green-11, #3dd68c)" : "var(--text-secondary, #c7c7c7)",
                                 fontFamily: "monospace",
-                                fontWeight: idx === 0 ? "700" : "500",
+                                fontWeight: idx === 0 ? "600" : "500",
                               },
                             },
                             `#${idx + 1} ${mid} (${t.latency}ms)`
@@ -2837,16 +2879,25 @@ print("SYNC_SUCCESS")
                   ),
                   h(
                     "span",
-                    { style: { color: "#9ca3af", fontFamily: "monospace" } },
+                    { style: { color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace" } },
                     `Estabilidade: ${okCount}/${tested.length} online (${pct}%)`
                   )
                 );
               })(),
 
-              // Model List Rows
+              // Model List Rows (Buzz-native flat container)
               h(
                 "div",
-                { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+                {
+                  style: {
+                    display: "flex",
+                    flexDirection: "column",
+                    backgroundColor: "var(--bg-panel, #1a1a1a)",
+                    border: "1px solid var(--border-primary, #2e2e2e)",
+                    borderRadius: "10px",
+                    overflow: "hidden",
+                  },
+                },
                 paginatedModels.length === 0
                   ? h(
                       "div",
@@ -2854,18 +2905,15 @@ print("SYNC_SUCCESS")
                         style: {
                           padding: "28px 16px",
                           textAlign: "center",
-                          borderRadius: "10px",
-                          backgroundColor: "rgba(255, 255, 255, 0.02)",
-                          border: "1px dashed rgba(255, 255, 255, 0.08)",
-                          color: "var(--text-subtle, #8e8e96)",
+                          color: "var(--text-tertiary, #a4a4a4)",
                           fontSize: "12px",
                         },
                       },
                       statusFilter === "online" || statusFilter === "error"
-                        ? "Nenhum modelo corresponde a este filtro ainda. Clique em 'Testar Visíveis' para rodar o healthcheck."
+                        ? "Nenhum modelo corresponde a este filtro ainda. Clique em 'Testar visíveis' para rodar o healthcheck."
                         : "Nenhum modelo encontrado com os filtros atuais."
                     )
-                  : paginatedModels.map((item: any) => {
+                  : paginatedModels.map((item: any, idx: number) => {
                   const mid = item.id;
                   const isDisabled = disabledModels.includes(mid);
                   const lower = mid.toLowerCase();
@@ -2885,39 +2933,35 @@ print("SYNC_SUCCESS")
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "space-between",
-                        padding: "10px 14px",
-                        backgroundColor: isDisabled
-                          ? "rgba(255, 255, 255, 0.01)"
-                          : "rgba(255, 255, 255, 0.03)",
-                        border: "1px solid rgba(255, 255, 255, 0.05)",
-                        borderRadius: "10px",
-                        opacity: isDisabled ? 0.45 : 1,
-                        transition: "all 0.15s ease",
+                        padding: "9px 14px",
+                        borderTop: idx > 0 ? "1px solid var(--border-subtle, rgba(255,255,255,0.05))" : "none",
+                        opacity: isDisabled ? 0.5 : 1,
                       },
                     },
                     // Left: Toggle Checkbox + Model Name & Badges
                     h(
                       "div",
-                      { style: { display: "flex", alignItems: "center", gap: "12px", minWidth: 0 } },
+                      { style: { display: "flex", alignItems: "center", gap: "10px", minWidth: 0 } },
                       h("input", {
                         type: "checkbox",
                         checked: !isDisabled,
                         onChange: () => handleToggleModel(mid),
-                        style: { cursor: "pointer", accentColor: "#10b981", width: "16px", height: "16px" },
+                        style: { cursor: "pointer", accentColor: "#30a46c", width: "14px", height: "14px" },
                       }),
                       h(
                         "div",
                         { style: { display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 } },
                         h(
                           "div",
-                          { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+                          { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
                           h(
                             "span",
                             {
                               style: {
-                                fontWeight: "600",
-                                fontSize: "13px",
-                                color: isDisabled ? "#8e8e96" : "#ffffff",
+                                fontWeight: "500",
+                                fontSize: "12px",
+                                fontFamily: "monospace",
+                                color: isDisabled ? "var(--text-tertiary, #808080)" : "var(--text-primary, #ffffff)",
                                 textDecoration: isDisabled ? "line-through" : "none",
                               },
                             },
@@ -2929,11 +2973,11 @@ print("SYNC_SUCCESS")
                               {
                                 style: {
                                   fontSize: "9px",
-                                  padding: "1px 6px",
+                                  padding: "1px 5px",
                                   borderRadius: "4px",
-                                  backgroundColor: "rgba(168, 85, 247, 0.15)",
-                                  color: "#c084fc",
-                                  fontWeight: "700",
+                                  backgroundColor: "var(--blue-3, #13253a)",
+                                  color: "var(--blue-11, #70b8ff)",
+                                  fontWeight: "600",
                                 },
                               },
                               "THINKING"
@@ -2944,11 +2988,11 @@ print("SYNC_SUCCESS")
                               {
                                 style: {
                                   fontSize: "9px",
-                                  padding: "1px 6px",
+                                  padding: "1px 5px",
                                   borderRadius: "4px",
-                                  backgroundColor: "rgba(16, 185, 129, 0.15)",
-                                  color: "#10b981",
-                                  fontWeight: "700",
+                                  backgroundColor: "var(--affordance-subtle, #282828)",
+                                  color: "var(--text-secondary, #c7c7c7)",
+                                  fontWeight: "600",
                                 },
                               },
                               "FREE"
@@ -2956,7 +3000,7 @@ print("SYNC_SUCCESS")
                         ),
                         h(
                           "div",
-                          { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
+                          { style: { fontSize: "11px", color: "var(--text-tertiary, #808080)" } },
                           item.context_window
                             ? `Ctx: ${formatNumber(item.context_window)} tokens`
                             : "Ctx: 128k tokens"
@@ -2967,49 +3011,48 @@ print("SYNC_SUCCESS")
                     // Right: Test Button + Status Badge + Sync Indicator
                     h(
                       "div",
-                      { style: { display: "flex", alignItems: "center", gap: "10px" } },
-                      // Test Result Indicator
+                      { style: { display: "flex", alignItems: "center", gap: "8px" } },
                       testRes &&
                         h(
                           "span",
                           {
                             style: {
                               fontSize: "11px",
-                              padding: "2px 8px",
-                              borderRadius: "9999px",
+                              padding: "2px 7px",
+                              borderRadius: "5px",
+                              fontFamily: "monospace",
                               backgroundColor:
                                 testRes.status === "ok"
-                                  ? "rgba(16, 185, 129, 0.15)"
+                                  ? "var(--green-3, #132d21)"
                                   : testRes.status === "testing"
-                                  ? "rgba(59, 130, 246, 0.15)"
-                                  : "rgba(239, 68, 68, 0.15)",
+                                  ? "var(--blue-3, #13253a)"
+                                  : "var(--red-3, #3b1219)",
                               color:
                                 testRes.status === "ok"
-                                  ? "#10b981"
+                                  ? "var(--green-11, #3dd68c)"
                                   : testRes.status === "testing"
-                                  ? "#60a5fa"
-                                  : "#f87171",
-                              fontWeight: "600",
+                                  ? "var(--blue-11, #70b8ff)"
+                                  : "var(--red-11, #ff9592)",
+                              fontWeight: "500",
                             },
                           },
                           testRes.status === "testing"
                             ? "Testando..."
                             : testRes.status === "ok"
-                            ? `${testRes.latency}ms · Online`
+                            ? `${testRes.latency}ms · OK`
                             : `Erro · ${testRes.errorMsg || "Falha"}`
                         ),
-                      // Individual Test Button
                       h(
                         "button",
                         {
                           onClick: () => handleTestSingleModel(mid),
                           disabled: testRes?.status === "testing",
                           style: {
-                            borderRadius: "9999px",
-                            padding: "4px 10px",
-                            backgroundColor: "rgba(255, 255, 255, 0.06)",
-                            color: "#ffffff",
-                            border: "1px solid rgba(255, 255, 255, 0.1)",
+                            borderRadius: "6px",
+                            padding: "4px 9px",
+                            backgroundColor: "var(--affordance-subtle, #232323)",
+                            color: "var(--text-secondary, #c7c7c7)",
+                            border: "1px solid var(--border-primary, #333333)",
                             fontSize: "11px",
                             fontWeight: "500",
                             cursor: testRes?.status === "testing" ? "not-allowed" : "pointer",
@@ -3021,19 +3064,18 @@ print("SYNC_SUCCESS")
                         SVG_ICONS.pulse({ h, width: 11, height: 11 }),
                         "Testar"
                       ),
-                      // Active in Buzz Badge
                       h(
                         "span",
                         {
                           style: {
                             fontSize: "11px",
                             fontWeight: "500",
-                            color: isDisabled ? "#8e8e96" : "#10b981",
-                            minWidth: "85px",
+                            color: isDisabled ? "var(--text-tertiary, #808080)" : "var(--green-11, #3dd68c)",
+                            minWidth: "76px",
                             textAlign: "right",
                           },
                         },
-                        isDisabled ? "✕ Desativado" : "✓ Ativo no Buzz"
+                        isDisabled ? "Desativado" : "Ativo"
                       )
                     )
                   );
@@ -3048,15 +3090,15 @@ print("SYNC_SUCCESS")
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "space-between",
-                    paddingTop: "14px",
-                    borderTop: "1px solid rgba(255, 255, 255, 0.06)",
+                    paddingTop: "12px",
+                    borderTop: "1px solid var(--border-primary, #2e2e2e)",
                     flexWrap: "wrap",
                     gap: "10px",
                   },
                 },
                 h(
                   "div",
-                  { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
+                  { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
                   pageSize === 0
                     ? `Exibindo todos os ${filteredModels.length} modelos`
                     : `Exibindo ${Math.min((currentPage - 1) * pageSize + 1, filteredModels.length)}–${Math.min(
@@ -3066,31 +3108,31 @@ print("SYNC_SUCCESS")
                 ),
                 h(
                   "div",
-                  { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                  { style: { display: "flex", alignItems: "center", gap: "6px" } },
                   h(
                     "button",
                     {
                       onClick: () => setCurrentPage((p: number) => Math.max(1, p - 1)),
                       disabled: currentPage <= 1,
                       style: {
-                        borderRadius: "9999px",
-                        padding: "5px 12px",
-                        backgroundColor: "rgba(255, 255, 255, 0.06)",
-                        color: currentPage <= 1 ? "rgba(255,255,255,0.3)" : "#ffffff",
-                        border: "none",
+                        borderRadius: "6px",
+                        padding: "4px 10px",
+                        backgroundColor: "var(--affordance-subtle, #232323)",
+                        color: currentPage <= 1 ? "var(--text-tertiary, #666666)" : "var(--text-primary, #ffffff)",
+                        border: "1px solid var(--border-primary, #333333)",
                         cursor: currentPage <= 1 ? "not-allowed" : "pointer",
-                        fontSize: "12px",
+                        fontSize: "11px",
                         display: "flex",
                         alignItems: "center",
                         gap: "4px",
                       },
                     },
-                    SVG_ICONS.chevronLeft({ h, width: 14, height: 14 }),
+                    SVG_ICONS.chevronLeft({ h, width: 13, height: 13 }),
                     "Anterior"
                   ),
                   h(
                     "span",
-                    { style: { fontSize: "12px", color: "#8e8e96", padding: "0 6px" } },
+                    { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", padding: "0 6px" } },
                     `Página ${currentPage} de ${totalPages}`
                   ),
                   h(
@@ -3099,26 +3141,25 @@ print("SYNC_SUCCESS")
                       onClick: () => setCurrentPage((p: number) => Math.min(totalPages, p + 1)),
                       disabled: currentPage >= totalPages,
                       style: {
-                        borderRadius: "9999px",
-                        padding: "5px 12px",
-                        backgroundColor: "rgba(255, 255, 255, 0.06)",
-                        color: currentPage >= totalPages ? "rgba(255,255,255,0.3)" : "#ffffff",
-                        border: "none",
+                        borderRadius: "6px",
+                        padding: "4px 10px",
+                        backgroundColor: "var(--affordance-subtle, #232323)",
+                        color: currentPage >= totalPages ? "var(--text-tertiary, #666666)" : "var(--text-primary, #ffffff)",
+                        border: "1px solid var(--border-primary, #333333)",
                         cursor: currentPage >= totalPages ? "not-allowed" : "pointer",
-                        fontSize: "12px",
+                        fontSize: "11px",
                         display: "flex",
                         alignItems: "center",
                         gap: "4px",
                       },
                     },
                     "Próxima",
-                    SVG_ICONS.chevronRight({ h, width: 14, height: 14 })
+                    SVG_ICONS.chevronRight({ h, width: 13, height: 13 })
                   ),
-                  // Page size selector
                   h(
                     "div",
-                    { style: { display: "flex", alignItems: "center", gap: "4px", marginLeft: "12px" } },
-                    h("span", { style: { fontSize: "12px", color: "#8e8e96" } }, "Por página:"),
+                    { style: { display: "flex", alignItems: "center", gap: "4px", marginLeft: "10px" } },
+                    h("span", { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } }, "Por página:"),
                     [15, 30, 50, 0].map((sz) =>
                       h(
                         "button",
@@ -3129,11 +3170,11 @@ print("SYNC_SUCCESS")
                             setCurrentPage(1);
                           },
                           style: {
-                            borderRadius: "6px",
-                            padding: "2px 8px",
+                            borderRadius: "5px",
+                            padding: "2px 7px",
                             border: "none",
-                            backgroundColor: pageSize === sz ? "rgba(255, 255, 255, 0.15)" : "transparent",
-                            color: pageSize === sz ? "#ffffff" : "#8e8e96",
+                            backgroundColor: pageSize === sz ? "var(--affordance-selected, #333333)" : "transparent",
+                            color: pageSize === sz ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
                             fontSize: "11px",
                             cursor: "pointer",
                           },

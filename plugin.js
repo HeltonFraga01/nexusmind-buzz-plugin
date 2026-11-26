@@ -1,4 +1,4 @@
-function isFreeModel(modelId) {
+function isFreeModel$1(modelId) {
   const m = String(modelId || "").toLowerCase();
   return m.includes(":free") || m.includes("-free") || m.includes("/free") || m.endsWith("free");
 }
@@ -150,10 +150,10 @@ async function selectBestModelByTier(ctx, groups, input = {}) {
   }
   let pool = Array.from(catalog.values());
   if (preferFree) {
-    const freeOnly = pool.filter((c) => isFreeModel(c.id));
+    const freeOnly = pool.filter((c) => isFreeModel$1(c.id));
     if (freeOnly.length > 0) pool = freeOnly;
   } else if (avoidFree) {
-    const paidOnly = pool.filter((c) => !isFreeModel(c.id));
+    const paidOnly = pool.filter((c) => !isFreeModel$1(c.id));
     if (paidOnly.length > 0) pool = paidOnly;
   }
   const preRanked = pool.map((item) => {
@@ -176,7 +176,7 @@ async function selectBestModelByTier(ctx, groups, input = {}) {
         latencyMs: ping.latencyMs,
         combinedScore,
         online: ping.online,
-        isFree: isFreeModel(cand.id),
+        isFree: isFreeModel$1(cand.id),
         error: ping.error
       };
     })
@@ -303,7 +303,7 @@ function getKnownDecisionModels(groups) {
     if (rawRank) {
       const parsed = JSON.parse(rawRank);
       for (const m of Array.isArray(parsed == null ? void 0 : parsed.models) ? parsed.models : []) {
-        if ((m == null ? void 0 : m.model) && !isUnsupportedAgentModel(m.model) && (m == null ? void 0 : m.online) !== false && !(m == null ? void 0 : m.isDisabled) && !isFreeModel(m.model)) {
+        if ((m == null ? void 0 : m.model) && !isUnsupportedAgentModel(m.model) && (m == null ? void 0 : m.online) !== false && !(m == null ? void 0 : m.isDisabled) && !isFreeModel$1(m.model)) {
           set.add(String(m.model));
         }
       }
@@ -315,7 +315,7 @@ function getKnownDecisionModels(groups) {
     if (rawCached) {
       const parsed = JSON.parse(rawCached);
       for (const m of Array.isArray(parsed) ? parsed : []) {
-        if ((m == null ? void 0 : m.id) && !isUnsupportedAgentModel(m.id) && !isFreeModel(m.id)) set.add(String(m.id));
+        if ((m == null ? void 0 : m.id) && !isUnsupportedAgentModel(m.id) && !isFreeModel$1(m.id)) set.add(String(m.id));
       }
     }
   } catch {
@@ -329,7 +329,7 @@ function getRankingFallbackModels() {
     if (!rawRank) return [];
     const parsed = JSON.parse(rawRank);
     if (!Array.isArray(parsed == null ? void 0 : parsed.models)) return [];
-    return parsed.models.filter((m) => (m == null ? void 0 : m.model) && (m == null ? void 0 : m.online) !== false && !(m == null ? void 0 : m.isDisabled) && !isFreeModel(m.model)).slice(0, 6).map((m) => String(m.model));
+    return parsed.models.filter((m) => (m == null ? void 0 : m.model) && (m == null ? void 0 : m.online) !== false && !(m == null ? void 0 : m.isDisabled) && !isFreeModel$1(m.model)).slice(0, 6).map((m) => String(m.model));
   } catch {
     return [];
   }
@@ -917,7 +917,7 @@ function computeModelRowScore(modelId, tier, usage, probe, policy) {
   if ((usage == null ? void 0 : usage.cacheHitPct) && usage.cacheHitPct >= 50) {
     rawScore += Math.min(5, (usage.cacheHitPct - 40) / 12);
   }
-  const free = isFreeModel(modelId);
+  const free = isFreeModel$1(modelId);
   if (policy.forceFree) {
     rawScore += free ? 18 : -25;
   } else if (free) {
@@ -974,7 +974,7 @@ function buildModelRankingSnapshot(params) {
       const isDisabled = disabledSet.has(item.id);
       const unsupported = isUnsupportedAgentModel(item.id);
       const isBlocked = unsupported || blockedSet.has(item.id.toLowerCase());
-      const free = isFreeModel(item.id);
+      const free = isFreeModel$1(item.id);
       const avgCost = (usage == null ? void 0 : usage.avgCostUsd) ?? 0;
       const exceedsCostCap = policy.maxCostPerReqUsd !== null && avgCost > 0 && avgCost > policy.maxCostPerReqUsd;
       const freeMismatch = policy.forceFree ? !free : false;
@@ -1698,6 +1698,550 @@ function createModelRankingTabComponent(ctx, groups) {
     );
   };
 }
+function isFreeModel(modelId) {
+  const low = String(modelId || "").toLowerCase();
+  return low.includes(":free") || low.includes("-free") || low.endsWith("free");
+}
+function readBuzzAgents(ctx) {
+  var _a, _b;
+  try {
+    const snap = ((_b = (_a = ctx == null ? void 0 : ctx.agents) == null ? void 0 : _a.snapshot) == null ? void 0 : _b.call(_a)) || {};
+    const runningKeys = new Set(
+      Array.isArray(snap.running) ? snap.running.map((a) => String((a == null ? void 0 : a.key) || "")) : []
+    );
+    const seen = /* @__PURE__ */ new Set();
+    const list = [];
+    for (const pool of [snap.agents, snap.running]) {
+      if (!Array.isArray(pool)) continue;
+      for (const raw of pool) {
+        const key = String((raw == null ? void 0 : raw.key) || "");
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        const cfg = (raw == null ? void 0 : raw.config) && typeof raw.config === "object" ? raw.config : {};
+        list.push({
+          key,
+          name: String((raw == null ? void 0 : raw.name) || (cfg == null ? void 0 : cfg.name) || key),
+          picture: typeof (raw == null ? void 0 : raw.picture) === "string" ? raw.picture : void 0,
+          running: runningKeys.has(key) || (raw == null ? void 0 : raw.status) === "running",
+          provider: String((cfg == null ? void 0 : cfg.provider) || "padrão"),
+          model: String((cfg == null ? void 0 : cfg.model) || "padrão"),
+          harness: String((cfg == null ? void 0 : cfg.harness) || "goose"),
+          config: cfg
+        });
+      }
+    }
+    return list.sort((a, b) => {
+      if (a.running !== b.running) return a.running ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  } catch {
+    return [];
+  }
+}
+function createNexusMindAgentsTabComponent(ctx, groups) {
+  const React = ctx.react;
+  const h = React.createElement;
+  return function NexusMindAgentsTab({
+    models,
+    disabledModels,
+    modelTests,
+    onNotify
+  }) {
+    const [agents, setAgents] = React.useState(() => readBuzzAgents(ctx));
+    const [search, setSearch] = React.useState("");
+    const [filterOnlyFree, setFilterOnlyFree] = React.useState(false);
+    const [savingKey, setSavingKey] = React.useState(null);
+    const [draftModelByAgent, setDraftModelByAgent] = React.useState({});
+    const [bestModelInfo, setBestModelInfo] = React.useState(null);
+    const refreshAgents = React.useCallback(() => {
+      setAgents(readBuzzAgents(ctx));
+    }, []);
+    React.useEffect(() => {
+      refreshAgents();
+      const agentsApi = ctx == null ? void 0 : ctx.agents;
+      if (typeof (agentsApi == null ? void 0 : agentsApi.subscribe) === "function") {
+        try {
+          const unsub = agentsApi.subscribe(() => {
+            refreshAgents();
+          });
+          return () => {
+            if (typeof unsub === "function") unsub();
+          };
+        } catch {
+        }
+      }
+      return void 0;
+    }, [refreshAgents]);
+    React.useEffect(() => {
+      let active = true;
+      loadGatewayUsageByModel(ctx).then((loaded) => {
+        if (!active) return;
+        const policy = loadSavedRoutingPolicy();
+        const snap = buildModelRankingSnapshot({
+          catalogModels: models,
+          groups,
+          usageByModel: loaded.byModel,
+          usageSampleSize: loaded.sampleSize,
+          liveProbes: modelTests,
+          disabledModels,
+          tier: "tier2_balanced",
+          policy
+        });
+        const top = snap.bestByTier.tier2_balanced || snap.bestByTier.geral;
+        if ((top == null ? void 0 : top.model) && (top == null ? void 0 : top.group)) {
+          setBestModelInfo({ model: top.model, group: top.group });
+        }
+      }).catch(() => {
+      });
+      return () => {
+        active = false;
+      };
+    }, [models, disabledModels, modelTests]);
+    const activeCatalogOptions = React.useMemo(() => {
+      const disabledSet = new Set(disabledModels);
+      const list = models.filter((m) => (m == null ? void 0 : m.id) && !disabledSet.has(m.id)).map((m) => ({
+        id: String(m.id),
+        group: String(m.primaryGroup || Array.isArray(m.groups) && m.groups[0] || "nexusmind_openai")
+      }));
+      if (list.length > 0) return list;
+      return Object.values(groups).map((g) => ({ id: g.defaultModel, group: g.id }));
+    }, [models, disabledModels]);
+    const filteredAgents = React.useMemo(() => {
+      const q = search.trim().toLowerCase();
+      return agents.filter((a) => {
+        if (filterOnlyFree && !isFreeModel(a.model)) return false;
+        if (q && !a.name.toLowerCase().includes(q) && !a.model.toLowerCase().includes(q) && !a.provider.toLowerCase().includes(q)) {
+          return false;
+        }
+        return true;
+      });
+    }, [agents, search, filterOnlyFree]);
+    const freeAgentsCount = React.useMemo(
+      () => agents.filter((a) => isFreeModel(a.model)).length,
+      [agents]
+    );
+    const runningCount = React.useMemo(
+      () => agents.filter((a) => a.running).length,
+      [agents]
+    );
+    const resolveGroupForModel2 = (modelId) => {
+      const found = activeCatalogOptions.find((o) => o.id === modelId);
+      if (found) return found.group;
+      const low = modelId.toLowerCase();
+      if (low.includes("grok")) return "nexusmind_grok";
+      if (low.includes("gemini") || low.includes("thinking")) return "nexusmind_antigravity";
+      if (low.includes("claude")) return "nexusmind_anthropic";
+      return "nexusmind_openai";
+    };
+    const handleSaveAgentModel = async (agent, targetModel, targetGroup) => {
+      var _a, _b;
+      const agentsApi = ctx == null ? void 0 : ctx.agents;
+      if (typeof (agentsApi == null ? void 0 : agentsApi.save) !== "function") {
+        onNotify({ type: "error", text: "API ctx.agents.save() indisponível neste runtime." });
+        return;
+      }
+      const providerId = targetGroup || resolveGroupForModel2(targetModel);
+      setSavingKey(agent.key);
+      try {
+        const fresh = readBuzzAgents(ctx).find((a) => a.key === agent.key) || agent;
+        const nextCfg = {
+          ...fresh.config && typeof fresh.config === "object" ? fresh.config : {},
+          provider: providerId,
+          model: targetModel
+        };
+        await agentsApi.save(agent.key, { config: nextCfg });
+        refreshAgents();
+        onNotify({
+          type: "success",
+          text: `${agent.name} atualizado para ${targetModel} (${providerId.replace("nexusmind_", "")}).`
+        });
+        try {
+          (_b = (_a = ctx == null ? void 0 : ctx.notifications) == null ? void 0 : _a.notify) == null ? void 0 : _b.call(_a, {
+            title: "NexusMind Gateway",
+            body: `${agent.name} → ${targetModel}`
+          });
+        } catch {
+        }
+      } catch (err) {
+        onNotify({
+          type: "error",
+          text: `Falha ao atualizar ${agent.name}: ${(err == null ? void 0 : err.message) || err}`
+        });
+      } finally {
+        setSavingKey(null);
+      }
+    };
+    const handleOpenOrgfyFactory = () => {
+      var _a, _b;
+      try {
+        (_b = (_a = ctx == null ? void 0 : ctx.navigation) == null ? void 0 : _a.open) == null ? void 0 : _b.call(_a, {
+          version: 1,
+          kind: "page",
+          pluginId: "digital.cortexx.orgfy",
+          pageId: "orgfy"
+        });
+      } catch {
+      }
+    };
+    return h(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: "14px" } },
+      // 1. Barra de Resumo & Filtros (Buzz-native flat bar)
+      h(
+        "div",
+        {
+          style: {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "10px",
+            padding: "10px 14px",
+            borderRadius: "10px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+            fontSize: "12px"
+          }
+        },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap", color: "var(--text-secondary, #c7c7c7)" } },
+          h(
+            "span",
+            null,
+            "Agentes: ",
+            h("strong", { style: { color: "var(--text-primary, #ffffff)" } }, `${agents.length}`)
+          ),
+          h(
+            "span",
+            null,
+            "Ativos: ",
+            h("strong", { style: { color: "var(--green-11, #3dd68c)" } }, `${runningCount}`)
+          ),
+          freeAgentsCount > 0 && h(
+            "span",
+            { style: { color: "var(--amber-11, #ffca16)" } },
+            `${freeAgentsCount} usando :free`
+          ),
+          bestModelInfo && h(
+            "span",
+            { style: { color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace", fontSize: "11px" } },
+            `Recomendado: ${bestModelInfo.model}`
+          )
+        ),
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+          h("input", {
+            type: "text",
+            placeholder: "Filtrar agente ou modelo...",
+            value: search,
+            onChange: (e) => setSearch(e.target.value),
+            style: {
+              backgroundColor: "var(--surface-inset, #101010)",
+              border: "1px solid var(--border-primary, #333333)",
+              borderRadius: "6px",
+              padding: "5px 10px",
+              color: "var(--text-primary, #ffffff)",
+              fontSize: "11px",
+              width: "180px",
+              outline: "none"
+            }
+          }),
+          freeAgentsCount > 0 && h(
+            "label",
+            {
+              style: {
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "5px",
+                fontSize: "11px",
+                color: filterOnlyFree ? "var(--amber-11, #ffca16)" : "var(--text-tertiary, #a4a4a4)",
+                cursor: "pointer"
+              }
+            },
+            h("input", {
+              type: "checkbox",
+              checked: filterOnlyFree,
+              onChange: (e) => setFilterOnlyFree(Boolean(e.target.checked)),
+              style: { accentColor: "#ffca16" }
+            }),
+            "Só :free"
+          ),
+          h(
+            "button",
+            {
+              onClick: refreshAgents,
+              style: {
+                borderRadius: "6px",
+                padding: "5px 10px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                border: "1px solid var(--border-primary, #333333)",
+                color: "var(--text-secondary, #c7c7c7)",
+                fontSize: "11px",
+                fontWeight: "500",
+                cursor: "pointer"
+              }
+            },
+            "Atualizar"
+          ),
+          h(
+            "button",
+            {
+              onClick: handleOpenOrgfyFactory,
+              title: "Abrir OrgFy Factory via navegação nativa do Buzz",
+              style: {
+                borderRadius: "6px",
+                padding: "5px 10px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                border: "1px solid var(--border-primary, #333333)",
+                color: "var(--text-primary, #ffffff)",
+                fontSize: "11px",
+                fontWeight: "500",
+                cursor: "pointer"
+              }
+            },
+            "OrgFy Factory ↗"
+          )
+        )
+      ),
+      // 2. Tabela limpa de Agentes Buzz com Troca Direta de Modelo
+      h(
+        "div",
+        {
+          style: {
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+            borderRadius: "10px",
+            overflowX: "auto"
+          }
+        },
+        h(
+          "table",
+          { style: { width: "100%", borderCollapse: "collapse", fontSize: "12px" } },
+          h(
+            "thead",
+            null,
+            h(
+              "tr",
+              {
+                style: {
+                  borderBottom: "1px solid var(--border-primary, #2e2e2e)",
+                  textAlign: "left",
+                  color: "var(--text-tertiary, #808080)",
+                  fontSize: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em"
+                }
+              },
+              ["Agente", "Status", "Provedor", "Modelo Atual", "Trocar Modelo", "Ação"].map(
+                (col) => h("th", { key: col, style: { padding: "9px 12px", fontWeight: "600" } }, col)
+              )
+            )
+          ),
+          h(
+            "tbody",
+            null,
+            filteredAgents.length === 0 ? h(
+              "tr",
+              null,
+              h(
+                "td",
+                { colSpan: 6, style: { padding: "24px", textAlign: "center", color: "var(--text-tertiary, #808080)" } },
+                agents.length === 0 ? "Nenhum agente retornado por ctx.agents.snapshot()." : "Nenhum agente corresponde ao filtro atual."
+              )
+            ) : filteredAgents.map((agent) => {
+              const isSaving = savingKey === agent.key;
+              const agentIsFree = isFreeModel(agent.model);
+              const selectedDraft = draftModelByAgent[agent.key] ?? agent.model;
+              const hasPendingChange = selectedDraft && selectedDraft !== agent.model;
+              return h(
+                "tr",
+                {
+                  key: agent.key,
+                  style: {
+                    borderBottom: "1px solid var(--border-subtle, rgba(255,255,255,0.05))"
+                  }
+                },
+                // Agente (avatar real do Buzz + nome)
+                h(
+                  "td",
+                  { style: { padding: "8px 12px" } },
+                  h(
+                    "div",
+                    { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                    agent.picture ? h("img", {
+                      src: agent.picture,
+                      alt: agent.name,
+                      style: {
+                        width: "22px",
+                        height: "22px",
+                        borderRadius: "6px",
+                        objectFit: "cover",
+                        backgroundColor: "var(--surface-inset, #101010)"
+                      }
+                    }) : h(
+                      "div",
+                      {
+                        style: {
+                          width: "22px",
+                          height: "22px",
+                          borderRadius: "6px",
+                          backgroundColor: "var(--affordance-subtle, #282828)",
+                          color: "var(--text-secondary, #c7c7c7)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: "10px",
+                          fontWeight: "600"
+                        }
+                      },
+                      agent.name.slice(0, 2).toUpperCase()
+                    ),
+                    h(
+                      "div",
+                      null,
+                      h("div", { style: { fontWeight: "600", color: "var(--text-primary, #ffffff)" } }, agent.name),
+                      h("div", { style: { fontSize: "10px", color: "var(--text-tertiary, #808080)", fontFamily: "monospace" } }, agent.harness)
+                    )
+                  )
+                ),
+                // Status
+                h(
+                  "td",
+                  { style: { padding: "8px 12px" } },
+                  h(
+                    "span",
+                    {
+                      style: {
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "5px",
+                        fontSize: "11px",
+                        color: agent.running ? "var(--green-11, #3dd68c)" : "var(--text-tertiary, #808080)"
+                      }
+                    },
+                    h("span", {
+                      style: {
+                        width: "6px",
+                        height: "6px",
+                        borderRadius: "50%",
+                        backgroundColor: agent.running ? "var(--green-11, #3dd68c)" : "var(--text-tertiary, #666666)"
+                      }
+                    }),
+                    agent.running ? "Online" : "Inativo"
+                  )
+                ),
+                // Provedor
+                h(
+                  "td",
+                  { style: { padding: "8px 12px", fontFamily: "monospace", fontSize: "11px", color: "var(--text-secondary, #c7c7c7)" } },
+                  agent.provider.replace("nexusmind_", "")
+                ),
+                // Modelo Atual
+                h(
+                  "td",
+                  { style: { padding: "8px 12px", fontFamily: "monospace", fontSize: "11px", color: "var(--text-primary, #ffffff)" } },
+                  h("span", null, agent.model),
+                  agentIsFree && h(
+                    "span",
+                    {
+                      style: {
+                        marginLeft: "6px",
+                        fontSize: "9px",
+                        padding: "1px 5px",
+                        borderRadius: "4px",
+                        backgroundColor: "var(--amber-3, #302008)",
+                        color: "var(--amber-11, #ffca16)",
+                        fontWeight: "600"
+                      }
+                    },
+                    "FREE"
+                  )
+                ),
+                // Select para trocar modelo
+                h(
+                  "td",
+                  { style: { padding: "8px 12px" } },
+                  h(
+                    "select",
+                    {
+                      value: selectedDraft,
+                      onChange: (e) => setDraftModelByAgent((prev) => ({ ...prev, [agent.key]: e.target.value })),
+                      style: {
+                        backgroundColor: "var(--surface-inset, #101010)",
+                        color: "var(--text-primary, #ffffff)",
+                        border: "1px solid var(--border-primary, #333333)",
+                        borderRadius: "6px",
+                        padding: "4px 8px",
+                        fontSize: "11px",
+                        maxWidth: "220px"
+                      }
+                    },
+                    !activeCatalogOptions.some((o) => o.id === agent.model) && h("option", { key: "__current", value: agent.model }, agent.model),
+                    activeCatalogOptions.slice(0, 80).map(
+                      (opt) => h(
+                        "option",
+                        { key: opt.id, value: opt.id },
+                        `${opt.id} (${opt.group.replace("nexusmind_", "")})`
+                      )
+                    )
+                  )
+                ),
+                // Ações
+                h(
+                  "td",
+                  { style: { padding: "8px 12px", whiteSpace: "nowrap" } },
+                  h(
+                    "div",
+                    { style: { display: "flex", gap: "6px" } },
+                    h(
+                      "button",
+                      {
+                        onClick: () => handleSaveAgentModel(agent, selectedDraft),
+                        disabled: isSaving || !hasPendingChange,
+                        style: {
+                          padding: "4px 9px",
+                          borderRadius: "6px",
+                          border: "none",
+                          backgroundColor: hasPendingChange ? "var(--affordance-prominent, #ffffff)" : "var(--affordance-subtle, #232323)",
+                          color: hasPendingChange ? "var(--text-on-prominent, #000000)" : "var(--text-tertiary, #808080)",
+                          fontSize: "11px",
+                          fontWeight: "600",
+                          cursor: isSaving || !hasPendingChange ? "not-allowed" : "pointer"
+                        }
+                      },
+                      isSaving ? "..." : "Salvar"
+                    ),
+                    bestModelInfo && agent.model !== bestModelInfo.model && h(
+                      "button",
+                      {
+                        onClick: () => handleSaveAgentModel(agent, bestModelInfo.model, bestModelInfo.group),
+                        disabled: isSaving,
+                        title: `Aplicar modelo #1 do ranking (${bestModelInfo.model})`,
+                        style: {
+                          padding: "4px 8px",
+                          borderRadius: "6px",
+                          border: "1px solid var(--border-primary, #333333)",
+                          backgroundColor: "transparent",
+                          color: "var(--text-secondary, #c7c7c7)",
+                          fontSize: "10px",
+                          fontWeight: "500",
+                          cursor: isSaving ? "wait" : "pointer"
+                        }
+                      },
+                      "Usar #1"
+                    )
+                  )
+                )
+              );
+            })
+          )
+        )
+      )
+    );
+  };
+}
 const GOOSE_MAX_MODELS_PER_GROUP = 40;
 function selectTopGooseModelsByGroup(params) {
   var _a;
@@ -2043,7 +2587,7 @@ const SVG_ICONS = {
     props.h("line", { x1: 12, y1: 2, x2: 12, y2: 12 })
   )
 };
-const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions"];
+const inject = ["react", "pages", "settingsCards", "host", "agents", "decisions", "navigation", "notifications", "shortcuts"];
 const ICON = "data:image/svg+xml;base64," + btoa(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M5 18V6l14 12V6"/><circle cx="5" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="19" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>'
 );
@@ -2315,6 +2859,24 @@ function apply(ctx) {
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS),
       []
     );
+    const NexusMindAgentsTab = React.useMemo(
+      () => createNexusMindAgentsTabComponent(ctx, CANONICAL_GROUPS),
+      []
+    );
+    const buzzAgentsCount = React.useMemo(() => {
+      var _a2, _b2;
+      try {
+        const snap = ((_b2 = (_a2 = ctx == null ? void 0 : ctx.agents) == null ? void 0 : _a2.snapshot) == null ? void 0 : _b2.call(_a2)) || {};
+        const keys = /* @__PURE__ */ new Set();
+        for (const list of [snap.agents, snap.running]) {
+          if (!Array.isArray(list)) continue;
+          for (const a of list) if (a == null ? void 0 : a.key) keys.add(String(a.key));
+        }
+        return keys.size;
+      } catch {
+        return 0;
+      }
+    }, [activeSection, models.length]);
     const [selectedGroupTab, setSelectedGroupTab] = React.useState("all");
     const [statusFilter, setStatusFilter] = React.useState("all");
     const [filterFree, setFilterFree] = React.useState(false);
@@ -2350,7 +2912,7 @@ function apply(ctx) {
       }, 2500);
     };
     const fetchTelemetry = async (tokenToUse) => {
-      var _a2, _b2, _c2, _d;
+      var _a2, _b2, _c2, _d, _e;
       const token = tokenToUse.trim();
       if (!token) return;
       try {
@@ -2434,6 +2996,15 @@ function apply(ctx) {
           };
           setDashboardMetrics(metrics);
           localStorage.setItem("nexusmind_metrics_cache", JSON.stringify(metrics));
+          try {
+            if ((_e = ctx.host) == null ? void 0 : _e.writeFile) {
+              void ctx.host.writeFile(
+                "~/.buzz/.scratch/nm_dashboard_live.json",
+                JSON.stringify({ fetched_at: (/* @__PURE__ */ new Date()).toISOString(), ...metrics }, null, 2)
+              );
+            }
+          } catch {
+          }
         }
       } catch {
         setProfileData(CANONICAL_PROFILE);
@@ -2829,6 +3400,7 @@ subprocess.run([sys.executable, script_path])
       else handleEnableFilteredBulk();
     };
     const handleSyncModelsToBuzz = async () => {
+      var _a2, _b2;
       setLoadingSync(true);
       setStatusMessage({
         type: "info",
@@ -3087,6 +3659,13 @@ print("SYNC_SUCCESS")
           type: "success",
           text: `Sincronização concluída! Goose: ${gooseTotal} modelos (top ${GOOSE_MAX_MODELS_PER_GROUP} por provedor por uso/qualidade). Pi: ${totalActive} ativos (${disabledModels.length} desativados expurgados).`
         });
+        try {
+          (_b2 = (_a2 = ctx == null ? void 0 : ctx.notifications) == null ? void 0 : _a2.notify) == null ? void 0 : _b2.call(_a2, {
+            title: "NexusMind Gateway",
+            body: `Sincronizado: ${gooseTotal} modelos no Goose e ${totalActive} ativos no Pi.`
+          });
+        } catch {
+        }
       } catch (err) {
         setStatusMessage({
           type: "error",
@@ -3177,28 +3756,36 @@ print("SYNC_SUCCESS")
     const paginatedModels = pageSize === 0 ? filteredModels : filteredModels.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     if (isSettingsCard) {
       const openFullPage = () => {
-        var _a2;
+        var _a2, _b2;
         try {
-          if ((_a2 = ctx.navigation) == null ? void 0 : _a2.navigate) {
+          if ((_a2 = ctx.navigation) == null ? void 0 : _a2.open) {
+            ctx.navigation.open({
+              version: 1,
+              kind: "page",
+              pluginId: "digital.nexusmind.buzz",
+              pageId: "nexusmind"
+            });
+            return;
+          }
+          if ((_b2 = ctx.navigation) == null ? void 0 : _b2.navigate) {
             ctx.navigation.navigate("nexusmind");
-          } else {
-            window.location.hash = "#/nexusmind";
+            return;
           }
         } catch {
-          window.location.hash = "#/nexusmind";
         }
+        window.location.hash = "#/nexusmind";
       };
       return h(
         "div",
         {
           style: {
-            backgroundColor: "rgba(255, 255, 255, 0.03)",
-            border: "1px solid rgba(255, 255, 255, 0.08)",
-            borderRadius: "16px",
-            padding: "20px 24px",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+            borderRadius: "10px",
+            padding: "14px 16px",
             display: "flex",
             flexDirection: "column",
-            gap: "16px"
+            gap: "12px"
           }
         },
         h(
@@ -3207,27 +3794,30 @@ print("SYNC_SUCCESS")
             style: {
               display: "flex",
               alignItems: "center",
-              justifyContent: "space-between"
+              justifyContent: "space-between",
+              gap: "10px",
+              flexWrap: "wrap"
             }
           },
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "12px" } },
+            { style: { display: "flex", alignItems: "center", gap: "10px" } },
             h(
               "div",
               {
                 style: {
-                  width: "40px",
-                  height: "40px",
-                  borderRadius: "12px",
-                  background: "linear-gradient(135deg, #10b981 0%, #06b6d4 100%)",
+                  width: "32px",
+                  height: "32px",
+                  borderRadius: "8px",
+                  backgroundColor: "var(--affordance-subtle, #282828)",
+                  border: "1px solid var(--border-primary, #333333)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "#000000"
+                  color: "var(--text-primary, #ffffff)"
                 }
               },
-              SVG_ICONS.dashboard({ h, width: 20, height: 20 })
+              SVG_ICONS.dashboard({ h, width: 16, height: 16 })
             ),
             h(
               "div",
@@ -3235,26 +3825,26 @@ print("SYNC_SUCCESS")
               h(
                 "div",
                 { style: { display: "flex", alignItems: "center", gap: "6px" } },
-                h("span", { style: { fontWeight: "600", fontSize: "14px" } }, "NexusMind Gateway"),
+                h("span", { style: { fontWeight: "600", fontSize: "13px", color: "var(--text-primary, #ffffff)" } }, "NexusMind Gateway"),
                 h(
                   "span",
                   {
                     style: {
                       fontSize: "10px",
                       padding: "1px 6px",
-                      borderRadius: "9999px",
-                      backgroundColor: "rgba(16, 185, 129, 0.2)",
-                      color: "#10b981",
+                      borderRadius: "4px",
+                      backgroundColor: "var(--green-3, #132d21)",
+                      color: "var(--green-11, #3dd68c)",
                       fontWeight: "600"
                     }
                   },
-                  "v2.3"
+                  "v2.7"
                 )
               ),
               h(
                 "div",
-                { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
-                `Conectado como ${profileData.username} ($${(profileData.balance || 0).toFixed(2)}) • ${models.length} modelos`
+                { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
+                `${profileData.username} · $${(profileData.balance || 0).toFixed(2)} · ${models.length} modelos`
               )
             )
           ),
@@ -3263,17 +3853,17 @@ print("SYNC_SUCCESS")
             {
               onClick: openFullPage,
               style: {
-                borderRadius: "9999px",
-                backgroundColor: "rgba(255, 255, 255, 0.08)",
-                color: "#ffffff",
-                border: "none",
+                borderRadius: "6px",
+                backgroundColor: "var(--affordance-subtle, #282828)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
                 cursor: "pointer",
-                padding: "7px 16px",
+                padding: "6px 12px",
                 fontSize: "12px",
                 fontWeight: "500"
               }
             },
-            "Abrir Cockpit →"
+            "Abrir Cockpit ↗"
           )
         ),
         h(
@@ -3285,11 +3875,11 @@ print("SYNC_SUCCESS")
               onClick: handlePullModelsFromNexusMind,
               disabled: loadingPull,
               style: {
-                borderRadius: "9999px",
-                padding: "6px 14px",
-                backgroundColor: "rgba(255, 255, 255, 0.08)",
-                color: "#ffffff",
-                border: "none",
+                borderRadius: "6px",
+                padding: "6px 12px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
                 cursor: loadingPull ? "not-allowed" : "pointer",
                 fontSize: "12px",
                 fontWeight: "500"
@@ -3303,10 +3893,10 @@ print("SYNC_SUCCESS")
               onClick: handleSyncModelsToBuzz,
               disabled: loadingSync,
               style: {
-                borderRadius: "9999px",
-                padding: "6px 16px",
-                backgroundColor: "#10b981",
-                color: "#000000",
+                borderRadius: "6px",
+                padding: "6px 14px",
+                backgroundColor: "var(--affordance-prominent, #ffffff)",
+                color: "var(--text-on-prominent, #000000)",
                 border: "none",
                 cursor: loadingSync ? "not-allowed" : "pointer",
                 fontSize: "12px",
@@ -3323,55 +3913,53 @@ print("SYNC_SUCCESS")
         "div",
         {
           style: {
-            maxWidth: "580px",
-            margin: "60px auto",
-            backgroundColor: "rgba(255, 255, 255, 0.03)",
-            border: "1px solid rgba(255, 255, 255, 0.08)",
-            borderRadius: "20px",
-            padding: "36px 40px",
+            maxWidth: "520px",
+            margin: "48px auto",
+            backgroundColor: "var(--bg-panel, #1a1a1a)",
+            border: "1px solid var(--border-primary, #2e2e2e)",
+            borderRadius: "12px",
+            padding: "28px 32px",
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
-            textAlign: "center",
-            boxShadow: "0 20px 40px rgba(0, 0, 0, 0.4)"
+            textAlign: "center"
           }
         },
         h(
           "div",
           {
             style: {
-              width: "64px",
-              height: "64px",
-              borderRadius: "18px",
-              background: "linear-gradient(135deg, #10b981 0%, #06b6d4 100%)",
+              width: "44px",
+              height: "44px",
+              borderRadius: "10px",
+              backgroundColor: "var(--affordance-subtle, #282828)",
+              border: "1px solid var(--border-primary, #333333)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: "#000000",
-              marginBottom: "20px",
-              boxShadow: "0 8px 24px rgba(16, 185, 129, 0.35)"
+              color: "var(--text-primary, #ffffff)",
+              marginBottom: "14px"
             }
           },
-          SVG_ICONS.plug({ h, width: 32, height: 32 })
+          SVG_ICONS.plug({ h, width: 22, height: 22 })
         ),
         h(
           "h1",
-          { style: { fontSize: "24px", fontWeight: "700", margin: "0 0 8px", color: "#ffffff" } },
+          { style: { fontSize: "18px", fontWeight: "600", margin: "0 0 6px", color: "var(--text-primary, #ffffff)" } },
           "NexusMind Gateway"
         ),
         h(
           "p",
           {
             style: {
-              fontSize: "14px",
-              color: "var(--text-subtle, #8e8e96)",
-              lineHeight: "1.6",
-              margin: "0 0 28px"
+              fontSize: "13px",
+              color: "var(--text-tertiary, #a4a4a4)",
+              lineHeight: "1.5",
+              margin: "0 0 22px"
             }
           },
-          "Conecte sua conta do NexusMind para liberar mais de 180 modelos corporativos (OpenAI, Anthropic Claude, Google Gemini e xAI Grok) para os agentes do Buzz Desktop."
+          "Conecte sua conta NexusMind para sincronizar modelos OpenAI, Anthropic Claude, Google Gemini e xAI Grok com os agentes do Buzz Desktop."
         ),
-        // Primary Connect Button
         h(
           "button",
           {
@@ -3379,40 +3967,38 @@ print("SYNC_SUCCESS")
             disabled: authInFlight,
             style: {
               width: "100%",
-              borderRadius: "9999px",
-              padding: "13px 24px",
-              background: "linear-gradient(135deg, #a855f7 0%, #6366f1 100%)",
-              color: "#ffffff",
+              borderRadius: "8px",
+              padding: "10px 18px",
+              backgroundColor: "var(--affordance-prominent, #ffffff)",
+              color: "var(--text-on-prominent, #000000)",
               border: "none",
               cursor: authInFlight ? "not-allowed" : "pointer",
               fontWeight: "600",
-              fontSize: "14px",
+              fontSize: "13px",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               gap: "8px",
-              marginBottom: "16px",
-              boxShadow: "0 4px 16px rgba(168, 85, 247, 0.3)"
+              marginBottom: "10px"
             }
           },
-          SVG_ICONS.plug({ h, width: 16, height: 16 }),
+          SVG_ICONS.plug({ h, width: 15, height: 15 }),
           authInFlight ? "Aguardando no Navegador..." : "Conectar via OAuth / MCP"
         ),
-        // Secondary Action Buttons
         h(
           "div",
-          { style: { display: "flex", gap: "10px", width: "100%", marginBottom: "24px" } },
+          { style: { display: "flex", gap: "8px", width: "100%", marginBottom: "20px" } },
           h(
             "button",
             {
               onClick: handleOpenInBrowser,
               style: {
                 flex: "1",
-                borderRadius: "9999px",
-                padding: "9px 14px",
-                backgroundColor: "rgba(255, 255, 255, 0.06)",
-                color: "#ffffff",
-                border: "1px solid rgba(255, 255, 255, 0.1)",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
                 cursor: "pointer",
                 fontSize: "12px",
                 display: "flex",
@@ -3430,11 +4016,11 @@ print("SYNC_SUCCESS")
               onClick: handleCopyAuthUrl,
               style: {
                 flex: "1",
-                borderRadius: "9999px",
-                padding: "9px 14px",
-                backgroundColor: "rgba(255, 255, 255, 0.06)",
-                color: "#ffffff",
-                border: "1px solid rgba(255, 255, 255, 0.1)",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                backgroundColor: "var(--affordance-subtle, #232323)",
+                color: "var(--text-primary, #ffffff)",
+                border: "1px solid var(--border-primary, #333333)",
                 cursor: "pointer",
                 fontSize: "12px",
                 display: "flex",
@@ -3447,26 +4033,24 @@ print("SYNC_SUCCESS")
             "Copiar Link"
           )
         ),
-        // Divider
         h(
           "div",
           {
             style: {
               width: "100%",
               height: "1px",
-              backgroundColor: "rgba(255, 255, 255, 0.08)",
-              marginBottom: "20px"
+              backgroundColor: "var(--border-primary, #2e2e2e)",
+              marginBottom: "16px"
             }
           }
         ),
-        // Manual Input Option
         h(
           "div",
           { style: { width: "100%", textAlign: "left" } },
           h(
             "label",
-            { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)", display: "block", marginBottom: "8px" } },
-            "Ou conecte manualmente com sua API Key (sk-...) ou Token:"
+            { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", display: "block", marginBottom: "6px" } },
+            "Ou conecte manualmente com API Key (sk-...) ou Token:"
           ),
           h(
             "div",
@@ -3478,12 +4062,12 @@ print("SYNC_SUCCESS")
               onChange: (e) => setManualKeyInput(e.target.value),
               style: {
                 flex: "1",
-                backgroundColor: "rgba(0, 0, 0, 0.4)",
-                border: "1px solid rgba(255, 255, 255, 0.12)",
-                borderRadius: "10px",
-                padding: "9px 14px",
-                color: "#ffffff",
-                fontSize: "13px",
+                backgroundColor: "var(--surface-inset, #101010)",
+                border: "1px solid var(--border-primary, #333333)",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                color: "var(--text-primary, #ffffff)",
+                fontSize: "12px",
                 outline: "none"
               }
             }),
@@ -3492,14 +4076,14 @@ print("SYNC_SUCCESS")
               {
                 onClick: handleManualKeyConnect,
                 style: {
-                  borderRadius: "9999px",
-                  padding: "9px 18px",
-                  backgroundColor: "#10b981",
-                  color: "#000000",
+                  borderRadius: "6px",
+                  padding: "8px 14px",
+                  backgroundColor: "var(--affordance-prominent, #ffffff)",
+                  color: "var(--text-on-prominent, #000000)",
                   border: "none",
                   cursor: "pointer",
                   fontWeight: "600",
-                  fontSize: "13px"
+                  fontSize: "12px"
                 }
               },
               "Conectar"
@@ -3595,7 +4179,8 @@ print("SYNC_SUCCESS")
               },
               [
                 { id: "catalog", label: "Modelos" },
-                { id: "ranking", label: "Ranking & Roteamento" }
+                { id: "ranking", label: "Ranking & Roteamento" },
+                { id: "agents", label: buzzAgentsCount > 0 ? `Agentes (${buzzAgentsCount})` : "Agentes" }
               ].map((tab) => {
                 const active = activeSection === tab.id;
                 return h(
@@ -3745,6 +4330,11 @@ print("SYNC_SUCCESS")
           disabledModels,
           modelTests,
           onTestSingleModel: handleTestSingleModel,
+          onNotify: setStatusMessage
+        }) : activeSection === "agents" ? h(NexusMindAgentsTab, {
+          models,
+          disabledModels,
+          modelTests,
           onNotify: setStatusMessage
         }) : h(
           React.Fragment,
@@ -3927,11 +4517,11 @@ print("SYNC_SUCCESS")
                         setCurrentPage(1);
                       },
                       style: {
-                        borderRadius: "9999px",
-                        padding: "6px 14px",
+                        borderRadius: "6px",
+                        padding: "5px 10px",
                         border: "none",
-                        backgroundColor: selectedGroupTab === tab.id ? "rgba(255, 255, 255, 0.15)" : "transparent",
-                        color: selectedGroupTab === tab.id ? "#ffffff" : "var(--text-subtle, #8e8e96)",
+                        backgroundColor: selectedGroupTab === tab.id ? "var(--affordance-selected, #333333)" : "transparent",
+                        color: selectedGroupTab === tab.id ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
                         cursor: "pointer",
                         fontSize: "12px",
                         fontWeight: selectedGroupTab === tab.id ? "600" : "500"
@@ -3944,7 +4534,7 @@ print("SYNC_SUCCESS")
               // Search Input & Filter Toggles
               h(
                 "div",
-                { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" } },
+                { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } },
                 h(
                   "div",
                   {
@@ -3963,11 +4553,11 @@ print("SYNC_SUCCESS")
                       setCurrentPage(1);
                     },
                     style: {
-                      borderRadius: "9999px",
-                      backgroundColor: "rgba(0, 0, 0, 0.3)",
-                      border: "1px solid rgba(255, 255, 255, 0.1)",
-                      color: "#ffffff",
-                      padding: "6px 14px 6px 32px",
+                      borderRadius: "6px",
+                      backgroundColor: "var(--surface-inset, #101010)",
+                      border: "1px solid var(--border-primary, #333333)",
+                      color: "var(--text-primary, #ffffff)",
+                      padding: "5px 10px 5px 28px",
                       fontSize: "12px",
                       outline: "none",
                       width: "180px"
@@ -3978,13 +4568,13 @@ print("SYNC_SUCCESS")
                     {
                       style: {
                         position: "absolute",
-                        left: "10px",
-                        color: "var(--text-subtle, #8e8e96)",
+                        left: "9px",
+                        color: "var(--text-tertiary, #a4a4a4)",
                         pointerEvents: "none",
                         display: "flex"
                       }
                     },
-                    SVG_ICONS.search({ h, width: 14, height: 14 })
+                    SVG_ICONS.search({ h, width: 13, height: 13 })
                   )
                 ),
                 h(
@@ -3995,12 +4585,11 @@ print("SYNC_SUCCESS")
                       setCurrentPage(1);
                     },
                     style: {
-                      borderRadius: "9999px",
-                      padding: "6px 12px",
-                      border: "1px solid",
-                      borderColor: filterReasoning ? "#a855f7" : "rgba(255, 255, 255, 0.1)",
-                      backgroundColor: filterReasoning ? "rgba(168, 85, 247, 0.15)" : "transparent",
-                      color: filterReasoning ? "#c084fc" : "var(--text-subtle, #8e8e96)",
+                      borderRadius: "6px",
+                      padding: "5px 10px",
+                      border: `1px solid ${filterReasoning ? "var(--blue-7, #3b6ea5)" : "var(--border-primary, #333333)"}`,
+                      backgroundColor: filterReasoning ? "var(--blue-3, #13253a)" : "transparent",
+                      color: filterReasoning ? "var(--blue-11, #70b8ff)" : "var(--text-tertiary, #a4a4a4)",
                       cursor: "pointer",
                       fontSize: "11px",
                       fontWeight: "500"
@@ -4016,12 +4605,11 @@ print("SYNC_SUCCESS")
                       setCurrentPage(1);
                     },
                     style: {
-                      borderRadius: "9999px",
-                      padding: "6px 12px",
-                      border: "1px solid",
-                      borderColor: filterFree ? "#10b981" : "rgba(255, 255, 255, 0.1)",
-                      backgroundColor: filterFree ? "rgba(168, 185, 129, 0.15)" : "transparent",
-                      color: filterFree ? "#10b981" : "var(--text-subtle, #8e8e96)",
+                      borderRadius: "6px",
+                      padding: "5px 10px",
+                      border: `1px solid ${filterFree ? "var(--green-7, #28714f)" : "var(--border-primary, #333333)"}`,
+                      backgroundColor: filterFree ? "var(--green-3, #132d21)" : "transparent",
+                      color: filterFree ? "var(--green-11, #3dd68c)" : "var(--text-tertiary, #a4a4a4)",
                       cursor: "pointer",
                       fontSize: "11px",
                       fontWeight: "500"
@@ -4041,11 +4629,11 @@ print("SYNC_SUCCESS")
                       setCurrentPage(1);
                     },
                     style: {
-                      borderRadius: "9999px",
-                      padding: "6px 10px",
-                      border: "1px solid rgba(255, 255, 255, 0.12)",
-                      backgroundColor: "rgba(255, 255, 255, 0.04)",
-                      color: "#e4e4e7",
+                      borderRadius: "6px",
+                      padding: "5px 10px",
+                      border: "1px solid var(--border-primary, #333333)",
+                      backgroundColor: "var(--affordance-subtle, #232323)",
+                      color: "var(--text-secondary, #c7c7c7)",
                       cursor: "pointer",
                       fontSize: "11px",
                       fontWeight: "500"
@@ -4074,7 +4662,7 @@ print("SYNC_SUCCESS")
                     alignItems: "center",
                     gap: "5px",
                     fontSize: "11px",
-                    color: "var(--text-subtle, #8e8e96)",
+                    color: "var(--text-tertiary, #a4a4a4)",
                     marginRight: "4px"
                   }
                 },
@@ -4082,11 +4670,11 @@ print("SYNC_SUCCESS")
                 "Status:"
               ),
               [
-                { id: "all", label: `Todos (${statusCounts.all})`, accent: "#ffffff" },
-                { id: "active", label: `Ativos (${statusCounts.active})`, accent: "#10b981" },
-                { id: "disabled", label: `Desativados (${statusCounts.disabled})`, accent: "#9ca3af" },
-                { id: "online", label: `Online (${statusCounts.online})`, accent: "#34d399" },
-                { id: "error", label: `Com Erro (${statusCounts.error})`, accent: "#f87171" }
+                { id: "all", label: `Todos (${statusCounts.all})`, accent: "var(--text-primary, #ffffff)" },
+                { id: "active", label: `Ativos (${statusCounts.active})`, accent: "var(--green-11, #3dd68c)" },
+                { id: "disabled", label: `Desativados (${statusCounts.disabled})`, accent: "var(--text-secondary, #c7c7c7)" },
+                { id: "online", label: `Online (${statusCounts.online})`, accent: "var(--green-11, #3dd68c)" },
+                { id: "error", label: `Com Erro (${statusCounts.error})`, accent: "var(--red-11, #ff9592)" }
               ].map((st) => {
                 const active = statusFilter === st.id;
                 return h(
@@ -4098,15 +4686,14 @@ print("SYNC_SUCCESS")
                       setCurrentPage(1);
                     },
                     style: {
-                      borderRadius: "9999px",
-                      padding: "4px 12px",
-                      border: `1px solid ${active ? st.accent : "rgba(255, 255, 255, 0.08)"}`,
-                      backgroundColor: active ? "rgba(255, 255, 255, 0.1)" : "transparent",
-                      color: active ? st.accent : "var(--text-subtle, #8e8e96)",
+                      borderRadius: "6px",
+                      padding: "4px 10px",
+                      border: `1px solid ${active ? st.accent : "var(--border-primary, #2e2e2e)"}`,
+                      backgroundColor: active ? "var(--affordance-selected, #2e2e2e)" : "transparent",
+                      color: active ? st.accent : "var(--text-tertiary, #a4a4a4)",
                       cursor: "pointer",
                       fontSize: "11px",
-                      fontWeight: active ? "600" : "500",
-                      transition: "all 0.15s ease"
+                      fontWeight: active ? "600" : "500"
                     }
                   },
                   st.label
@@ -4216,29 +4803,29 @@ print("SYNC_SUCCESS")
                     justifyContent: "space-between",
                     flexWrap: "wrap",
                     gap: "10px",
-                    padding: "8px 14px",
-                    borderRadius: "10px",
-                    backgroundColor: "rgba(16, 185, 129, 0.06)",
-                    border: "1px solid rgba(16, 185, 129, 0.2)",
+                    padding: "8px 12px",
+                    borderRadius: "8px",
+                    backgroundColor: "var(--bg-panel, #1a1a1a)",
+                    border: "1px solid var(--border-primary, #2e2e2e)",
                     fontSize: "11px"
                   }
                 },
                 h(
                   "div",
                   { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
-                  h("span", { style: { fontWeight: "700", color: "#10b981" } }, "Ranking Ping Real:"),
-                  top3.length === 0 ? h("span", { style: { color: "#f87171" } }, "Nenhum modelo online nos testes recentes.") : top3.map(
+                  h("span", { style: { fontWeight: "600", color: "var(--green-11, #3dd68c)" } }, "Ping Real:"),
+                  top3.length === 0 ? h("span", { style: { color: "var(--red-11, #ff9592)" } }, "Nenhum modelo online nos testes recentes.") : top3.map(
                     ([mid, t], idx) => h(
                       "span",
                       {
                         key: mid,
                         style: {
-                          padding: "2px 8px",
-                          borderRadius: "9999px",
-                          backgroundColor: idx === 0 ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.06)",
-                          color: idx === 0 ? "#34d399" : "#e4e4e7",
+                          padding: "2px 7px",
+                          borderRadius: "5px",
+                          backgroundColor: idx === 0 ? "var(--green-3, #132d21)" : "var(--affordance-subtle, #232323)",
+                          color: idx === 0 ? "var(--green-11, #3dd68c)" : "var(--text-secondary, #c7c7c7)",
                           fontFamily: "monospace",
-                          fontWeight: idx === 0 ? "700" : "500"
+                          fontWeight: idx === 0 ? "600" : "500"
                         }
                       },
                       `#${idx + 1} ${mid} (${t.latency}ms)`
@@ -4247,30 +4834,36 @@ print("SYNC_SUCCESS")
                 ),
                 h(
                   "span",
-                  { style: { color: "#9ca3af", fontFamily: "monospace" } },
+                  { style: { color: "var(--text-tertiary, #a4a4a4)", fontFamily: "monospace" } },
                   `Estabilidade: ${okCount}/${tested.length} online (${pct}%)`
                 )
               );
             })(),
-            // Model List Rows
+            // Model List Rows (Buzz-native flat container)
             h(
               "div",
-              { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+              {
+                style: {
+                  display: "flex",
+                  flexDirection: "column",
+                  backgroundColor: "var(--bg-panel, #1a1a1a)",
+                  border: "1px solid var(--border-primary, #2e2e2e)",
+                  borderRadius: "10px",
+                  overflow: "hidden"
+                }
+              },
               paginatedModels.length === 0 ? h(
                 "div",
                 {
                   style: {
                     padding: "28px 16px",
                     textAlign: "center",
-                    borderRadius: "10px",
-                    backgroundColor: "rgba(255, 255, 255, 0.02)",
-                    border: "1px dashed rgba(255, 255, 255, 0.08)",
-                    color: "var(--text-subtle, #8e8e96)",
+                    color: "var(--text-tertiary, #a4a4a4)",
                     fontSize: "12px"
                   }
                 },
-                statusFilter === "online" || statusFilter === "error" ? "Nenhum modelo corresponde a este filtro ainda. Clique em 'Testar Visíveis' para rodar o healthcheck." : "Nenhum modelo encontrado com os filtros atuais."
-              ) : paginatedModels.map((item) => {
+                statusFilter === "online" || statusFilter === "error" ? "Nenhum modelo corresponde a este filtro ainda. Clique em 'Testar visíveis' para rodar o healthcheck." : "Nenhum modelo encontrado com os filtros atuais."
+              ) : paginatedModels.map((item, idx) => {
                 const mid = item.id;
                 const isDisabled = disabledModels.includes(mid);
                 const lower = mid.toLowerCase();
@@ -4285,37 +4878,35 @@ print("SYNC_SUCCESS")
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "space-between",
-                      padding: "10px 14px",
-                      backgroundColor: isDisabled ? "rgba(255, 255, 255, 0.01)" : "rgba(255, 255, 255, 0.03)",
-                      border: "1px solid rgba(255, 255, 255, 0.05)",
-                      borderRadius: "10px",
-                      opacity: isDisabled ? 0.45 : 1,
-                      transition: "all 0.15s ease"
+                      padding: "9px 14px",
+                      borderTop: idx > 0 ? "1px solid var(--border-subtle, rgba(255,255,255,0.05))" : "none",
+                      opacity: isDisabled ? 0.5 : 1
                     }
                   },
                   // Left: Toggle Checkbox + Model Name & Badges
                   h(
                     "div",
-                    { style: { display: "flex", alignItems: "center", gap: "12px", minWidth: 0 } },
+                    { style: { display: "flex", alignItems: "center", gap: "10px", minWidth: 0 } },
                     h("input", {
                       type: "checkbox",
                       checked: !isDisabled,
                       onChange: () => handleToggleModel(mid),
-                      style: { cursor: "pointer", accentColor: "#10b981", width: "16px", height: "16px" }
+                      style: { cursor: "pointer", accentColor: "#30a46c", width: "14px", height: "14px" }
                     }),
                     h(
                       "div",
                       { style: { display: "flex", flexDirection: "column", gap: "2px", minWidth: 0 } },
                       h(
                         "div",
-                        { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+                        { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" } },
                         h(
                           "span",
                           {
                             style: {
-                              fontWeight: "600",
-                              fontSize: "13px",
-                              color: isDisabled ? "#8e8e96" : "#ffffff",
+                              fontWeight: "500",
+                              fontSize: "12px",
+                              fontFamily: "monospace",
+                              color: isDisabled ? "var(--text-tertiary, #808080)" : "var(--text-primary, #ffffff)",
                               textDecoration: isDisabled ? "line-through" : "none"
                             }
                           },
@@ -4326,11 +4917,11 @@ print("SYNC_SUCCESS")
                           {
                             style: {
                               fontSize: "9px",
-                              padding: "1px 6px",
+                              padding: "1px 5px",
                               borderRadius: "4px",
-                              backgroundColor: "rgba(168, 85, 247, 0.15)",
-                              color: "#c084fc",
-                              fontWeight: "700"
+                              backgroundColor: "var(--blue-3, #13253a)",
+                              color: "var(--blue-11, #70b8ff)",
+                              fontWeight: "600"
                             }
                           },
                           "THINKING"
@@ -4340,11 +4931,11 @@ print("SYNC_SUCCESS")
                           {
                             style: {
                               fontSize: "9px",
-                              padding: "1px 6px",
+                              padding: "1px 5px",
                               borderRadius: "4px",
-                              backgroundColor: "rgba(16, 185, 129, 0.15)",
-                              color: "#10b981",
-                              fontWeight: "700"
+                              backgroundColor: "var(--affordance-subtle, #282828)",
+                              color: "var(--text-secondary, #c7c7c7)",
+                              fontWeight: "600"
                             }
                           },
                           "FREE"
@@ -4352,7 +4943,7 @@ print("SYNC_SUCCESS")
                       ),
                       h(
                         "div",
-                        { style: { fontSize: "11px", color: "var(--text-subtle, #8e8e96)" } },
+                        { style: { fontSize: "11px", color: "var(--text-tertiary, #808080)" } },
                         item.context_window ? `Ctx: ${formatNumber(item.context_window)} tokens` : "Ctx: 128k tokens"
                       )
                     )
@@ -4360,34 +4951,33 @@ print("SYNC_SUCCESS")
                   // Right: Test Button + Status Badge + Sync Indicator
                   h(
                     "div",
-                    { style: { display: "flex", alignItems: "center", gap: "10px" } },
-                    // Test Result Indicator
+                    { style: { display: "flex", alignItems: "center", gap: "8px" } },
                     testRes && h(
                       "span",
                       {
                         style: {
                           fontSize: "11px",
-                          padding: "2px 8px",
-                          borderRadius: "9999px",
-                          backgroundColor: testRes.status === "ok" ? "rgba(16, 185, 129, 0.15)" : testRes.status === "testing" ? "rgba(59, 130, 246, 0.15)" : "rgba(239, 68, 68, 0.15)",
-                          color: testRes.status === "ok" ? "#10b981" : testRes.status === "testing" ? "#60a5fa" : "#f87171",
-                          fontWeight: "600"
+                          padding: "2px 7px",
+                          borderRadius: "5px",
+                          fontFamily: "monospace",
+                          backgroundColor: testRes.status === "ok" ? "var(--green-3, #132d21)" : testRes.status === "testing" ? "var(--blue-3, #13253a)" : "var(--red-3, #3b1219)",
+                          color: testRes.status === "ok" ? "var(--green-11, #3dd68c)" : testRes.status === "testing" ? "var(--blue-11, #70b8ff)" : "var(--red-11, #ff9592)",
+                          fontWeight: "500"
                         }
                       },
-                      testRes.status === "testing" ? "Testando..." : testRes.status === "ok" ? `${testRes.latency}ms · Online` : `Erro · ${testRes.errorMsg || "Falha"}`
+                      testRes.status === "testing" ? "Testando..." : testRes.status === "ok" ? `${testRes.latency}ms · OK` : `Erro · ${testRes.errorMsg || "Falha"}`
                     ),
-                    // Individual Test Button
                     h(
                       "button",
                       {
                         onClick: () => handleTestSingleModel(mid),
                         disabled: (testRes == null ? void 0 : testRes.status) === "testing",
                         style: {
-                          borderRadius: "9999px",
-                          padding: "4px 10px",
-                          backgroundColor: "rgba(255, 255, 255, 0.06)",
-                          color: "#ffffff",
-                          border: "1px solid rgba(255, 255, 255, 0.1)",
+                          borderRadius: "6px",
+                          padding: "4px 9px",
+                          backgroundColor: "var(--affordance-subtle, #232323)",
+                          color: "var(--text-secondary, #c7c7c7)",
+                          border: "1px solid var(--border-primary, #333333)",
                           fontSize: "11px",
                           fontWeight: "500",
                           cursor: (testRes == null ? void 0 : testRes.status) === "testing" ? "not-allowed" : "pointer",
@@ -4399,19 +4989,18 @@ print("SYNC_SUCCESS")
                       SVG_ICONS.pulse({ h, width: 11, height: 11 }),
                       "Testar"
                     ),
-                    // Active in Buzz Badge
                     h(
                       "span",
                       {
                         style: {
                           fontSize: "11px",
                           fontWeight: "500",
-                          color: isDisabled ? "#8e8e96" : "#10b981",
-                          minWidth: "85px",
+                          color: isDisabled ? "var(--text-tertiary, #808080)" : "var(--green-11, #3dd68c)",
+                          minWidth: "76px",
                           textAlign: "right"
                         }
                       },
-                      isDisabled ? "✕ Desativado" : "✓ Ativo no Buzz"
+                      isDisabled ? "Desativado" : "Ativo"
                     )
                   )
                 );
@@ -4425,15 +5014,15 @@ print("SYNC_SUCCESS")
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "space-between",
-                  paddingTop: "14px",
-                  borderTop: "1px solid rgba(255, 255, 255, 0.06)",
+                  paddingTop: "12px",
+                  borderTop: "1px solid var(--border-primary, #2e2e2e)",
                   flexWrap: "wrap",
                   gap: "10px"
                 }
               },
               h(
                 "div",
-                { style: { fontSize: "12px", color: "var(--text-subtle, #8e8e96)" } },
+                { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } },
                 pageSize === 0 ? `Exibindo todos os ${filteredModels.length} modelos` : `Exibindo ${Math.min((currentPage - 1) * pageSize + 1, filteredModels.length)}–${Math.min(
                   currentPage * pageSize,
                   filteredModels.length
@@ -4441,31 +5030,31 @@ print("SYNC_SUCCESS")
               ),
               h(
                 "div",
-                { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                { style: { display: "flex", alignItems: "center", gap: "6px" } },
                 h(
                   "button",
                   {
                     onClick: () => setCurrentPage((p) => Math.max(1, p - 1)),
                     disabled: currentPage <= 1,
                     style: {
-                      borderRadius: "9999px",
-                      padding: "5px 12px",
-                      backgroundColor: "rgba(255, 255, 255, 0.06)",
-                      color: currentPage <= 1 ? "rgba(255,255,255,0.3)" : "#ffffff",
-                      border: "none",
+                      borderRadius: "6px",
+                      padding: "4px 10px",
+                      backgroundColor: "var(--affordance-subtle, #232323)",
+                      color: currentPage <= 1 ? "var(--text-tertiary, #666666)" : "var(--text-primary, #ffffff)",
+                      border: "1px solid var(--border-primary, #333333)",
                       cursor: currentPage <= 1 ? "not-allowed" : "pointer",
-                      fontSize: "12px",
+                      fontSize: "11px",
                       display: "flex",
                       alignItems: "center",
                       gap: "4px"
                     }
                   },
-                  SVG_ICONS.chevronLeft({ h, width: 14, height: 14 }),
+                  SVG_ICONS.chevronLeft({ h, width: 13, height: 13 }),
                   "Anterior"
                 ),
                 h(
                   "span",
-                  { style: { fontSize: "12px", color: "#8e8e96", padding: "0 6px" } },
+                  { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)", padding: "0 6px" } },
                   `Página ${currentPage} de ${totalPages}`
                 ),
                 h(
@@ -4474,26 +5063,25 @@ print("SYNC_SUCCESS")
                     onClick: () => setCurrentPage((p) => Math.min(totalPages, p + 1)),
                     disabled: currentPage >= totalPages,
                     style: {
-                      borderRadius: "9999px",
-                      padding: "5px 12px",
-                      backgroundColor: "rgba(255, 255, 255, 0.06)",
-                      color: currentPage >= totalPages ? "rgba(255,255,255,0.3)" : "#ffffff",
-                      border: "none",
+                      borderRadius: "6px",
+                      padding: "4px 10px",
+                      backgroundColor: "var(--affordance-subtle, #232323)",
+                      color: currentPage >= totalPages ? "var(--text-tertiary, #666666)" : "var(--text-primary, #ffffff)",
+                      border: "1px solid var(--border-primary, #333333)",
                       cursor: currentPage >= totalPages ? "not-allowed" : "pointer",
-                      fontSize: "12px",
+                      fontSize: "11px",
                       display: "flex",
                       alignItems: "center",
                       gap: "4px"
                     }
                   },
                   "Próxima",
-                  SVG_ICONS.chevronRight({ h, width: 14, height: 14 })
+                  SVG_ICONS.chevronRight({ h, width: 13, height: 13 })
                 ),
-                // Page size selector
                 h(
                   "div",
-                  { style: { display: "flex", alignItems: "center", gap: "4px", marginLeft: "12px" } },
-                  h("span", { style: { fontSize: "12px", color: "#8e8e96" } }, "Por página:"),
+                  { style: { display: "flex", alignItems: "center", gap: "4px", marginLeft: "10px" } },
+                  h("span", { style: { fontSize: "11px", color: "var(--text-tertiary, #a4a4a4)" } }, "Por página:"),
                   [15, 30, 50, 0].map(
                     (sz) => h(
                       "button",
@@ -4504,11 +5092,11 @@ print("SYNC_SUCCESS")
                           setCurrentPage(1);
                         },
                         style: {
-                          borderRadius: "6px",
-                          padding: "2px 8px",
+                          borderRadius: "5px",
+                          padding: "2px 7px",
                           border: "none",
-                          backgroundColor: pageSize === sz ? "rgba(255, 255, 255, 0.15)" : "transparent",
-                          color: pageSize === sz ? "#ffffff" : "#8e8e96",
+                          backgroundColor: pageSize === sz ? "var(--affordance-selected, #333333)" : "transparent",
+                          color: pageSize === sz ? "var(--text-primary, #ffffff)" : "var(--text-tertiary, #a4a4a4)",
                           fontSize: "11px",
                           cursor: "pointer"
                         }
