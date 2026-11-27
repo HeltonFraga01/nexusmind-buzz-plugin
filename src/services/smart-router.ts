@@ -68,6 +68,8 @@ export function isUnsupportedAgentModel(modelId: string): boolean {
   return (
     m.includes("pol/community/") ||
     m.includes("pollinations/community/") ||
+    m.includes("gemini-3-pro-low") ||
+    m.includes("gemini-3-pro-high") ||
     m.startsWith("auto/") ||
     m.includes("tab_jump") ||
     m.includes("autocomplete") ||

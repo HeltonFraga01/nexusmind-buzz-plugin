@@ -209,7 +209,7 @@ function isFreeModel$1(modelId) {
 function isUnsupportedAgentModel(modelId) {
   const m = String(modelId || "").trim().toLowerCase();
   if (!m) return true;
-  return m.includes("pol/community/") || m.includes("pollinations/community/") || m.startsWith("auto/") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("dall-e") || m.includes("moderation");
+  return m.includes("pol/community/") || m.includes("pollinations/community/") || m.includes("gemini-3-pro-low") || m.includes("gemini-3-pro-high") || m.startsWith("auto/") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("dall-e") || m.includes("moderation");
 }
 function scoreModelForTier(modelId, tier) {
   const m = String(modelId || "").toLowerCase();
