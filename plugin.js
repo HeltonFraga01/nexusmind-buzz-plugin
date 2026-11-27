@@ -5152,7 +5152,7 @@ function apply(ctx) {
     const [failoverLog, setFailoverLog] = React.useState(() => loadFailoverLog());
     const [usageByModelCache, setUsageByModelCache] = React.useState({});
     const [usageSampleSizeCache, setUsageSampleSizeCache] = React.useState(0);
-    const handledErrorSigsRef = React.useRef(/* @__PURE__ */ new Set());
+    React.useRef(/* @__PURE__ */ new Set());
     const ModelRankingTab = React.useMemo(
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS),
       []
@@ -5239,40 +5239,32 @@ function apply(ctx) {
       });
     };
     React.useEffect(() => {
-      const onOrgfyFailover = (e) => {
-        const detail = (e == null ? void 0 : e.detail) || {};
-        const target = detail.agentKey || detail.agente || detail.agentName;
-        if (!target) return;
-        void handleFailoverAgent(String(target), String(detail.error || detail.reason || "orgfy.failover.requested"), "orgfy_event");
+      const onCompleted = (e) => {
+        const evt = e == null ? void 0 : e.detail;
+        setQuarantines(loadQuarantines());
+        setFailoverLog(loadFailoverLog());
+        if ((evt == null ? void 0 : evt.applied) && (evt == null ? void 0 : evt.agentName)) {
+          setStatusMessage({
+            type: "success",
+            text: `Autopiloto: ${evt.agentName} (${evt.fromModel || "anterior"} → ${evt.toModel})`
+          });
+        }
       };
       try {
         if (typeof window !== "undefined" && window.addEventListener) {
-          window.addEventListener("orgfy.failover.requested", onOrgfyFailover);
+          window.addEventListener("nexusmind.failover.completed", onCompleted);
         }
       } catch {
       }
-      let timer = null;
-      if (autopilotCfg.enabled) {
-        timer = setInterval(() => {
-          setQuarantines(loadQuarantines());
-          const detected = scanLiveAgentErrors(ctx);
-          for (const err of detected) {
-            if (handledErrorSigsRef.current.has(err.signature)) continue;
-            handledErrorSigsRef.current.add(err.signature);
-            void handleFailoverAgent(err.agentKey, err.errorText, "watchdog");
-          }
-        }, Math.max(5, autopilotCfg.pollIntervalSec) * 1e3);
-      }
       return () => {
-        if (timer) clearInterval(timer);
         try {
           if (typeof window !== "undefined" && window.removeEventListener) {
-            window.removeEventListener("orgfy.failover.requested", onOrgfyFailover);
+            window.removeEventListener("nexusmind.failover.completed", onCompleted);
           }
         } catch {
         }
       };
-    }, [autopilotCfg, vipPolicy, qualityBench, liveRankingSnapshot]);
+    }, []);
     const buzzAgentsCount = React.useMemo(() => {
       var _a2, _b2;
       try {
@@ -7432,6 +7424,113 @@ print("SYNC_SUCCESS")
       group: "AI Models & Gateways",
       component: function NexusMindSettings() {
         return h(NexusMindComponent, { isSettingsCard: true });
+      }
+    });
+  }
+  const bgHandledErrorSigs = /* @__PURE__ */ new Set();
+  const bgInFlightAgents = /* @__PURE__ */ new Set();
+  const runBackgroundFailover = async (agentKeyOrName, errorText, trigger) => {
+    const dedup = String(agentKeyOrName || "").trim().toLowerCase();
+    if (!dedup || bgInFlightAgents.has(dedup)) return;
+    bgInFlightAgents.add(dedup);
+    try {
+      const cfg = loadAutopilotConfig();
+      const vipPol = loadVipPolicy();
+      const qBench = loadSavedQualityBench();
+      let cachedModels = [];
+      let disabledList = [];
+      try {
+        const rawM = localStorage.getItem("nexusmind_cached_models");
+        if (rawM) cachedModels = JSON.parse(rawM);
+        const rawD = localStorage.getItem("nexusmind_disabled_models");
+        if (rawD) disabledList = JSON.parse(rawD);
+      } catch {
+      }
+      const usage = await loadGatewayUsageByModel(ctx).catch(() => ({ byModel: {}, sampleSize: 0 }));
+      const rankSnap = buildModelRankingSnapshot({
+        catalogModels: cachedModels,
+        groups: CANONICAL_GROUPS,
+        usageByModel: usage.byModel,
+        usageSampleSize: usage.sampleSize,
+        disabledModels: disabledList,
+        tier: "geral",
+        policy: loadSavedRoutingPolicy(),
+        vipPolicy: vipPol,
+        qualityBench: qBench,
+        quarantines: loadQuarantines()
+      });
+      await executeAgentFailover(ctx, CANONICAL_GROUPS, {
+        agentKeyOrName,
+        errorText,
+        trigger,
+        rankingSnapshot: rankSnap,
+        vipPolicy: vipPol,
+        qualityBench: qBench,
+        disabledModels: disabledList,
+        wakeAfter: cfg.wakeOnFailover,
+        notify: cfg.notifyOnFailover
+      });
+    } catch (err) {
+      console.warn("[NEXUSMIND] Falha no failover em background:", err);
+    } finally {
+      bgInFlightAgents.delete(dedup);
+    }
+  };
+  const onBgOrgfyFailover = (e) => {
+    const detail = (e == null ? void 0 : e.detail) || e || {};
+    const target = detail.agentKey || detail.agente || detail.agentName || detail.agent_pubkey;
+    if (!target) return;
+    void runBackgroundFailover(
+      String(target),
+      String(detail.error || detail.reason || "orgfy.failover.requested"),
+      "orgfy_event"
+    );
+  };
+  try {
+    if (typeof window !== "undefined" && window.addEventListener) {
+      window.addEventListener("orgfy.failover.requested", onBgOrgfyFailover);
+    }
+    const bus = (ctx == null ? void 0 : ctx.events) || (ctx == null ? void 0 : ctx.bus);
+    if (typeof (bus == null ? void 0 : bus.on) === "function") {
+      bus.on("orgfy.failover.requested", onBgOrgfyFailover);
+    }
+  } catch {
+  }
+  let bgAutopilotTimer = null;
+  const startBgAutopilotTimer = () => {
+    if (bgAutopilotTimer) clearInterval(bgAutopilotTimer);
+    const cfg = loadAutopilotConfig();
+    const intervalMs = Math.max(5, cfg.pollIntervalSec || 12) * 1e3;
+    bgAutopilotTimer = setInterval(() => {
+      const liveCfg = loadAutopilotConfig();
+      if (!liveCfg.enabled) return;
+      const detected = scanLiveAgentErrors(ctx);
+      for (const err of detected) {
+        if (bgHandledErrorSigs.has(err.signature)) continue;
+        bgHandledErrorSigs.add(err.signature);
+        void runBackgroundFailover(err.agentKey, err.errorText, "watchdog");
+      }
+    }, intervalMs);
+    if (typeof (bgAutopilotTimer == null ? void 0 : bgAutopilotTimer.unref) === "function") {
+      bgAutopilotTimer.unref();
+    }
+  };
+  startBgAutopilotTimer();
+  if (typeof (ctx == null ? void 0 : ctx.on) === "function") {
+    ctx.on("dispose", () => {
+      if (bgAutopilotTimer) {
+        clearInterval(bgAutopilotTimer);
+        bgAutopilotTimer = null;
+      }
+      try {
+        if (typeof window !== "undefined" && window.removeEventListener) {
+          window.removeEventListener("orgfy.failover.requested", onBgOrgfyFailover);
+        }
+        const bus = (ctx == null ? void 0 : ctx.events) || (ctx == null ? void 0 : ctx.bus);
+        if (typeof (bus == null ? void 0 : bus.off) === "function") {
+          bus.off("orgfy.failover.requested", onBgOrgfyFailover);
+        }
+      } catch {
       }
     });
   }

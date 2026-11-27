@@ -904,42 +904,32 @@ export function apply(ctx: Context) {
       });
     };
 
-    // Watchdog ao vivo (ctx.relay) + Listener do barramento OrgFy ('orgfy.failover.requested')
+    // Sincroniza UI quando o Autopiloto em background (raiz do apply) conclui um failover
     React.useEffect(() => {
-      const onOrgfyFailover = (e: any) => {
-        const detail = e?.detail || {};
-        const target = detail.agentKey || detail.agente || detail.agentName;
-        if (!target) return;
-        void handleFailoverAgent(String(target), String(detail.error || detail.reason || "orgfy.failover.requested"), "orgfy_event");
+      const onCompleted = (e: any) => {
+        const evt = e?.detail;
+        setQuarantines(loadQuarantines());
+        setFailoverLog(loadFailoverLog());
+        if (evt?.applied && evt?.agentName) {
+          setStatusMessage({
+            type: "success",
+            text: `Autopiloto: ${evt.agentName} (${evt.fromModel || "anterior"} → ${evt.toModel})`,
+          });
+        }
       };
       try {
         if (typeof window !== "undefined" && window.addEventListener) {
-          window.addEventListener("orgfy.failover.requested", onOrgfyFailover);
+          window.addEventListener("nexusmind.failover.completed", onCompleted);
         }
       } catch {}
-
-      let timer: any = null;
-      if (autopilotCfg.enabled) {
-        timer = setInterval(() => {
-          setQuarantines(loadQuarantines());
-          const detected = scanLiveAgentErrors(ctx);
-          for (const err of detected) {
-            if (handledErrorSigsRef.current.has(err.signature)) continue;
-            handledErrorSigsRef.current.add(err.signature);
-            void handleFailoverAgent(err.agentKey, err.errorText, "watchdog");
-          }
-        }, Math.max(5, autopilotCfg.pollIntervalSec) * 1000);
-      }
-
       return () => {
-        if (timer) clearInterval(timer);
         try {
           if (typeof window !== "undefined" && window.removeEventListener) {
-            window.removeEventListener("orgfy.failover.requested", onOrgfyFailover);
+            window.removeEventListener("nexusmind.failover.completed", onCompleted);
           }
         } catch {}
       };
-    }, [autopilotCfg, vipPolicy, qualityBench, liveRankingSnapshot]);
+    }, []);
     const buzzAgentsCount = React.useMemo(() => {
       try {
         const snap = (ctx as any)?.agents?.snapshot?.() || {};
@@ -3300,6 +3290,121 @@ print("SYNC_SUCCESS")
       component: function NexusMindSettings() {
         return h(NexusMindComponent, { isSettingsCard: true });
       },
+    });
+  }
+
+  // ── AUTOPILOTO & LISTENER DE FAILOVER EM BACKGROUND (RAIZ DO PLUGIN — INDEPENDE DA ABA ABERTA) ──
+  const bgHandledErrorSigs = new Set<string>();
+  const bgInFlightAgents = new Set<string>();
+
+  const runBackgroundFailover = async (
+    agentKeyOrName: string,
+    errorText: string,
+    trigger: FailoverEvent["trigger"]
+  ) => {
+    const dedup = String(agentKeyOrName || "").trim().toLowerCase();
+    if (!dedup || bgInFlightAgents.has(dedup)) return;
+    bgInFlightAgents.add(dedup);
+    try {
+      const cfg = loadAutopilotConfig();
+      const vipPol = loadVipPolicy();
+      const qBench = loadSavedQualityBench();
+      let cachedModels: any[] = [];
+      let disabledList: string[] = [];
+      try {
+        const rawM = localStorage.getItem("nexusmind_cached_models");
+        if (rawM) cachedModels = JSON.parse(rawM);
+        const rawD = localStorage.getItem("nexusmind_disabled_models");
+        if (rawD) disabledList = JSON.parse(rawD);
+      } catch {}
+      const usage = await loadGatewayUsageByModel(ctx).catch(() => ({ byModel: {}, sampleSize: 0 }));
+      const rankSnap = buildModelRankingSnapshot({
+        catalogModels: cachedModels,
+        groups: CANONICAL_GROUPS as any,
+        usageByModel: usage.byModel,
+        usageSampleSize: usage.sampleSize,
+        disabledModels: disabledList,
+        tier: "geral",
+        policy: loadSavedRoutingPolicy(),
+        vipPolicy: vipPol,
+        qualityBench: qBench,
+        quarantines: loadQuarantines(),
+      });
+      await executeAgentFailover(ctx, CANONICAL_GROUPS as any, {
+        agentKeyOrName,
+        errorText,
+        trigger,
+        rankingSnapshot: rankSnap,
+        vipPolicy: vipPol,
+        qualityBench: qBench,
+        disabledModels: disabledList,
+        wakeAfter: cfg.wakeOnFailover,
+        notify: cfg.notifyOnFailover,
+      });
+    } catch (err) {
+      console.warn("[NEXUSMIND] Falha no failover em background:", err);
+    } finally {
+      bgInFlightAgents.delete(dedup);
+    }
+  };
+
+  const onBgOrgfyFailover = (e: any) => {
+    const detail = e?.detail || e || {};
+    const target = detail.agentKey || detail.agente || detail.agentName || detail.agent_pubkey;
+    if (!target) return;
+    void runBackgroundFailover(
+      String(target),
+      String(detail.error || detail.reason || "orgfy.failover.requested"),
+      "orgfy_event"
+    );
+  };
+
+  try {
+    if (typeof window !== "undefined" && window.addEventListener) {
+      window.addEventListener("orgfy.failover.requested", onBgOrgfyFailover);
+    }
+    const bus = (ctx as any)?.events || (ctx as any)?.bus;
+    if (typeof bus?.on === "function") {
+      bus.on("orgfy.failover.requested", onBgOrgfyFailover);
+    }
+  } catch {}
+
+  let bgAutopilotTimer: any = null;
+  const startBgAutopilotTimer = () => {
+    if (bgAutopilotTimer) clearInterval(bgAutopilotTimer);
+    const cfg = loadAutopilotConfig();
+    const intervalMs = Math.max(5, cfg.pollIntervalSec || 12) * 1000;
+    bgAutopilotTimer = setInterval(() => {
+      const liveCfg = loadAutopilotConfig();
+      if (!liveCfg.enabled) return;
+      const detected = scanLiveAgentErrors(ctx);
+      for (const err of detected) {
+        if (bgHandledErrorSigs.has(err.signature)) continue;
+        bgHandledErrorSigs.add(err.signature);
+        void runBackgroundFailover(err.agentKey, err.errorText, "watchdog");
+      }
+    }, intervalMs);
+    if (typeof bgAutopilotTimer?.unref === "function") {
+      bgAutopilotTimer.unref();
+    }
+  };
+  startBgAutopilotTimer();
+
+  if (typeof (ctx as any)?.on === "function") {
+    (ctx as any).on("dispose", () => {
+      if (bgAutopilotTimer) {
+        clearInterval(bgAutopilotTimer);
+        bgAutopilotTimer = null;
+      }
+      try {
+        if (typeof window !== "undefined" && window.removeEventListener) {
+          window.removeEventListener("orgfy.failover.requested", onBgOrgfyFailover);
+        }
+        const bus = (ctx as any)?.events || (ctx as any)?.bus;
+        if (typeof bus?.off === "function") {
+          bus.off("orgfy.failover.requested", onBgOrgfyFailover);
+        }
+      } catch {}
     });
   }
 
