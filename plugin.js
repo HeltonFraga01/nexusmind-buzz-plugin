@@ -1733,6 +1733,7 @@ function createModelRankingTabComponent(ctx, groups) {
     onUpdateQualityBench,
     quarantines
   }) {
+    var _a, _b;
     const [selectedTier, setSelectedTier] = React.useState("geral");
     const [policy, setPolicy] = React.useState(() => loadSavedRoutingPolicy());
     const [usageByModel, setUsageByModel] = React.useState({});
@@ -1744,6 +1745,27 @@ function createModelRankingTabComponent(ctx, groups) {
     const [applyingModel, setApplyingModel] = React.useState(null);
     const [onlyAutoEligible, setOnlyAutoEligible] = React.useState(false);
     const [searchFilter, setSearchFilter] = React.useState("");
+    const [controlPlane, setControlPlane] = React.useState(null);
+    const refreshControlPlane = React.useCallback(async () => {
+      const host = ctx == null ? void 0 : ctx.host;
+      if (typeof (host == null ? void 0 : host.readFile) !== "function") return;
+      for (const p of ["~/.buzz/.scratch/model-control-plane.json", "/Users/heltonfraga/.buzz/.scratch/model-control-plane.json"]) {
+        try {
+          const raw = await host.readFile(p);
+          if (!raw) continue;
+          const txt = typeof raw === "string" ? raw : new TextDecoder("utf-8").decode(raw instanceof Uint8Array ? raw : new Uint8Array(raw));
+          const parsed = JSON.parse(txt);
+          if (parsed && Array.isArray(parsed.models)) {
+            setControlPlane(parsed);
+            return;
+          }
+        } catch {
+        }
+      }
+    }, []);
+    React.useEffect(() => {
+      refreshControlPlane();
+    }, [refreshControlPlane]);
     const updatePolicy = (updater) => {
       setPolicy((prev) => {
         const next = updater(prev);
@@ -1752,9 +1774,9 @@ function createModelRankingTabComponent(ctx, groups) {
       });
     };
     const agentsList = React.useMemo(() => {
-      var _a, _b;
+      var _a2, _b2;
       try {
-        const snap = ((_b = (_a = ctx == null ? void 0 : ctx.agents) == null ? void 0 : _a.snapshot) == null ? void 0 : _b.call(_a)) || {};
+        const snap = ((_b2 = (_a2 = ctx == null ? void 0 : ctx.agents) == null ? void 0 : _a2.snapshot) == null ? void 0 : _b2.call(_a2)) || {};
         const pool = [];
         const seen = /* @__PURE__ */ new Set();
         for (const list of [snap.running, snap.agents]) {
@@ -1901,9 +1923,135 @@ function createModelRankingTabComponent(ctx, groups) {
         setApplyingModel(null);
       }
     };
+    const cpSummary = (controlPlane == null ? void 0 : controlPlane.summary) || null;
+    const cpModels = Array.isArray(controlPlane == null ? void 0 : controlPlane.models) ? controlPlane.models : [];
+    const cpProviders = Array.isArray(controlPlane == null ? void 0 : controlPlane.providerHealth) ? controlPlane.providerHealth : [];
+    const hasDecisionApi = typeof ((_a = ctx == null ? void 0 : ctx.decisions) == null ? void 0 : _a.decide) === "function";
+    const approvedList = cpModels.filter((m) => m.evalApproved);
+    const avgApprovedLat = approvedList.length > 0 ? Math.round(approvedList.reduce((acc, m) => acc + Number(m.latencyMs || 0), 0) / approvedList.length) : null;
     return h(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "14px" } },
+      // 0. Dashboard SOTA Eval-First Control Plane (KPIs + Gráficos SVG nativos)
+      cpSummary && h(
+        "div",
+        { "data-nm-sota-dashboard": "true", style: { display: "flex", flexDirection: "column", gap: "12px" } },
+        h(
+          "div",
+          { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "10px" } },
+          [
+            {
+              label: "Aprovados no Eval (Hard Gate)",
+              val: `${cpSummary.approvedCount}/${cpSummary.totalEvaluated}`,
+              sub: `${cpSummary.autoEligibleCount} Auto · ${cpSummary.vipCount} VIP · ${cpSummary.blockedCount} Bloq.`,
+              tone: "ok"
+            },
+            {
+              label: "Sucesso Real 24h (sessions.db)",
+              val: typeof cpSummary.prodSuccessRate24hPct === "number" ? `${cpSummary.prodSuccessRate24hPct.toFixed(1)}%` : "—",
+              sub: `${Number(cpSummary.prodTurns24h || 0).toLocaleString("pt-BR")} turnos · ${cpSummary.prodErrors24h || 0} erros`,
+              tone: (cpSummary.prodSuccessRate24hPct ?? 100) >= 95 ? "ok" : "warn"
+            },
+            {
+              label: "Latência Média (Aprovados)",
+              val: fmtMs(avgApprovedLat),
+              sub: `12 tools · schema fidelity ≥ 80%`,
+              tone: "neutral"
+            },
+            {
+              label: "Roteamento & Decision API",
+              val: hasDecisionApi ? "Decision API ✓" : "Eval-First ✓",
+              sub: policy.forceFree ? "Modo :free ativo" : `Auto #1: ${((_b = controlPlane == null ? void 0 : controlPlane.bestByTier) == null ? void 0 : _b.geral) || "—"}`,
+              tone: "accent"
+            }
+          ].map(
+            (k) => h(
+              "div",
+              { key: k.label, className: "nm-card-pad", style: { padding: "11px 13px" } },
+              h("div", { style: { fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--nm-muted)" } }, k.label),
+              h("div", { className: "nm-mono nm-num", style: { fontSize: "18px", fontWeight: 700, marginTop: "4px", color: k.tone === "ok" ? "var(--green-11, #3dd68c)" : k.tone === "warn" ? "var(--amber-11, #fbbf24)" : "var(--nm-fg)" } }, k.val),
+              h("div", { style: { fontSize: "10.5px", color: "var(--nm-muted)", marginTop: "2px" } }, k.sub)
+            )
+          )
+        ),
+        h(
+          "div",
+          { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "12px" } },
+          // Gráfico 1: SVG Eval Score × Latência × Sucesso 24h (Top 9)
+          h(
+            "div",
+            { className: "nm-card-pad", style: { display: "flex", flexDirection: "column", gap: "8px", padding: "12px 14px" } },
+            h(
+              "div",
+              { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+              h("span", { style: { fontSize: "12.5px", fontWeight: 700 } }, "Eval SOTA v2 · Score × Latência × Prod 24h"),
+              h("span", { className: "nm-mono", style: { fontSize: "10px", color: "var(--nm-muted)" } }, "0–100 pts")
+            ),
+            h(
+              "svg",
+              { viewBox: "0 0 440 212", style: { width: "100%", height: "212px", display: "block" }, role: "img", "aria-label": "Ranking Eval Score por modelo" },
+              cpModels.slice(0, 8).map((m, i) => {
+                var _a2;
+                const y = 8 + i * 25;
+                const score = Math.max(0, Math.min(100, Number(m.evalScore || 0)));
+                const barW = Math.max(4, score / 100 * 190);
+                const color = !m.online ? "var(--red-11, #f87171)" : m.policyState === "blocked" ? "var(--amber-11, #fbbf24)" : m.policyState === "vip" ? "#c084fc" : "var(--green-11, #3dd68c)";
+                const shortName = String(m.model || "").split("/").pop() || m.model;
+                const label = shortName.length > 22 ? shortName.slice(0, 20) + "…" : shortName;
+                const prodPct = (_a2 = m.prod24h) == null ? void 0 : _a2.successRate24hPct;
+                return h(
+                  "g",
+                  { key: m.model },
+                  h("text", { x: 0, y: y + 12, fill: "var(--text-secondary, #c7c7c7)", fontSize: "10.5", fontFamily: "ui-monospace, monospace" }, label),
+                  h("rect", { x: 150, y: y + 2, width: 190, height: 13, rx: 4, fill: "rgba(255,255,255,0.06)" }),
+                  h("rect", { x: 150, y: y + 2, width: barW, height: 13, rx: 4, fill: color }),
+                  h(
+                    "text",
+                    { x: 348, y: y + 12, fill: "var(--text-primary, #f3f4f6)", fontSize: "10", fontFamily: "ui-monospace, monospace" },
+                    `${score.toFixed(1)} · ${fmtMs(m.latencyMs)}${typeof prodPct === "number" ? ` · ${Math.round(prodPct)}%` : ""}`
+                  )
+                );
+              })
+            )
+          ),
+          // Gráfico 2: Saúde por Provedor (Provider Health Matrix)
+          h(
+            "div",
+            { className: "nm-card-pad", style: { display: "flex", flexDirection: "column", gap: "10px", padding: "12px 14px" } },
+            h(
+              "div",
+              { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+              h("span", { style: { fontSize: "12.5px", fontWeight: 700 } }, "Saúde por Provedor (API NexusMind)"),
+              h("span", { className: "nm-mono", style: { fontSize: "10px", color: "var(--nm-muted)" } }, `${cpProviders.length} provedores`)
+            ),
+            cpProviders.map((p) => {
+              const pct = Math.max(0, Math.min(100, Number(p.healthPct || 0)));
+              const toneColor = pct >= 70 ? "var(--green-11, #3dd68c)" : pct >= 40 ? "var(--amber-11, #fbbf24)" : "var(--red-11, #f87171)";
+              return h(
+                "div",
+                { key: p.provider, style: { display: "flex", flexDirection: "column", gap: "4px" } },
+                h(
+                  "div",
+                  { style: { display: "flex", justifyContent: "space-between", fontSize: "11.5px" } },
+                  h("span", { className: "nm-mono", style: { fontWeight: 600 } }, String(p.provider || "").replace("nexusmind_", "")),
+                  h("span", { className: "nm-mono", style: { color: "var(--nm-muted)", fontSize: "10.5px" } }, `${p.approved}/${p.total} aprov. · ${p.online} online · ${fmtMs(p.avgLatencyMs)}`)
+                ),
+                h(
+                  "div",
+                  { style: { height: "8px", borderRadius: "999px", backgroundColor: "rgba(255,255,255,0.07)", overflow: "hidden" } },
+                  h("div", { style: { width: `${Math.max(4, pct)}%`, height: "100%", borderRadius: "999px", backgroundColor: toneColor } })
+                )
+              );
+            }),
+            h(
+              "div",
+              { style: { marginTop: "auto", paddingTop: "8px", borderTop: "1px solid var(--nm-border)", fontSize: "10.5px", color: "var(--nm-muted)", display: "flex", justifyContent: "space-between" } },
+              h("span", null, "Hard Gate: Tool Call ≥ 80% + Schema ≥ 80% + Score ≥ 80"),
+              h("span", { className: "nm-mono" }, (controlPlane == null ? void 0 : controlPlane.evalVersion) || "sota-v2")
+            )
+          )
+        )
+      ),
       // 1. Barra compacta de Tier + Critérios de Roteamento (CodeDen + Buzz Theme)
       h(
         "div",
@@ -2140,8 +2288,8 @@ function createModelRankingTabComponent(ctx, groups) {
             },
             agentsList.map(
               (a) => {
-                var _a;
-                return h("option", { key: a.key, value: a.key }, `${a.name || a.key} (${((_a = a.config) == null ? void 0 : _a.model) || "padrão"})`);
+                var _a2;
+                return h("option", { key: a.key, value: a.key }, `${a.name || a.key} (${((_a2 = a.config) == null ? void 0 : _a2.model) || "padrão"})`);
               }
             )
           ),
@@ -2198,7 +2346,7 @@ function createModelRankingTabComponent(ctx, groups) {
                 "Nenhum modelo corresponde aos critérios atuais."
               )
             ) : visibleRows.map((row, idx) => {
-              var _a;
+              var _a2;
               const isPinned = pinnedForTier === row.model;
               const healthLabel = row.online === true ? `OK · ${fmtMs(row.pingLatencyMs)}` : row.online === false ? `Erro` : "—";
               const healthColor = row.online === true ? "var(--green-11, #3dd68c)" : row.online === false ? "var(--red-11, #ff9592)" : "var(--text-tertiary, #808080)";
@@ -2289,7 +2437,7 @@ function createModelRankingTabComponent(ctx, groups) {
                 ),
                 h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-secondary, #c7c7c7)" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
                 h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs ?? row.pingLatencyMs)),
-                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd, { isFree: row.isFree, estimatedProbeUsd: ((_a = qualityBench == null ? void 0 : qualityBench[row.model]) == null ? void 0 : _a.estimatedCostUsd) ?? null })),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd, { isFree: row.isFree, estimatedProbeUsd: ((_a2 = qualityBench == null ? void 0 : qualityBench[row.model]) == null ? void 0 : _a2.estimatedCostUsd) ?? null })),
                 h(
                   "td",
                   { style: { padding: "8px 12px", whiteSpace: "nowrap" } },
@@ -3087,7 +3235,7 @@ function pickFailoverCandidate(input) {
   }
   const candidates = [];
   const seen = /* @__PURE__ */ new Set();
-  const pushCandidate = (modelId, groupId, baseScore) => {
+  const pushCandidate = (modelId, groupId, baseScore, rowEvalApproved) => {
     var _a2;
     const clean = String(modelId || "").trim();
     if (!clean || seen.has(clean.toLowerCase()) || clean.toLowerCase() === currentLower) return;
@@ -3098,29 +3246,37 @@ function pickFailoverCandidate(input) {
     if (mode !== "auto") return;
     if (isQuarantined(clean) || isBrokenInBench(clean)) return;
     const q = qualityBench[clean];
-    const toolBonus = (q == null ? void 0 : q.toolCallOk) === true ? 30 : (q == null ? void 0 : q.toolCallOk) === false ? -25 : 0;
-    const qualityBlend = q ? q.qualityScore * 0.6 + baseScore * 0.4 : baseScore;
+    const evalApproved = Boolean(rowEvalApproved === true || q && q.online && q.toolCallOk === true);
+    if (q && q.toolCallOk === false) return;
+    const toolBonus = evalApproved ? 40 : 0;
+    const qualityBlend = q ? q.qualityScore * 0.65 + baseScore * 0.35 : baseScore;
     candidates.push({
       model: clean,
       group: resolvedGroup,
       score: Number((qualityBlend + toolBonus).toFixed(1)),
-      toolCallOk: q ? q.toolCallOk : null
+      toolCallOk: q ? q.toolCallOk : evalApproved ? true : null,
+      evalApproved
     });
   };
   for (const row of ((_b = input.rankingSnapshot) == null ? void 0 : _b.models) || []) {
     if (row.isDisabled || row.online === false) continue;
-    pushCandidate(row.model, row.group, row.score);
+    pushCandidate(row.model, row.group, row.score, Boolean(row.evalApproved ?? row.toolCallOk));
   }
-  for (const grp of Object.values(input.groups)) {
-    if (grp == null ? void 0 : grp.defaultModel) {
-      pushCandidate(grp.defaultModel, grp.id, 65);
+  const hasAnyEvalApproved = candidates.some((c) => c.evalApproved);
+  if (!hasAnyEvalApproved) {
+    for (const grp of Object.values(input.groups)) {
+      if (grp == null ? void 0 : grp.defaultModel) {
+        pushCandidate(grp.defaultModel, grp.id, 65, false);
+      }
     }
   }
-  candidates.sort((a, b) => {
+  const finalPool = hasAnyEvalApproved ? candidates.filter((c) => c.evalApproved) : candidates;
+  finalPool.sort((a, b) => {
+    if (a.evalApproved !== b.evalApproved) return a.evalApproved ? -1 : 1;
     if (a.toolCallOk === true !== (b.toolCallOk === true)) return a.toolCallOk === true ? -1 : 1;
     return b.score - a.score;
   });
-  const winner = candidates[0];
+  const winner = finalPool[0];
   if (!winner) {
     return {
       ok: false,
@@ -3128,7 +3284,7 @@ function pickFailoverCandidate(input) {
       model: null,
       group: null,
       score: null,
-      reason: `Nenhum modelo econômico ('auto') saudável e fora de quarentena disponível para ${input.agentName}.`
+      reason: `Nenhum modelo 'auto' aprovado no Eval e fora de quarentena disponível para ${input.agentName}.`
     };
   }
   return {
@@ -3137,8 +3293,34 @@ function pickFailoverCandidate(input) {
     model: winner.model,
     group: winner.group,
     score: winner.score,
-    reason: `Failover inteligente para ${input.agentName}: ${winner.model} (${winner.group}, score ${winner.score}).`
+    reason: `Failover Eval-First para ${input.agentName}: ${winner.model} (${winner.group}, score ${winner.score}${winner.evalApproved ? " · Eval ✓" : ""}).`
   };
+}
+async function refineCandidateWithDecisionApi(ctx, agentName, isVip, primary, rankingSnapshot) {
+  if (!primary.ok || !primary.model) return primary;
+  const decisionsApi = ctx == null ? void 0 : ctx.decisions;
+  if (typeof (decisionsApi == null ? void 0 : decisionsApi.decide) !== "function") return primary;
+  const pool = ((rankingSnapshot == null ? void 0 : rankingSnapshot.models) || []).filter((r) => !r.isDisabled && r.online !== false && (r.evalApproved === true || r.toolCallOk === true)).filter((r) => isVip ? r.accessMode !== "blocked" : r.accessMode === "auto" || !r.autoAssignBlocked).slice(0, 3);
+  if (pool.length < 2) return primary;
+  try {
+    const res = await decisionsApi.decide({
+      question: `Entre estes modelos já aprovados no Eval, qual escolher para o failover do agente ${agentName} (${isVip ? "VIP/Estratégico" : "Execução"})?`,
+      options: pool.map((c) => `${c.model} (${c.group}, evalScore=${c.score}, lat=${c.pingLatencyMs ?? "?"}ms)`)
+    });
+    const pickedText = String((res == null ? void 0 : res.choice) || (res == null ? void 0 : res.decision) || (res == null ? void 0 : res.option) || "").toLowerCase();
+    const match = pool.find((c) => pickedText.includes(String(c.model || "").toLowerCase()));
+    if (match && match.model !== primary.model) {
+      return {
+        ...primary,
+        model: match.model,
+        group: match.group,
+        score: match.score,
+        reason: `${primary.reason} [Decision API → ${match.model}]`
+      };
+    }
+  } catch {
+  }
+  return primary;
 }
 async function executeAgentFailover(ctx, groups, params) {
   var _a, _b, _c, _d, _e;
@@ -3159,7 +3341,7 @@ async function executeAgentFailover(ctx, groups, params) {
   if (fromModel && params.errorText) {
     quarantineModel(fromModel, fromGroup, params.errorText, params.httpStatus, agentName);
   }
-  const pick = pickFailoverCandidate({
+  let pick = pickFailoverCandidate({
     agentName,
     currentModel: fromModel,
     rankingSnapshot: params.rankingSnapshot,
@@ -3168,6 +3350,7 @@ async function executeAgentFailover(ctx, groups, params) {
     disabledModels: params.disabledModels,
     groups
   });
+  pick = await refineCandidateWithDecisionApi(ctx, agentName, vip, pick, params.rankingSnapshot);
   let applied = false;
   let wokeAgent = false;
   let note = pick.reason;

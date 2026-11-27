@@ -297,11 +297,12 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
     };
   }
 
-  // Worker comum: apenas modelos "auto" (NUNCA VIP, NUNCA blocked, NUNCA em quarentena)
-  const candidates: Array<{ model: string; group: string; score: number; toolCallOk: boolean | null }> = [];
+  // Worker comum: Hard Gate Eval-First — apenas modelos "auto" aprovados no Eval (toolCallOk === true),
+  // nunca VIP, nunca blocked e nunca em quarentena.
+  const candidates: Array<{ model: string; group: string; score: number; toolCallOk: boolean | null; evalApproved: boolean }> = [];
   const seen = new Set<string>();
 
-  const pushCandidate = (modelId: string, groupId: string | undefined, baseScore: number) => {
+  const pushCandidate = (modelId: string, groupId: string | undefined, baseScore: number, rowEvalApproved?: boolean) => {
     const clean = String(modelId || "").trim();
     if (!clean || seen.has(clean.toLowerCase()) || clean.toLowerCase() === currentLower) return;
     if (isUnsupportedAgentModel(clean)) return;
@@ -313,34 +314,46 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
     if (isQuarantined(clean) || isBrokenInBench(clean)) return;
 
     const q = qualityBench[clean];
-    const toolBonus = q?.toolCallOk === true ? 30 : q?.toolCallOk === false ? -25 : 0;
-    const qualityBlend = q ? q.qualityScore * 0.6 + baseScore * 0.4 : baseScore;
+    const evalApproved = Boolean(rowEvalApproved === true || (q && q.online && q.toolCallOk === true));
+    // Hard Gate: se foi testado e falhou no tool-calling, rejeita terminantemente
+    if (q && q.toolCallOk === false) return;
+
+    const toolBonus = evalApproved ? 40 : 0;
+    const qualityBlend = q ? q.qualityScore * 0.65 + baseScore * 0.35 : baseScore;
     candidates.push({
       model: clean,
       group: resolvedGroup,
       score: Number((qualityBlend + toolBonus).toFixed(1)),
-      toolCallOk: q ? q.toolCallOk : null,
+      toolCallOk: q ? q.toolCallOk : evalApproved ? true : null,
+      evalApproved,
     });
   };
 
   for (const row of input.rankingSnapshot?.models || []) {
     if (row.isDisabled || row.online === false) continue;
-    pushCandidate(row.model, row.group, row.score);
+    pushCandidate(row.model, row.group, row.score, Boolean((row as any).evalApproved ?? row.toolCallOk));
   }
 
-  // Fallback para defaults dos grupos não-VIP caso ranking ainda não esteja populado
-  for (const grp of Object.values(input.groups)) {
-    if (grp?.defaultModel) {
-      pushCandidate(grp.defaultModel, grp.id, 65);
+  // Fallback para defaults dos grupos não-VIP apenas se nenhum candidato Eval-aprovado existir
+  const hasAnyEvalApproved = candidates.some((c) => c.evalApproved);
+  if (!hasAnyEvalApproved) {
+    for (const grp of Object.values(input.groups)) {
+      if (grp?.defaultModel) {
+        pushCandidate(grp.defaultModel, grp.id, 65, false);
+      }
     }
   }
 
-  candidates.sort((a, b) => {
+  // Hard Gate estrito: quando há modelos aprovados no Eval, descarta completamente os não-testados
+  const finalPool = hasAnyEvalApproved ? candidates.filter((c) => c.evalApproved) : candidates;
+
+  finalPool.sort((a, b) => {
+    if (a.evalApproved !== b.evalApproved) return a.evalApproved ? -1 : 1;
     if ((a.toolCallOk === true) !== (b.toolCallOk === true)) return a.toolCallOk === true ? -1 : 1;
     return b.score - a.score;
   });
 
-  const winner = candidates[0];
+  const winner = finalPool[0];
   if (!winner) {
     return {
       ok: false,
@@ -348,7 +361,7 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
       model: null,
       group: null,
       score: null,
-      reason: `Nenhum modelo econômico ('auto') saudável e fora de quarentena disponível para ${input.agentName}.`,
+      reason: `Nenhum modelo 'auto' aprovado no Eval e fora de quarentena disponível para ${input.agentName}.`,
     };
   }
 
@@ -358,8 +371,49 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
     model: winner.model,
     group: winner.group,
     score: winner.score,
-    reason: `Failover inteligente para ${input.agentName}: ${winner.model} (${winner.group}, score ${winner.score}).`,
+    reason: `Failover Eval-First para ${input.agentName}: ${winner.model} (${winner.group}, score ${winner.score}${winner.evalApproved ? " · Eval ✓" : ""}).`,
   };
+}
+
+/**
+ * Usa a API rápida/barata de Decision Model do Buzz (ctx.decisions.decide) como tie-breaker
+ * exclusivamente entre candidatos já aprovados pelo Hard Gate do Eval.
+ */
+async function refineCandidateWithDecisionApi(
+  ctx: Context,
+  agentName: string,
+  isVip: boolean,
+  primary: PickFailoverResult,
+  rankingSnapshot?: ModelRankingSnapshot | null
+): Promise<PickFailoverResult> {
+  if (!primary.ok || !primary.model) return primary;
+  const decisionsApi = (ctx as any)?.decisions;
+  if (typeof decisionsApi?.decide !== "function") return primary;
+  const pool = (rankingSnapshot?.models || [])
+    .filter((r: any) => !r.isDisabled && r.online !== false && (r.evalApproved === true || r.toolCallOk === true))
+    .filter((r: any) => (isVip ? r.accessMode !== "blocked" : r.accessMode === "auto" || !r.autoAssignBlocked))
+    .slice(0, 3);
+  if (pool.length < 2) return primary;
+  try {
+    const res = await decisionsApi.decide({
+      question: `Entre estes modelos já aprovados no Eval, qual escolher para o failover do agente ${agentName} (${isVip ? "VIP/Estratégico" : "Execução"})?`,
+      options: pool.map((c: any) => `${c.model} (${c.group}, evalScore=${c.score}, lat=${c.pingLatencyMs ?? "?"}ms)`),
+    });
+    const pickedText = String(res?.choice || res?.decision || res?.option || "").toLowerCase();
+    const match = pool.find((c: any) => pickedText.includes(String(c.model || "").toLowerCase()));
+    if (match && match.model !== primary.model) {
+      return {
+        ...primary,
+        model: match.model,
+        group: match.group,
+        score: match.score,
+        reason: `${primary.reason} [Decision API → ${match.model}]`,
+      };
+    }
+  } catch {
+    // Fallback determinístico preserva a escolha Eval-First
+  }
+  return primary;
 }
 
 export async function executeAgentFailover(
@@ -402,7 +456,7 @@ export async function executeAgentFailover(
     quarantineModel(fromModel, fromGroup, params.errorText, params.httpStatus, agentName);
   }
 
-  const pick = pickFailoverCandidate({
+  let pick = pickFailoverCandidate({
     agentName,
     currentModel: fromModel,
     rankingSnapshot: params.rankingSnapshot,
@@ -411,6 +465,9 @@ export async function executeAgentFailover(
     disabledModels: params.disabledModels,
     groups,
   });
+
+  // Tie-breaker via Buzz Decision Model API (ctx.decisions.decide) exclusivamente entre candidatos Eval-aprovados
+  pick = await refineCandidateWithDecisionApi(ctx, agentName, vip, pick, params.rankingSnapshot);
 
   let applied = false;
   let wokeAgent = false;

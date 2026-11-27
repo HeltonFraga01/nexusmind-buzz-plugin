@@ -109,6 +109,28 @@ export function createModelRankingTabComponent(
     const [applyingModel, setApplyingModel] = React.useState<string | null>(null);
     const [onlyAutoEligible, setOnlyAutoEligible] = React.useState<boolean>(false);
     const [searchFilter, setSearchFilter] = React.useState<string>("");
+    const [controlPlane, setControlPlane] = React.useState<any>(null);
+
+    const refreshControlPlane = React.useCallback(async () => {
+      const host = (ctx as any)?.host;
+      if (typeof host?.readFile !== "function") return;
+      for (const p of ["~/.buzz/.scratch/model-control-plane.json", "/Users/heltonfraga/.buzz/.scratch/model-control-plane.json"]) {
+        try {
+          const raw = await host.readFile(p);
+          if (!raw) continue;
+          const txt = typeof raw === "string" ? raw : new TextDecoder("utf-8").decode(raw instanceof Uint8Array ? raw : new Uint8Array(raw));
+          const parsed = JSON.parse(txt);
+          if (parsed && Array.isArray(parsed.models)) {
+            setControlPlane(parsed);
+            return;
+          }
+        } catch {}
+      }
+    }, []);
+
+    React.useEffect(() => {
+      refreshControlPlane();
+    }, [refreshControlPlane]);
 
     const updatePolicy = (updater: (prev: RoutingPolicy) => RoutingPolicy) => {
       setPolicy((prev: RoutingPolicy) => {
@@ -284,9 +306,145 @@ export function createModelRankingTabComponent(
       }
     };
 
+    const cpSummary = controlPlane?.summary || null;
+    const cpModels: any[] = Array.isArray(controlPlane?.models) ? controlPlane.models : [];
+    const cpProviders: any[] = Array.isArray(controlPlane?.providerHealth) ? controlPlane.providerHealth : [];
+    const hasDecisionApi = typeof (ctx as any)?.decisions?.decide === "function";
+    const approvedList = cpModels.filter((m) => m.evalApproved);
+    const avgApprovedLat = approvedList.length > 0
+      ? Math.round(approvedList.reduce((acc, m) => acc + Number(m.latencyMs || 0), 0) / approvedList.length)
+      : null;
+
     return h(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "14px" } },
+
+      // 0. Dashboard SOTA Eval-First Control Plane (KPIs + Gráficos SVG nativos)
+      cpSummary &&
+        h(
+          "div",
+          { "data-nm-sota-dashboard": "true", style: { display: "flex", flexDirection: "column", gap: "12px" } },
+          h(
+            "div",
+            { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "10px" } },
+            [
+              {
+                label: "Aprovados no Eval (Hard Gate)",
+                val: `${cpSummary.approvedCount}/${cpSummary.totalEvaluated}`,
+                sub: `${cpSummary.autoEligibleCount} Auto · ${cpSummary.vipCount} VIP · ${cpSummary.blockedCount} Bloq.`,
+                tone: "ok",
+              },
+              {
+                label: "Sucesso Real 24h (sessions.db)",
+                val: typeof cpSummary.prodSuccessRate24hPct === "number" ? `${cpSummary.prodSuccessRate24hPct.toFixed(1)}%` : "—",
+                sub: `${Number(cpSummary.prodTurns24h || 0).toLocaleString("pt-BR")} turnos · ${cpSummary.prodErrors24h || 0} erros`,
+                tone: (cpSummary.prodSuccessRate24hPct ?? 100) >= 95 ? "ok" : "warn",
+              },
+              {
+                label: "Latência Média (Aprovados)",
+                val: fmtMs(avgApprovedLat),
+                sub: `12 tools · schema fidelity ≥ 80%`,
+                tone: "neutral",
+              },
+              {
+                label: "Roteamento & Decision API",
+                val: hasDecisionApi ? "Decision API ✓" : "Eval-First ✓",
+                sub: policy.forceFree ? "Modo :free ativo" : `Auto #1: ${controlPlane?.bestByTier?.geral || "—"}`,
+                tone: "accent",
+              },
+            ].map((k) =>
+              h(
+                "div",
+                { key: k.label, className: "nm-card-pad", style: { padding: "11px 13px" } },
+                h("div", { style: { fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--nm-muted)" } }, k.label),
+                h("div", { className: "nm-mono nm-num", style: { fontSize: "18px", fontWeight: 700, marginTop: "4px", color: k.tone === "ok" ? "var(--green-11, #3dd68c)" : k.tone === "warn" ? "var(--amber-11, #fbbf24)" : "var(--nm-fg)" } }, k.val),
+                h("div", { style: { fontSize: "10.5px", color: "var(--nm-muted)", marginTop: "2px" } }, k.sub)
+              )
+            )
+          ),
+          h(
+            "div",
+            { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "12px" } },
+            // Gráfico 1: SVG Eval Score × Latência × Sucesso 24h (Top 9)
+            h(
+              "div",
+              { className: "nm-card-pad", style: { display: "flex", flexDirection: "column", gap: "8px", padding: "12px 14px" } },
+              h(
+                "div",
+                { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                h("span", { style: { fontSize: "12.5px", fontWeight: 700 } }, "Eval SOTA v2 · Score × Latência × Prod 24h"),
+                h("span", { className: "nm-mono", style: { fontSize: "10px", color: "var(--nm-muted)" } }, "0–100 pts")
+              ),
+              h(
+                "svg",
+                { viewBox: "0 0 440 212", style: { width: "100%", height: "212px", display: "block" }, role: "img", "aria-label": "Ranking Eval Score por modelo" },
+                cpModels.slice(0, 8).map((m, i) => {
+                  const y = 8 + i * 25;
+                  const score = Math.max(0, Math.min(100, Number(m.evalScore || 0)));
+                  const barW = Math.max(4, (score / 100) * 190);
+                  const color = !m.online
+                    ? "var(--red-11, #f87171)"
+                    : m.policyState === "blocked"
+                    ? "var(--amber-11, #fbbf24)"
+                    : m.policyState === "vip"
+                    ? "#c084fc"
+                    : "var(--green-11, #3dd68c)";
+                  const shortName = String(m.model || "").split("/").pop() || m.model;
+                  const label = shortName.length > 22 ? shortName.slice(0, 20) + "…" : shortName;
+                  const prodPct = m.prod24h?.successRate24hPct;
+                  return h(
+                    "g",
+                    { key: m.model },
+                    h("text", { x: 0, y: y + 12, fill: "var(--text-secondary, #c7c7c7)", fontSize: "10.5", fontFamily: "ui-monospace, monospace" }, label),
+                    h("rect", { x: 150, y: y + 2, width: 190, height: 13, rx: 4, fill: "rgba(255,255,255,0.06)" }),
+                    h("rect", { x: 150, y: y + 2, width: barW, height: 13, rx: 4, fill: color }),
+                    h(
+                      "text",
+                      { x: 348, y: y + 12, fill: "var(--text-primary, #f3f4f6)", fontSize: "10", fontFamily: "ui-monospace, monospace" },
+                      `${score.toFixed(1)} · ${fmtMs(m.latencyMs)}${typeof prodPct === "number" ? ` · ${Math.round(prodPct)}%` : ""}`
+                    )
+                  );
+                })
+              )
+            ),
+            // Gráfico 2: Saúde por Provedor (Provider Health Matrix)
+            h(
+              "div",
+              { className: "nm-card-pad", style: { display: "flex", flexDirection: "column", gap: "10px", padding: "12px 14px" } },
+              h(
+                "div",
+                { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                h("span", { style: { fontSize: "12.5px", fontWeight: 700 } }, "Saúde por Provedor (API NexusMind)"),
+                h("span", { className: "nm-mono", style: { fontSize: "10px", color: "var(--nm-muted)" } }, `${cpProviders.length} provedores`)
+              ),
+              cpProviders.map((p) => {
+                const pct = Math.max(0, Math.min(100, Number(p.healthPct || 0)));
+                const toneColor = pct >= 70 ? "var(--green-11, #3dd68c)" : pct >= 40 ? "var(--amber-11, #fbbf24)" : "var(--red-11, #f87171)";
+                return h(
+                  "div",
+                  { key: p.provider, style: { display: "flex", flexDirection: "column", gap: "4px" } },
+                  h(
+                    "div",
+                    { style: { display: "flex", justifyContent: "space-between", fontSize: "11.5px" } },
+                    h("span", { className: "nm-mono", style: { fontWeight: 600 } }, String(p.provider || "").replace("nexusmind_", "")),
+                    h("span", { className: "nm-mono", style: { color: "var(--nm-muted)", fontSize: "10.5px" } }, `${p.approved}/${p.total} aprov. · ${p.online} online · ${fmtMs(p.avgLatencyMs)}`)
+                  ),
+                  h(
+                    "div",
+                    { style: { height: "8px", borderRadius: "999px", backgroundColor: "rgba(255,255,255,0.07)", overflow: "hidden" } },
+                    h("div", { style: { width: `${Math.max(4, pct)}%`, height: "100%", borderRadius: "999px", backgroundColor: toneColor } })
+                  )
+                );
+              }),
+              h(
+                "div",
+                { style: { marginTop: "auto", paddingTop: "8px", borderTop: "1px solid var(--nm-border)", fontSize: "10.5px", color: "var(--nm-muted)", display: "flex", justifyContent: "space-between" } },
+                h("span", null, "Hard Gate: Tool Call ≥ 80% + Schema ≥ 80% + Score ≥ 80"),
+                h("span", { className: "nm-mono" }, controlPlane?.evalVersion || "sota-v2")
+              )
+            )
+          )
+        ),
 
       // 1. Barra compacta de Tier + Critérios de Roteamento (CodeDen + Buzz Theme)
       h(
