@@ -2379,6 +2379,7 @@ print("SYNC_SUCCESS")
                   onSetModelAccessMode: handleSetModelAccessMode,
                   onQuickProtectVips: handleQuickProtectVips,
                   qualityBench,
+                  onUpdateQualityBench: setQualityBench,
                   quarantines,
                 })
               : activeSection === "autopilot"

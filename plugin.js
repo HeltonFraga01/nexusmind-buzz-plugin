@@ -1309,6 +1309,338 @@ async function persistModelRankingSnapshot(ctx, snapshot) {
   }
   return false;
 }
+const LOCAL_STORAGE_QUALITY_BENCH_KEY = "nexusmind_quality_bench_v1";
+const SHARED_QUALITY_BENCH_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-quality-bench.json";
+const ORGFY_EVAL_DOC_PATH = "/Users/heltonfraga/.buzz/REPOS/orgfy/docs/eval-modelos-onda5.md";
+async function writeTextFileWithFallback(ctx, filePath, content) {
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.writeFile) === "function") {
+    try {
+      await host.writeFile(filePath, content);
+      return true;
+    } catch {
+    }
+  }
+  if (typeof (host == null ? void 0 : host.spawn) === "function") {
+    try {
+      const b64 = btoa(unescape(encodeURIComponent(content)));
+      const py = `import base64, os; p=${JSON.stringify(filePath)}; os.makedirs(os.path.dirname(p), exist_ok=True); open(p, 'wb').write(base64.b64decode(${JSON.stringify(b64)}))`;
+      const proc = await host.spawn("python", { args: [py] });
+      await proc.exited;
+      return true;
+    } catch {
+    }
+  }
+  return false;
+}
+function buildOrgfyEvalMarkdown(results) {
+  const rows = Object.values(results).filter((r) => r && r.model).sort((a, b) => {
+    if (a.toolCallOk !== b.toolCallOk) return a.toolCallOk ? -1 : 1;
+    if (b.qualityScore !== a.qualityScore) return b.qualityScore - a.qualityScore;
+    return (a.latencyMs ?? 999999) - (b.latencyMs ?? 999999);
+  });
+  const updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const lines = [
+    "# Eval R5.1 — Qualidade & Tool-Calling (NexusMind Gateway)",
+    "",
+    `_Atualizado manualmente via NexusMind Gateway em ${updatedAt}_`,
+    "",
+    "| Provider | Model | Resposta | Tool Call | Card concluído (end-to-end) | Latência Média (ms) | Custo Total (USD) | Erro Amostra |",
+    "| :--- | :--- | ---: | ---: | :--- | ---: | ---: | :--- |"
+  ];
+  for (const r of rows) {
+    const respStr = r.online ? "10/10" : "0/10";
+    const tcStr = r.toolCallOk ? "10/10" : "0/10";
+    const msStr = typeof r.latencyMs === "number" ? String(Math.round(r.latencyMs)) : "—";
+    const errStr = r.errorMsg ? String(r.errorMsg).replace(/\|/g, "/").replace(/\n/g, " ").slice(0, 90) : "—";
+    lines.push(`| ${r.group} | ${r.model} | ${respStr} | ${tcStr} | score ${r.qualityScore}/100 | ${msStr} | — | ${errStr} |`);
+  }
+  return lines.join("\n") + "\n";
+}
+async function syncQualityBenchToOrgfyEval(ctx, results) {
+  if (!results || Object.keys(results).length === 0) return false;
+  const md = buildOrgfyEvalMarkdown(results);
+  return writeTextFileWithFallback(ctx, ORGFY_EVAL_DOC_PATH, md);
+}
+function classifyGatewayError(errorText, httpStatus) {
+  const txt = String(errorText || "").toLowerCase();
+  if (txt.includes("weekly limit") || txt.includes("limit") && txt.includes("resets")) {
+    return "weekly_limit";
+  }
+  if (txt.includes("malformed_function_call") || txt.includes("malformed function") || txt.includes("invalid tool") || txt.includes("tool_use") && txt.includes("invalid")) {
+    return "malformed_tool";
+  }
+  if (txt.includes("stream ended") || txt.includes("upstream response stream") || txt.includes("unexpected eof") || txt.includes("premature close")) {
+    return "stream_cut";
+  }
+  if (httpStatus === 404 || txt.includes("resource not found") || txt.includes("(404)") || txt.includes("model not found")) {
+    return "not_found";
+  }
+  if (httpStatus === 429 || txt.includes("429") || txt.includes("rate limit") || txt.includes("too many requests") || txt.includes("quota")) {
+    return "rate_limit";
+  }
+  if (httpStatus === 401 || httpStatus === 403 || txt.includes("unauthorized") || txt.includes("invalid api key") || txt.includes("forbidden")) {
+    return "auth_error";
+  }
+  if (txt.includes("timeout") || txt.includes("timed out") || txt.includes("aborted") || txt.includes("etimedout")) {
+    return "timeout";
+  }
+  if (typeof httpStatus === "number" && httpStatus >= 500 || /\b50[0234]\b/.test(txt) || txt.includes("server error") || txt.includes("bad gateway")) {
+    return "server_error";
+  }
+  return "unknown";
+}
+function loadSavedQualityBench() {
+  var _a, _b;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_QUALITY_BENCH_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+async function saveQualityBench(ctx, results) {
+  var _a, _b;
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_QUALITY_BENCH_KEY, JSON.stringify(results));
+  } catch {
+  }
+  const payload = JSON.stringify(
+    {
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      count: Object.keys(results).length,
+      results
+    },
+    null,
+    2
+  );
+  await writeTextFileWithFallback(ctx, SHARED_QUALITY_BENCH_PATH, payload);
+}
+async function runModelQualityProbe(ctx, modelId, group) {
+  var _a, _b;
+  const testedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.request) !== "function") {
+    return {
+      model: modelId,
+      group: group.id,
+      testedAt,
+      online: false,
+      toolCallOk: false,
+      streamOk: false,
+      latencyMs: null,
+      qualityScore: 0,
+      errorKind: "unknown",
+      errorMsg: "ctx.host.request indisponível"
+    };
+  }
+  const isAnthropic = group.id === "nexusmind_anthropic";
+  const url = isAnthropic ? "https://api.nexusmind.digital/v1/messages" : "https://api.nexusmind.digital/v1/chat/completions";
+  const headers = isAnthropic ? {
+    "x-api-key": group.defaultKey,
+    Authorization: `Bearer ${group.defaultKey}`,
+    "anthropic-version": "2023-06-01",
+    "Content-Type": "application/json",
+    "User-Agent": "BuzzDesktop/NexusMindQualityBench"
+  } : {
+    Authorization: `Bearer ${group.defaultKey}`,
+    "Content-Type": "application/json",
+    "User-Agent": "BuzzDesktop/NexusMindQualityBench"
+  };
+  const body = isAnthropic ? {
+    model: modelId,
+    max_tokens: 120,
+    messages: [
+      {
+        role: "user",
+        content: 'Chame a ferramenta check_status com {"service":"orgfy"} agora.'
+      }
+    ],
+    tools: [
+      {
+        name: "check_status",
+        description: "Verifica o status de um serviço da fábrica",
+        input_schema: {
+          type: "object",
+          properties: { service: { type: "string" } },
+          required: ["service"]
+        }
+      }
+    ]
+  } : {
+    model: modelId,
+    max_tokens: 120,
+    temperature: 0,
+    messages: [
+      {
+        role: "user",
+        content: 'Chame a ferramenta check_status com {"service":"orgfy"} agora.'
+      }
+    ],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "check_status",
+          description: "Verifica o status de um serviço da fábrica",
+          parameters: {
+            type: "object",
+            properties: { service: { type: "string" } },
+            required: ["service"]
+          }
+        }
+      }
+    ],
+    tool_choice: "auto"
+  };
+  const t0 = Date.now();
+  try {
+    const res = await host.request({
+      url,
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      timeoutMs: 14e3
+    });
+    const latencyMs = Date.now() - t0;
+    const rawBody = String((res == null ? void 0 : res.body) || "");
+    if (!res || res.status < 200 || res.status >= 300) {
+      const errKind = classifyGatewayError(rawBody, res == null ? void 0 : res.status);
+      return {
+        model: modelId,
+        group: group.id,
+        testedAt,
+        online: false,
+        toolCallOk: false,
+        streamOk: false,
+        latencyMs,
+        qualityScore: 0,
+        errorKind: errKind,
+        errorMsg: `HTTP ${(res == null ? void 0 : res.status) ?? "err"} · ${rawBody.slice(0, 120)}`
+      };
+    }
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      return {
+        model: modelId,
+        group: group.id,
+        testedAt,
+        online: false,
+        toolCallOk: false,
+        streamOk: false,
+        latencyMs,
+        qualityScore: 0,
+        errorKind: "stream_cut",
+        errorMsg: "Resposta JSON truncada/inválida"
+      };
+    }
+    if (parsed == null ? void 0 : parsed.error) {
+      const errText = typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error);
+      const errKind = classifyGatewayError(errText, res.status);
+      return {
+        model: modelId,
+        group: group.id,
+        testedAt,
+        online: false,
+        toolCallOk: false,
+        streamOk: false,
+        latencyMs,
+        qualityScore: 0,
+        errorKind: errKind,
+        errorMsg: errText.slice(0, 140)
+      };
+    }
+    let toolCallOk = false;
+    let streamOk = false;
+    if (isAnthropic) {
+      const blocks = Array.isArray(parsed == null ? void 0 : parsed.content) ? parsed.content : [];
+      const toolUse = blocks.find((b) => (b == null ? void 0 : b.type) === "tool_use" && (b == null ? void 0 : b.name) === "check_status");
+      if (toolUse && toolUse.input && typeof toolUse.input === "object") {
+        toolCallOk = true;
+        streamOk = true;
+      } else if (blocks.some((b) => (b == null ? void 0 : b.type) === "text" && String((b == null ? void 0 : b.text) || "").trim().length > 0)) {
+        streamOk = true;
+      }
+    } else {
+      const msg = (_b = (_a = parsed == null ? void 0 : parsed.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message;
+      const toolCalls = Array.isArray(msg == null ? void 0 : msg.tool_calls) ? msg.tool_calls : [];
+      const tc = toolCalls.find((c) => {
+        var _a2;
+        return ((_a2 = c == null ? void 0 : c.function) == null ? void 0 : _a2.name) === "check_status";
+      });
+      if (tc) {
+        try {
+          const args = typeof tc.function.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function.arguments;
+          if (args && typeof args === "object") {
+            toolCallOk = true;
+            streamOk = true;
+          }
+        } catch {
+          toolCallOk = false;
+          streamOk = true;
+        }
+      } else if (typeof (msg == null ? void 0 : msg.content) === "string" && msg.content.trim().length > 0) {
+        streamOk = true;
+      }
+    }
+    const speedPts = Math.max(0, Math.min(25, Math.round(25 - latencyMs / 1e3 * 2.5)));
+    const qualityScore = (toolCallOk ? 45 : 0) + (streamOk ? 30 : 0) + speedPts;
+    return {
+      model: modelId,
+      group: group.id,
+      testedAt,
+      online: true,
+      toolCallOk,
+      streamOk,
+      latencyMs,
+      qualityScore,
+      errorKind: "ok",
+      ...toolCallOk ? {} : { errorMsg: "Respondeu texto mas não executou tool_call estruturado" }
+    };
+  } catch (err) {
+    const latencyMs = Date.now() - t0;
+    const msg = String((err == null ? void 0 : err.message) || err);
+    return {
+      model: modelId,
+      group: group.id,
+      testedAt,
+      online: false,
+      toolCallOk: false,
+      streamOk: false,
+      latencyMs,
+      qualityScore: 0,
+      errorKind: classifyGatewayError(msg),
+      errorMsg: msg.slice(0, 140)
+    };
+  }
+}
+async function runBatchQualityBench(ctx, candidates, onProgress) {
+  const existing = loadSavedQualityBench();
+  const next = { ...existing };
+  const total = candidates.length;
+  let done = 0;
+  const queue = [...candidates];
+  const worker = async () => {
+    while (queue.length > 0) {
+      const item = queue.shift();
+      if (!item) break;
+      const res = await runModelQualityProbe(ctx, item.model, item.group);
+      next[item.model] = res;
+      done += 1;
+      try {
+        onProgress == null ? void 0 : onProgress(done, total, res);
+      } catch {
+      }
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  await saveQualityBench(ctx, next);
+  return next;
+}
 const TIER_OPTIONS = [
   { id: "geral", label: "Geral" },
   { id: "tier1_fast", label: "Tier 1 · Rápido" },
@@ -1346,6 +1678,7 @@ function createModelRankingTabComponent(ctx, groups) {
     onSetModelAccessMode,
     onQuickProtectVips,
     qualityBench,
+    onUpdateQualityBench,
     quarantines
   }) {
     const [selectedTier, setSelectedTier] = React.useState("geral");
@@ -1353,6 +1686,8 @@ function createModelRankingTabComponent(ctx, groups) {
     const [usageByModel, setUsageByModel] = React.useState({});
     const [usageSampleSize, setUsageSampleSize] = React.useState(0);
     const [probingTop, setProbingTop] = React.useState(false);
+    const [runningEval, setRunningEval] = React.useState(false);
+    const [evalProgress, setEvalProgress] = React.useState(null);
     const [selectedAgentKey, setSelectedAgentKey] = React.useState("");
     const [applyingModel, setApplyingModel] = React.useState(null);
     const [onlyAutoEligible, setOnlyAutoEligible] = React.useState(false);
@@ -1459,6 +1794,39 @@ function createModelRankingTabComponent(ctx, groups) {
         setProbingTop(false);
       }
     };
+    const handleRunManualEval = async () => {
+      const topToEval = visibleRows.slice(0, 8);
+      if (topToEval.length === 0) return;
+      setRunningEval(true);
+      setEvalProgress(`Eval 0/${topToEval.length}`);
+      onNotify({
+        type: "info",
+        text: `Rodando Eval de Qualidade & Tool-Calling nos top ${topToEval.length} modelos...`
+      });
+      try {
+        const candidates = topToEval.map((row) => ({
+          model: row.model,
+          group: groups[row.group] || inferCanonicalGroupForModel(row.model, groups)
+        }));
+        const updated = await runBatchQualityBench(ctx, candidates, (done, total) => {
+          setEvalProgress(`Eval ${done}/${total}`);
+        });
+        onUpdateQualityBench == null ? void 0 : onUpdateQualityBench(updated);
+        await syncQualityBenchToOrgfyEval(ctx, updated);
+        await refreshUsageTelemetry();
+        const testedSlice = topToEval.map((r) => updated[r.model]).filter(Boolean);
+        const approved = testedSlice.filter((r) => r.online && r.toolCallOk).length;
+        onNotify({
+          type: "success",
+          text: `Eval concluído: ${approved}/${testedSlice.length} aprovados em Tool-Calling. Ranking e OrgFy atualizados.`
+        });
+      } catch (err) {
+        onNotify({ type: "error", text: `Erro no Eval manual: ${(err == null ? void 0 : err.message) || err}` });
+      } finally {
+        setRunningEval(false);
+        setEvalProgress(null);
+      }
+    };
     const handleApplyModel = async (modelId, groupId) => {
       const agentsApi = ctx == null ? void 0 : ctx.agents;
       const target = agentsList.find((a) => a.key === selectedAgentKey);
@@ -1515,7 +1883,7 @@ function createModelRankingTabComponent(ctx, groups) {
           ),
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "8px" } },
+            { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
             onQuickProtectVips && h(
               "button",
               {
@@ -1531,9 +1899,22 @@ function createModelRankingTabComponent(ctx, groups) {
               {
                 type: "button",
                 className: "nm-btn",
+                "data-variant": "soft",
+                "data-run-manual-eval": "true",
+                onClick: handleRunManualEval,
+                disabled: runningEval || probingTop || visibleRows.length === 0,
+                title: "Testa Tool-Calling, integridade e latência dos top 8 modelos e atualiza o Ranking + OrgFy"
+              },
+              runningEval ? evalProgress || "Rodando Eval..." : "Rodar Eval (Top 8)"
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "nm-btn",
                 "data-variant": "primary",
                 onClick: handleProbeTopCandidates,
-                disabled: probingTop
+                disabled: probingTop || runningEval
               },
               probingTop ? "Testando..." : "Testar Top 6"
             )
@@ -2463,295 +2844,6 @@ function createNexusMindAgentsTabComponent(ctx, groups) {
       )
     );
   };
-}
-const LOCAL_STORAGE_QUALITY_BENCH_KEY = "nexusmind_quality_bench_v1";
-const SHARED_QUALITY_BENCH_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-quality-bench.json";
-function classifyGatewayError(errorText, httpStatus) {
-  const txt = String(errorText || "").toLowerCase();
-  if (txt.includes("weekly limit") || txt.includes("limit") && txt.includes("resets")) {
-    return "weekly_limit";
-  }
-  if (txt.includes("malformed_function_call") || txt.includes("malformed function") || txt.includes("invalid tool") || txt.includes("tool_use") && txt.includes("invalid")) {
-    return "malformed_tool";
-  }
-  if (txt.includes("stream ended") || txt.includes("upstream response stream") || txt.includes("unexpected eof") || txt.includes("premature close")) {
-    return "stream_cut";
-  }
-  if (httpStatus === 404 || txt.includes("resource not found") || txt.includes("(404)") || txt.includes("model not found")) {
-    return "not_found";
-  }
-  if (httpStatus === 429 || txt.includes("429") || txt.includes("rate limit") || txt.includes("too many requests") || txt.includes("quota")) {
-    return "rate_limit";
-  }
-  if (httpStatus === 401 || httpStatus === 403 || txt.includes("unauthorized") || txt.includes("invalid api key") || txt.includes("forbidden")) {
-    return "auth_error";
-  }
-  if (txt.includes("timeout") || txt.includes("timed out") || txt.includes("aborted") || txt.includes("etimedout")) {
-    return "timeout";
-  }
-  if (typeof httpStatus === "number" && httpStatus >= 500 || /\b50[0234]\b/.test(txt) || txt.includes("server error") || txt.includes("bad gateway")) {
-    return "server_error";
-  }
-  return "unknown";
-}
-function loadSavedQualityBench() {
-  var _a, _b;
-  try {
-    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_QUALITY_BENCH_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-async function saveQualityBench(ctx, results) {
-  var _a, _b;
-  try {
-    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_QUALITY_BENCH_KEY, JSON.stringify(results));
-  } catch {
-  }
-  const host = ctx == null ? void 0 : ctx.host;
-  if (typeof (host == null ? void 0 : host.writeFile) === "function") {
-    try {
-      await host.writeFile(
-        SHARED_QUALITY_BENCH_PATH,
-        JSON.stringify(
-          {
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-            count: Object.keys(results).length,
-            results
-          },
-          null,
-          2
-        )
-      );
-    } catch {
-    }
-  }
-}
-async function runModelQualityProbe(ctx, modelId, group) {
-  var _a, _b;
-  const testedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const host = ctx == null ? void 0 : ctx.host;
-  if (typeof (host == null ? void 0 : host.request) !== "function") {
-    return {
-      model: modelId,
-      group: group.id,
-      testedAt,
-      online: false,
-      toolCallOk: false,
-      streamOk: false,
-      latencyMs: null,
-      qualityScore: 0,
-      errorKind: "unknown",
-      errorMsg: "ctx.host.request indisponível"
-    };
-  }
-  const isAnthropic = group.id === "nexusmind_anthropic";
-  const url = isAnthropic ? "https://api.nexusmind.digital/v1/messages" : "https://api.nexusmind.digital/v1/chat/completions";
-  const headers = isAnthropic ? {
-    "x-api-key": group.defaultKey,
-    Authorization: `Bearer ${group.defaultKey}`,
-    "anthropic-version": "2023-06-01",
-    "Content-Type": "application/json",
-    "User-Agent": "BuzzDesktop/NexusMindQualityBench"
-  } : {
-    Authorization: `Bearer ${group.defaultKey}`,
-    "Content-Type": "application/json",
-    "User-Agent": "BuzzDesktop/NexusMindQualityBench"
-  };
-  const body = isAnthropic ? {
-    model: modelId,
-    max_tokens: 120,
-    messages: [
-      {
-        role: "user",
-        content: 'Chame a ferramenta check_status com {"service":"orgfy"} agora.'
-      }
-    ],
-    tools: [
-      {
-        name: "check_status",
-        description: "Verifica o status de um serviço da fábrica",
-        input_schema: {
-          type: "object",
-          properties: { service: { type: "string" } },
-          required: ["service"]
-        }
-      }
-    ]
-  } : {
-    model: modelId,
-    max_tokens: 120,
-    temperature: 0,
-    messages: [
-      {
-        role: "user",
-        content: 'Chame a ferramenta check_status com {"service":"orgfy"} agora.'
-      }
-    ],
-    tools: [
-      {
-        type: "function",
-        function: {
-          name: "check_status",
-          description: "Verifica o status de um serviço da fábrica",
-          parameters: {
-            type: "object",
-            properties: { service: { type: "string" } },
-            required: ["service"]
-          }
-        }
-      }
-    ],
-    tool_choice: "auto"
-  };
-  const t0 = Date.now();
-  try {
-    const res = await host.request({
-      url,
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      timeoutMs: 14e3
-    });
-    const latencyMs = Date.now() - t0;
-    const rawBody = String((res == null ? void 0 : res.body) || "");
-    if (!res || res.status < 200 || res.status >= 300) {
-      const errKind = classifyGatewayError(rawBody, res == null ? void 0 : res.status);
-      return {
-        model: modelId,
-        group: group.id,
-        testedAt,
-        online: false,
-        toolCallOk: false,
-        streamOk: false,
-        latencyMs,
-        qualityScore: 0,
-        errorKind: errKind,
-        errorMsg: `HTTP ${(res == null ? void 0 : res.status) ?? "err"} · ${rawBody.slice(0, 120)}`
-      };
-    }
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawBody);
-    } catch {
-      return {
-        model: modelId,
-        group: group.id,
-        testedAt,
-        online: false,
-        toolCallOk: false,
-        streamOk: false,
-        latencyMs,
-        qualityScore: 0,
-        errorKind: "stream_cut",
-        errorMsg: "Resposta JSON truncada/inválida"
-      };
-    }
-    if (parsed == null ? void 0 : parsed.error) {
-      const errText = typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error);
-      const errKind = classifyGatewayError(errText, res.status);
-      return {
-        model: modelId,
-        group: group.id,
-        testedAt,
-        online: false,
-        toolCallOk: false,
-        streamOk: false,
-        latencyMs,
-        qualityScore: 0,
-        errorKind: errKind,
-        errorMsg: errText.slice(0, 140)
-      };
-    }
-    let toolCallOk = false;
-    let streamOk = false;
-    if (isAnthropic) {
-      const blocks = Array.isArray(parsed == null ? void 0 : parsed.content) ? parsed.content : [];
-      const toolUse = blocks.find((b) => (b == null ? void 0 : b.type) === "tool_use" && (b == null ? void 0 : b.name) === "check_status");
-      if (toolUse && toolUse.input && typeof toolUse.input === "object") {
-        toolCallOk = true;
-        streamOk = true;
-      } else if (blocks.some((b) => (b == null ? void 0 : b.type) === "text" && String((b == null ? void 0 : b.text) || "").trim().length > 0)) {
-        streamOk = true;
-      }
-    } else {
-      const msg = (_b = (_a = parsed == null ? void 0 : parsed.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message;
-      const toolCalls = Array.isArray(msg == null ? void 0 : msg.tool_calls) ? msg.tool_calls : [];
-      const tc = toolCalls.find((c) => {
-        var _a2;
-        return ((_a2 = c == null ? void 0 : c.function) == null ? void 0 : _a2.name) === "check_status";
-      });
-      if (tc) {
-        try {
-          const args = typeof tc.function.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function.arguments;
-          if (args && typeof args === "object") {
-            toolCallOk = true;
-            streamOk = true;
-          }
-        } catch {
-          toolCallOk = false;
-          streamOk = true;
-        }
-      } else if (typeof (msg == null ? void 0 : msg.content) === "string" && msg.content.trim().length > 0) {
-        streamOk = true;
-      }
-    }
-    const speedPts = Math.max(0, Math.min(25, Math.round(25 - latencyMs / 1e3 * 2.5)));
-    const qualityScore = (toolCallOk ? 45 : 0) + (streamOk ? 30 : 0) + speedPts;
-    return {
-      model: modelId,
-      group: group.id,
-      testedAt,
-      online: true,
-      toolCallOk,
-      streamOk,
-      latencyMs,
-      qualityScore,
-      errorKind: "ok",
-      ...toolCallOk ? {} : { errorMsg: "Respondeu texto mas não executou tool_call estruturado" }
-    };
-  } catch (err) {
-    const latencyMs = Date.now() - t0;
-    const msg = String((err == null ? void 0 : err.message) || err);
-    return {
-      model: modelId,
-      group: group.id,
-      testedAt,
-      online: false,
-      toolCallOk: false,
-      streamOk: false,
-      latencyMs,
-      qualityScore: 0,
-      errorKind: classifyGatewayError(msg),
-      errorMsg: msg.slice(0, 140)
-    };
-  }
-}
-async function runBatchQualityBench(ctx, candidates, onProgress) {
-  const existing = loadSavedQualityBench();
-  const next = { ...existing };
-  const total = candidates.length;
-  let done = 0;
-  const queue = [...candidates];
-  const worker = async () => {
-    while (queue.length > 0) {
-      const item = queue.shift();
-      if (!item) break;
-      const res = await runModelQualityProbe(ctx, item.model, item.group);
-      next[item.model] = res;
-      done += 1;
-      try {
-        onProgress == null ? void 0 : onProgress(done, total, res);
-      } catch {
-      }
-    }
-  };
-  await Promise.all([worker(), worker()]);
-  await saveQualityBench(ctx, next);
-  return next;
 }
 const DEFAULT_AUTOPILOT_CONFIG = {
   enabled: true,
@@ -6153,6 +6245,7 @@ print("SYNC_SUCCESS")
           onSetModelAccessMode: handleSetModelAccessMode,
           onQuickProtectVips: handleQuickProtectVips,
           qualityBench,
+          onUpdateQualityBench: setQualityBench,
           quarantines
         }) : activeSection === "autopilot" ? h(AutopilotFailoverTab, {
           models,

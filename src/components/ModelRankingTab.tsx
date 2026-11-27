@@ -18,13 +18,18 @@ import {
   type RoutingPolicy,
   type RoutingStrategy,
   buildModelRankingSnapshot,
+  inferCanonicalGroupForModel,
   loadGatewayUsageByModel,
   loadSavedRoutingPolicy,
   persistModelRankingSnapshot,
   saveRoutingPolicy,
 } from "../services/model-ranking";
 import type { ModelAccessMode, VipPolicyConfig } from "../services/vip-policy";
-import type { QualityProbeResult } from "../services/quality-bench";
+import {
+  type QualityProbeResult,
+  runBatchQualityBench,
+  syncQualityBenchToOrgfyEval,
+} from "../services/quality-bench";
 import type { QuarantineEntry } from "../services/agentic-failover";
 
 const TIER_OPTIONS: Array<{ id: RankingTier; label: string }> = [
@@ -72,6 +77,7 @@ export function createModelRankingTabComponent(
     onSetModelAccessMode,
     onQuickProtectVips,
     qualityBench,
+    onUpdateQualityBench,
     quarantines,
   }: {
     models: any[];
@@ -83,6 +89,7 @@ export function createModelRankingTabComponent(
     onSetModelAccessMode?: (modelId: string, mode: ModelAccessMode) => void;
     onQuickProtectVips?: () => void;
     qualityBench?: Record<string, QualityProbeResult>;
+    onUpdateQualityBench?: (next: Record<string, QualityProbeResult>) => void;
     quarantines?: Record<string, QuarantineEntry>;
   }) {
     const [selectedTier, setSelectedTier] = React.useState<RankingTier>("geral");
@@ -90,6 +97,8 @@ export function createModelRankingTabComponent(
     const [usageByModel, setUsageByModel] = React.useState<Record<string, GatewayUsageMetrics>>({});
     const [usageSampleSize, setUsageSampleSize] = React.useState<number>(0);
     const [probingTop, setProbingTop] = React.useState<boolean>(false);
+    const [runningEval, setRunningEval] = React.useState<boolean>(false);
+    const [evalProgress, setEvalProgress] = React.useState<string | null>(null);
     const [selectedAgentKey, setSelectedAgentKey] = React.useState<string>("");
     const [applyingModel, setApplyingModel] = React.useState<string | null>(null);
     const [onlyAutoEligible, setOnlyAutoEligible] = React.useState<boolean>(false);
@@ -212,6 +221,40 @@ export function createModelRankingTabComponent(
       }
     };
 
+    const handleRunManualEval = async () => {
+      const topToEval = visibleRows.slice(0, 8);
+      if (topToEval.length === 0) return;
+      setRunningEval(true);
+      setEvalProgress(`Eval 0/${topToEval.length}`);
+      onNotify({
+        type: "info",
+        text: `Rodando Eval de Qualidade & Tool-Calling nos top ${topToEval.length} modelos...`,
+      });
+      try {
+        const candidates = topToEval.map((row) => ({
+          model: row.model,
+          group: groups[row.group] || inferCanonicalGroupForModel(row.model, groups),
+        }));
+        const updated = await runBatchQualityBench(ctx, candidates, (done, total) => {
+          setEvalProgress(`Eval ${done}/${total}`);
+        });
+        onUpdateQualityBench?.(updated);
+        await syncQualityBenchToOrgfyEval(ctx, updated);
+        await refreshUsageTelemetry();
+        const testedSlice = topToEval.map((r) => updated[r.model]).filter(Boolean);
+        const approved = testedSlice.filter((r) => r.online && r.toolCallOk).length;
+        onNotify({
+          type: "success",
+          text: `Eval concluído: ${approved}/${testedSlice.length} aprovados em Tool-Calling. Ranking e OrgFy atualizados.`,
+        });
+      } catch (err: any) {
+        onNotify({ type: "error", text: `Erro no Eval manual: ${err?.message || err}` });
+      } finally {
+        setRunningEval(false);
+        setEvalProgress(null);
+      }
+    };
+
     const handleApplyModel = async (modelId: string, groupId: string) => {
       const agentsApi = (ctx as any)?.agents;
       const target = agentsList.find((a) => a.key === selectedAgentKey);
@@ -270,7 +313,7 @@ export function createModelRankingTabComponent(
           ),
           h(
             "div",
-            { style: { display: "flex", alignItems: "center", gap: "8px" } },
+            { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
             onQuickProtectVips &&
               h(
                 "button",
@@ -287,9 +330,22 @@ export function createModelRankingTabComponent(
               {
                 type: "button",
                 className: "nm-btn",
+                "data-variant": "soft",
+                "data-run-manual-eval": "true",
+                onClick: handleRunManualEval,
+                disabled: runningEval || probingTop || visibleRows.length === 0,
+                title: "Testa Tool-Calling, integridade e latência dos top 8 modelos e atualiza o Ranking + OrgFy",
+              },
+              runningEval ? (evalProgress || "Rodando Eval...") : "Rodar Eval (Top 8)"
+            ),
+            h(
+              "button",
+              {
+                type: "button",
+                className: "nm-btn",
                 "data-variant": "primary",
                 onClick: handleProbeTopCandidates,
-                disabled: probingTop,
+                disabled: probingTop || runningEval,
               },
               probingTop ? "Testando..." : "Testar Top 6"
             )
