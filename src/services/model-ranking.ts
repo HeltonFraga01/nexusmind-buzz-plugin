@@ -208,11 +208,13 @@ export async function loadGatewayUsageByModel(
     } catch {}
   }
 
-  // 2. Fallback para arquivo bruto (funciona em Node / testes)
+  // 2. Fallback para arquivo bruto (ignora arquivos > 12 MB para não travar a WebView)
   for (const path of SHARED_USAGE_PATHS) {
     try {
       const raw = await host.readFile(path);
       if (!raw) continue;
+      const byteLen = typeof raw === "string" ? raw.length : (raw as any)?.byteLength ?? 0;
+      if (byteLen > 12_000_000) continue;
       const parsed = JSON.parse(decodeFileContent(raw));
       const items: any[] = Array.isArray(parsed?.data?.items)
         ? parsed.data.items

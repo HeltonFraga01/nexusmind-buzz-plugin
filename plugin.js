@@ -1043,6 +1043,8 @@ async function loadGatewayUsageByModel(ctx) {
     try {
       const raw = await host.readFile(path);
       if (!raw) continue;
+      const byteLen = typeof raw === "string" ? raw.length : (raw == null ? void 0 : raw.byteLength) ?? 0;
+      if (byteLen > 12e6) continue;
       const parsed = JSON.parse(decodeFileContent(raw));
       const items = Array.isArray((_a = parsed == null ? void 0 : parsed.data) == null ? void 0 : _a.items) ? parsed.data.items : Array.isArray(parsed == null ? void 0 : parsed.items) ? parsed.items : Array.isArray(parsed) ? parsed : [];
       if (items.length === 0) continue;
