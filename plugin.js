@@ -5073,7 +5073,7 @@ const CANONICAL_GROUPS = {
     groupName: "Saldo OpenAI",
     displayName: "NexusMind OpenAI",
     defaultKey: "sk-2ee0581e607d02f3485e0efcad2ff686e2b889720f63497813b8fb45eb9d0f08",
-    defaultModel: "mistralai/mistral-large-4-1t-a52b",
+    defaultModel: "gpt-6.1-terra",
     defaultCtx: 131072,
     defaultOut: 8192,
     accentColor: "#10a37f",
@@ -5101,7 +5101,7 @@ const CANONICAL_GROUPS = {
     groupName: "Antigravity-Saldo",
     displayName: "NexusMind Anti-Gravity",
     defaultKey: "sk-cf8ffed3d96eff9ca80093aee98c589dcf67cf6932c76cd45e223429204051a0",
-    defaultModel: "gemini-3.8-flash-medium",
+    defaultModel: "gemini-2.5-flash",
     defaultCtx: 1048576,
     defaultOut: 65536,
     accentColor: "#0284c7",
@@ -6056,7 +6056,7 @@ CANONICAL = {
         "description": "Modelos OpenAI, Codex, NVIDIA NIM e OpenCode via NexusMind",
         "default_ctx": 131072,
         "default_out": 8192,
-        "default_model": "mistralai/mistral-large-4-1t-a52b",
+        "default_model": "gpt-6.1-terra",
         "pi_api": "openai-compatible",
         "pi_baseUrl": "https://api.nexusmind.digital/v1"
     },
@@ -6080,7 +6080,7 @@ CANONICAL = {
         "description": "Modelos Google Gemini, Claude e Anti-Gravity Gateway",
         "default_ctx": 1048576,
         "default_out": 65536,
-        "default_model": "gemini-3.8-flash-medium",
+        "default_model": "gemini-2.5-flash",
         "pi_api": "openai-compatible",
         "pi_baseUrl": "https://api.nexusmind.digital/v1"
     },
@@ -7942,9 +7942,9 @@ print("SYNC_SUCCESS")
         text: `NexusMind AI Gateway (Cortexx Platform) — Roteamento Unificado & Melhor Modelo por Tier:
 Acesso aos catálogos de modelos LLM gerenciados com roteamento inteligente, ping real e DecisionProvider nativo.
 Grupos Canônicos:
-- nexusmind_openai: padrão mistralai/mistral-large-4-1t-a52b (OpenAI-compatible /v1)
+- nexusmind_openai: padrão gpt-6.1-terra (OpenAI-compatible /v1)
 - nexusmind_anthropic: padrão claude-sonnet-4-6 (/v1/messages)
-- nexusmind_antigravity: padrão gemini-3.8-flash-medium (Gemini & Claude Thinking)
+- nexusmind_antigravity: padrão gemini-2.5-flash (Gemini & Claude Thinking)
 - nexusmind_grok: padrão grok-4.5 (xAI Grok)
 Ferramentas nativas do Gateway:
 1. nexusmind_models({ group? }): Consulta modelos disponíveis em tempo real (/v1/models) via host bridge com latência real.
