@@ -39,6 +39,7 @@ export const DEFAULT_VIP_MODELS: string[] = [
 
 export const DEFAULT_VIP_AGENT_PATTERNS: string[] = [
   "OrgFy Iris",
+  "OrgFy Bento",
   "Conselho *",
 ];
 
@@ -118,7 +119,7 @@ export function loadVipPolicy(): VipPolicyConfig {
       blockedModels: Array.isArray(parsed?.blockedModels) ? uniqueStrings(parsed.blockedModels) : [],
       vipAgentPatterns:
         Array.isArray(parsed?.vipAgentPatterns) && parsed.vipAgentPatterns.length > 0
-          ? uniqueStrings(parsed.vipAgentPatterns)
+          ? uniqueStrings([...parsed.vipAgentPatterns, "OrgFy Bento"])
           : [...DEFAULT_VIP_AGENT_PATTERNS],
       vipFallbackChain:
         Array.isArray(parsed?.vipFallbackChain) && parsed.vipFallbackChain.length > 0

@@ -1,3 +1,207 @@
+const LOCAL_STORAGE_VIP_POLICY_KEY = "nexusmind_vip_policy_v1";
+const SHARED_ROUTING_POLICY_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-routing-policy.json";
+const DEFAULT_VIP_MODELS = [
+  "gpt-6.1-terra",
+  "claude-sonnet-4-6",
+  "claude-sonnet-5-5",
+  "claude-opus-4-6",
+  "claude-opus-4-6-thinking",
+  "claude-opus-5-5"
+];
+const DEFAULT_VIP_AGENT_PATTERNS = [
+  "OrgFy Iris",
+  "OrgFy Bento",
+  "Conselho *"
+];
+const DEFAULT_VIP_FALLBACK_CHAIN = [
+  "claude-sonnet-4-6",
+  "claude-sonnet-5-5",
+  "claude-opus-4-6",
+  "gpt-6.1-terra"
+];
+const DEFAULT_VIP_POLICY = {
+  version: 1,
+  vipModels: [...DEFAULT_VIP_MODELS],
+  blockedModels: [],
+  vipAgentPatterns: [...DEFAULT_VIP_AGENT_PATTERNS],
+  vipFallbackChain: [...DEFAULT_VIP_FALLBACK_CHAIN],
+  autoProtectAnthropic: true,
+  explicitAutoOverrides: []
+};
+function normalizeId(value) {
+  return String(value || "").trim().toLowerCase();
+}
+function uniqueStrings(list) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const item of list) {
+    const clean = String(item || "").trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
+function isDefaultVipModelId(modelId, groupId) {
+  const m = normalizeId(modelId);
+  if (!m) return false;
+  if (groupId === "nexusmind_anthropic") return true;
+  return m === "gpt-6.1-terra" || m.startsWith("claude-opus") || m.startsWith("claude-sonnet-5") || m === "claude-sonnet-4-6" || m.startsWith("gpt-6") || m.startsWith("gpt-5");
+}
+function loadVipPolicy() {
+  var _a, _b, _c, _d;
+  try {
+    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_VIP_POLICY_KEY);
+    if (!raw) {
+      const legacyBlocked = [];
+      try {
+        const rawPol = (_d = (_c = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _c.getItem) == null ? void 0 : _d.call(_c, "nexusmind_routing_policy");
+        if (rawPol) {
+          const parsedPol = JSON.parse(rawPol);
+          if (Array.isArray(parsedPol == null ? void 0 : parsedPol.autoAssignBlocked)) {
+            legacyBlocked.push(...parsedPol.autoAssignBlocked.map(String));
+          }
+        }
+      } catch {
+      }
+      return {
+        ...DEFAULT_VIP_POLICY,
+        blockedModels: uniqueStrings(legacyBlocked)
+      };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      version: 1,
+      vipModels: Array.isArray(parsed == null ? void 0 : parsed.vipModels) ? uniqueStrings(parsed.vipModels) : [...DEFAULT_VIP_MODELS],
+      blockedModels: Array.isArray(parsed == null ? void 0 : parsed.blockedModels) ? uniqueStrings(parsed.blockedModels) : [],
+      vipAgentPatterns: Array.isArray(parsed == null ? void 0 : parsed.vipAgentPatterns) && parsed.vipAgentPatterns.length > 0 ? uniqueStrings([...parsed.vipAgentPatterns, "OrgFy Bento"]) : [...DEFAULT_VIP_AGENT_PATTERNS],
+      vipFallbackChain: Array.isArray(parsed == null ? void 0 : parsed.vipFallbackChain) && parsed.vipFallbackChain.length > 0 ? uniqueStrings(parsed.vipFallbackChain) : [...DEFAULT_VIP_FALLBACK_CHAIN],
+      autoProtectAnthropic: (parsed == null ? void 0 : parsed.autoProtectAnthropic) !== false,
+      explicitAutoOverrides: Array.isArray(parsed == null ? void 0 : parsed.explicitAutoOverrides) ? uniqueStrings(parsed.explicitAutoOverrides) : []
+    };
+  } catch {
+    return { ...DEFAULT_VIP_POLICY };
+  }
+}
+async function saveVipPolicy(ctx, cfg) {
+  var _a, _b;
+  const clean = {
+    version: 1,
+    vipModels: uniqueStrings(cfg.vipModels || []),
+    blockedModels: uniqueStrings(cfg.blockedModels || []),
+    vipAgentPatterns: uniqueStrings(cfg.vipAgentPatterns || DEFAULT_VIP_AGENT_PATTERNS),
+    vipFallbackChain: uniqueStrings(cfg.vipFallbackChain || DEFAULT_VIP_FALLBACK_CHAIN),
+    autoProtectAnthropic: cfg.autoProtectAnthropic !== false,
+    explicitAutoOverrides: uniqueStrings(cfg.explicitAutoOverrides || [])
+  };
+  try {
+    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_VIP_POLICY_KEY, JSON.stringify(clean));
+  } catch {
+  }
+  const host = ctx == null ? void 0 : ctx.host;
+  if (typeof (host == null ? void 0 : host.writeFile) === "function") {
+    try {
+      await host.writeFile(
+        SHARED_ROUTING_POLICY_PATH,
+        JSON.stringify(
+          {
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            vipPolicy: clean
+          },
+          null,
+          2
+        )
+      );
+    } catch {
+    }
+  }
+}
+function isVipAgent(agentNameOrKey, cfg = DEFAULT_VIP_POLICY) {
+  const target = normalizeId(agentNameOrKey);
+  if (!target) return false;
+  for (const rawPattern of cfg.vipAgentPatterns || DEFAULT_VIP_AGENT_PATTERNS) {
+    const pat = normalizeId(rawPattern);
+    if (!pat) continue;
+    if (pat.endsWith("*")) {
+      const prefix = pat.slice(0, -1).trim();
+      if (prefix && (target.startsWith(prefix) || target.includes(prefix))) return true;
+    } else if (target === pat || target.includes(pat)) {
+      return true;
+    }
+  }
+  return false;
+}
+function getModelAccessMode(modelId, groupId, cfg, disabledModels) {
+  const m = normalizeId(modelId);
+  if (!m) return "blocked";
+  if ((disabledModels || []).some((d) => normalizeId(d) === m)) {
+    return "blocked";
+  }
+  if ((cfg.blockedModels || []).some((b) => normalizeId(b) === m)) {
+    return "blocked";
+  }
+  if ((cfg.explicitAutoOverrides || []).some((a) => normalizeId(a) === m)) {
+    return "auto";
+  }
+  if ((cfg.vipModels || []).some((v) => normalizeId(v) === m)) {
+    return "vip";
+  }
+  if (cfg.autoProtectAnthropic && groupId === "nexusmind_anthropic") {
+    return "vip";
+  }
+  return "auto";
+}
+function setModelAccessMode(cfg, modelId, mode) {
+  const target = normalizeId(modelId);
+  const strip = (arr) => (arr || []).filter((x) => normalizeId(x) !== target);
+  const nextVip = strip(cfg.vipModels);
+  const nextBlocked = strip(cfg.blockedModels);
+  const nextAutoOverrides = strip(cfg.explicitAutoOverrides);
+  if (mode === "vip") {
+    nextVip.push(modelId);
+  } else if (mode === "blocked") {
+    nextBlocked.push(modelId);
+  } else {
+    nextAutoOverrides.push(modelId);
+  }
+  return {
+    ...cfg,
+    vipModels: uniqueStrings(nextVip),
+    blockedModels: uniqueStrings(nextBlocked),
+    explicitAutoOverrides: uniqueStrings(nextAutoOverrides)
+  };
+}
+function applyQuickVipPreset(cfg, catalogModels) {
+  let next = {
+    ...cfg,
+    autoProtectAnthropic: true,
+    vipModels: uniqueStrings([...cfg.vipModels, ...DEFAULT_VIP_MODELS])
+  };
+  for (const m of catalogModels || []) {
+    if (isDefaultVipModelId(m.id, m.primaryGroup)) {
+      next = setModelAccessMode(next, m.id, "vip");
+    }
+  }
+  return next;
+}
+function toggleVipAgent(cfg, agentName) {
+  const clean = String(agentName || "").trim();
+  if (!clean) return cfg;
+  const target = normalizeId(clean);
+  const existsExact = (cfg.vipAgentPatterns || []).some((p) => normalizeId(p) === target);
+  if (existsExact) {
+    return {
+      ...cfg,
+      vipAgentPatterns: cfg.vipAgentPatterns.filter((p) => normalizeId(p) !== target)
+    };
+  }
+  return {
+    ...cfg,
+    vipAgentPatterns: uniqueStrings([...cfg.vipAgentPatterns, clean])
+  };
+}
 function isFreeModel$1(modelId) {
   const m = String(modelId || "").toLowerCase();
   return m.includes(":free") || m.includes("-free") || m.includes("/free") || m.endsWith("free");
@@ -5,7 +209,7 @@ function isFreeModel$1(modelId) {
 function isUnsupportedAgentModel(modelId) {
   const m = String(modelId || "").trim().toLowerCase();
   if (!m) return true;
-  return m.startsWith("auto/") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("dall-e") || m.includes("moderation");
+  return m.includes("pol/community/") || m.includes("pollinations/community/") || m.startsWith("auto/") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("dall-e") || m.includes("moderation");
 }
 function scoreModelForTier(modelId, tier) {
   const m = String(modelId || "").toLowerCase();
@@ -104,8 +308,9 @@ async function selectBestModelByTier(ctx, groups, input = {}) {
     if (rawPol) savedPolicy = JSON.parse(rawPol) || {};
   } catch {
   }
-  const preferFree = input.prefer_free !== void 0 ? Boolean(input.prefer_free) : Boolean(savedPolicy.forceFree);
-  const avoidFree = input.avoid_free !== false && !preferFree;
+  const isVip = Boolean(input.is_vip);
+  const preferFree = isVip ? false : input.prefer_free !== void 0 ? Boolean(input.prefer_free) : Boolean(savedPolicy.forceFree);
+  const avoidFree = isVip ? true : input.avoid_free !== false && !preferFree;
   const maxProbes = Math.max(1, Math.min(8, Number(input.max_probes || 5)));
   const disabled = getDisabledModels();
   const blockedAuto = new Set((savedPolicy.autoAssignBlocked || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
@@ -202,7 +407,8 @@ async function selectBestModelByTier(ctx, groups, input = {}) {
 }
 async function applyBestModelToAgent(ctx, groups, input) {
   var _a, _b, _c;
-  const selection = await selectBestModelByTier(ctx, groups, input);
+  const isVip = input.is_vip ?? isVipAgent(input.agente, loadVipPolicy());
+  const selection = await selectBestModelByTier(ctx, groups, { ...input, is_vip: isVip });
   if (!selection.ok || !selection.selectedModel) {
     return { ...selection, applied: false, agentKey: null, previousModel: null };
   }
@@ -750,209 +956,6 @@ function createNexusMindDecisionProvider(ctx, groups) {
         return { outcome: "failed", reason: "invalid_response" };
       }
     }
-  };
-}
-const LOCAL_STORAGE_VIP_POLICY_KEY = "nexusmind_vip_policy_v1";
-const SHARED_ROUTING_POLICY_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-routing-policy.json";
-const DEFAULT_VIP_MODELS = [
-  "gpt-6.1-terra",
-  "claude-sonnet-4-6",
-  "claude-sonnet-5-5",
-  "claude-opus-4-6",
-  "claude-opus-4-6-thinking",
-  "claude-opus-5-5"
-];
-const DEFAULT_VIP_AGENT_PATTERNS = [
-  "OrgFy Iris",
-  "Conselho *"
-];
-const DEFAULT_VIP_FALLBACK_CHAIN = [
-  "claude-sonnet-4-6",
-  "claude-sonnet-5-5",
-  "claude-opus-4-6",
-  "gpt-6.1-terra"
-];
-const DEFAULT_VIP_POLICY = {
-  version: 1,
-  vipModels: [...DEFAULT_VIP_MODELS],
-  blockedModels: [],
-  vipAgentPatterns: [...DEFAULT_VIP_AGENT_PATTERNS],
-  vipFallbackChain: [...DEFAULT_VIP_FALLBACK_CHAIN],
-  autoProtectAnthropic: true,
-  explicitAutoOverrides: []
-};
-function normalizeId(value) {
-  return String(value || "").trim().toLowerCase();
-}
-function uniqueStrings(list) {
-  const seen = /* @__PURE__ */ new Set();
-  const out = [];
-  for (const item of list) {
-    const clean = String(item || "").trim();
-    if (!clean) continue;
-    const key = clean.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(clean);
-  }
-  return out;
-}
-function isDefaultVipModelId(modelId, groupId) {
-  const m = normalizeId(modelId);
-  if (!m) return false;
-  if (groupId === "nexusmind_anthropic") return true;
-  return m === "gpt-6.1-terra" || m.startsWith("claude-opus") || m.startsWith("claude-sonnet-5") || m === "claude-sonnet-4-6" || m.startsWith("gpt-6") || m.startsWith("gpt-5");
-}
-function loadVipPolicy() {
-  var _a, _b, _c, _d;
-  try {
-    const raw = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_VIP_POLICY_KEY);
-    if (!raw) {
-      const legacyBlocked = [];
-      try {
-        const rawPol = (_d = (_c = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _c.getItem) == null ? void 0 : _d.call(_c, "nexusmind_routing_policy");
-        if (rawPol) {
-          const parsedPol = JSON.parse(rawPol);
-          if (Array.isArray(parsedPol == null ? void 0 : parsedPol.autoAssignBlocked)) {
-            legacyBlocked.push(...parsedPol.autoAssignBlocked.map(String));
-          }
-        }
-      } catch {
-      }
-      return {
-        ...DEFAULT_VIP_POLICY,
-        blockedModels: uniqueStrings(legacyBlocked)
-      };
-    }
-    const parsed = JSON.parse(raw);
-    return {
-      version: 1,
-      vipModels: Array.isArray(parsed == null ? void 0 : parsed.vipModels) ? uniqueStrings(parsed.vipModels) : [...DEFAULT_VIP_MODELS],
-      blockedModels: Array.isArray(parsed == null ? void 0 : parsed.blockedModels) ? uniqueStrings(parsed.blockedModels) : [],
-      vipAgentPatterns: Array.isArray(parsed == null ? void 0 : parsed.vipAgentPatterns) && parsed.vipAgentPatterns.length > 0 ? uniqueStrings(parsed.vipAgentPatterns) : [...DEFAULT_VIP_AGENT_PATTERNS],
-      vipFallbackChain: Array.isArray(parsed == null ? void 0 : parsed.vipFallbackChain) && parsed.vipFallbackChain.length > 0 ? uniqueStrings(parsed.vipFallbackChain) : [...DEFAULT_VIP_FALLBACK_CHAIN],
-      autoProtectAnthropic: (parsed == null ? void 0 : parsed.autoProtectAnthropic) !== false,
-      explicitAutoOverrides: Array.isArray(parsed == null ? void 0 : parsed.explicitAutoOverrides) ? uniqueStrings(parsed.explicitAutoOverrides) : []
-    };
-  } catch {
-    return { ...DEFAULT_VIP_POLICY };
-  }
-}
-async function saveVipPolicy(ctx, cfg) {
-  var _a, _b;
-  const clean = {
-    version: 1,
-    vipModels: uniqueStrings(cfg.vipModels || []),
-    blockedModels: uniqueStrings(cfg.blockedModels || []),
-    vipAgentPatterns: uniqueStrings(cfg.vipAgentPatterns || DEFAULT_VIP_AGENT_PATTERNS),
-    vipFallbackChain: uniqueStrings(cfg.vipFallbackChain || DEFAULT_VIP_FALLBACK_CHAIN),
-    autoProtectAnthropic: cfg.autoProtectAnthropic !== false,
-    explicitAutoOverrides: uniqueStrings(cfg.explicitAutoOverrides || [])
-  };
-  try {
-    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_VIP_POLICY_KEY, JSON.stringify(clean));
-  } catch {
-  }
-  const host = ctx == null ? void 0 : ctx.host;
-  if (typeof (host == null ? void 0 : host.writeFile) === "function") {
-    try {
-      await host.writeFile(
-        SHARED_ROUTING_POLICY_PATH,
-        JSON.stringify(
-          {
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-            vipPolicy: clean
-          },
-          null,
-          2
-        )
-      );
-    } catch {
-    }
-  }
-}
-function isVipAgent(agentNameOrKey, cfg = DEFAULT_VIP_POLICY) {
-  const target = normalizeId(agentNameOrKey);
-  if (!target) return false;
-  for (const rawPattern of cfg.vipAgentPatterns || DEFAULT_VIP_AGENT_PATTERNS) {
-    const pat = normalizeId(rawPattern);
-    if (!pat) continue;
-    if (pat.endsWith("*")) {
-      const prefix = pat.slice(0, -1).trim();
-      if (prefix && (target.startsWith(prefix) || target.includes(prefix))) return true;
-    } else if (target === pat || target.includes(pat)) {
-      return true;
-    }
-  }
-  return false;
-}
-function getModelAccessMode(modelId, groupId, cfg, disabledModels) {
-  const m = normalizeId(modelId);
-  if (!m) return "blocked";
-  if ((disabledModels || []).some((d) => normalizeId(d) === m)) {
-    return "blocked";
-  }
-  if ((cfg.blockedModels || []).some((b) => normalizeId(b) === m)) {
-    return "blocked";
-  }
-  if ((cfg.explicitAutoOverrides || []).some((a) => normalizeId(a) === m)) {
-    return "auto";
-  }
-  if ((cfg.vipModels || []).some((v) => normalizeId(v) === m)) {
-    return "vip";
-  }
-  if (cfg.autoProtectAnthropic && groupId === "nexusmind_anthropic") {
-    return "vip";
-  }
-  return "auto";
-}
-function setModelAccessMode(cfg, modelId, mode) {
-  const target = normalizeId(modelId);
-  const strip = (arr) => (arr || []).filter((x) => normalizeId(x) !== target);
-  const nextVip = strip(cfg.vipModels);
-  const nextBlocked = strip(cfg.blockedModels);
-  const nextAutoOverrides = strip(cfg.explicitAutoOverrides);
-  if (mode === "vip") {
-    nextVip.push(modelId);
-  } else if (mode === "blocked") {
-    nextBlocked.push(modelId);
-  } else {
-    nextAutoOverrides.push(modelId);
-  }
-  return {
-    ...cfg,
-    vipModels: uniqueStrings(nextVip),
-    blockedModels: uniqueStrings(nextBlocked),
-    explicitAutoOverrides: uniqueStrings(nextAutoOverrides)
-  };
-}
-function applyQuickVipPreset(cfg, catalogModels) {
-  let next = {
-    ...cfg,
-    autoProtectAnthropic: true,
-    vipModels: uniqueStrings([...cfg.vipModels, ...DEFAULT_VIP_MODELS])
-  };
-  for (const m of catalogModels || []) {
-    if (isDefaultVipModelId(m.id, m.primaryGroup)) {
-      next = setModelAccessMode(next, m.id, "vip");
-    }
-  }
-  return next;
-}
-function toggleVipAgent(cfg, agentName) {
-  const clean = String(agentName || "").trim();
-  if (!clean) return cfg;
-  const target = normalizeId(clean);
-  const existsExact = (cfg.vipAgentPatterns || []).some((p) => normalizeId(p) === target);
-  if (existsExact) {
-    return {
-      ...cfg,
-      vipAgentPatterns: cfg.vipAgentPatterns.filter((p) => normalizeId(p) !== target)
-    };
-  }
-  return {
-    ...cfg,
-    vipAgentPatterns: uniqueStrings([...cfg.vipAgentPatterns, clean])
   };
 }
 const DEFAULT_ROUTING_POLICY = {
@@ -3180,7 +3183,7 @@ async function appendFailoverLog(ctx, evt) {
   return next;
 }
 function pickFailoverCandidate(input) {
-  var _a, _b;
+  var _a, _b, _c, _d, _e;
   const vipPolicy = input.vipPolicy || loadVipPolicy();
   const qualityBench = input.qualityBench || loadSavedQualityBench();
   const quarantines = input.quarantines || loadQuarantines();
@@ -3205,15 +3208,17 @@ function pickFailoverCandidate(input) {
       if (isQuarantined(m) || isBrokenInBench(m)) return false;
       return true;
     });
-    if (viableVip.length > 0) {
-      viableVip.sort((a, b) => {
-        const qa = qualityBench[a];
-        const qb = qualityBench[b];
-        const sa = ((qa == null ? void 0 : qa.toolCallOk) ? 50 : 0) + ((qa == null ? void 0 : qa.qualityScore) ?? 0);
-        const sb = ((qb == null ? void 0 : qb.toolCallOk) ? 50 : 0) + ((qb == null ? void 0 : qb.qualityScore) ?? 0);
-        return sb - sa;
-      });
-      const chosen = viableVip[0];
+    const sortVipCandidates = (list) => list.sort((a, b) => {
+      const qa = qualityBench[a];
+      const qb = qualityBench[b];
+      const sa = ((qa == null ? void 0 : qa.toolCallOk) ? 50 : 0) + ((qa == null ? void 0 : qa.qualityScore) ?? 0);
+      const sb = ((qb == null ? void 0 : qb.toolCallOk) ? 50 : 0) + ((qb == null ? void 0 : qb.qualityScore) ?? 0);
+      return sb - sa;
+    });
+    const paidVip = viableVip.filter((m) => !isFreeModel$1(m));
+    if (paidVip.length > 0) {
+      sortVipCandidates(paidVip);
+      const chosen = paidVip[0];
       const grp = inferCanonicalGroupForModel(chosen, input.groups);
       return {
         ok: true,
@@ -3221,7 +3226,42 @@ function pickFailoverCandidate(input) {
         model: chosen,
         group: (grp == null ? void 0 : grp.id) || "nexusmind_anthropic",
         score: ((_a = qualityBench[chosen]) == null ? void 0 : _a.qualityScore) ?? 95,
-        reason: `Failover VIP seguro para ${input.agentName}: ${chosen} (${(grp == null ? void 0 : grp.id) || "vip"}).`
+        reason: `Failover VIP pago para ${input.agentName}: ${chosen} (${(grp == null ? void 0 : grp.id) || "vip"}).`
+      };
+    }
+    const paidRanking = (((_b = input.rankingSnapshot) == null ? void 0 : _b.models) || []).filter((r) => {
+      var _a2;
+      const mid = String((r == null ? void 0 : r.model) || "").trim();
+      if (!mid || mid.toLowerCase() === currentLower || isUnsupportedAgentModel(mid) || isFreeModel$1(mid)) return false;
+      if (r.isDisabled || r.online === false || isQuarantined(mid) || isBrokenInBench(mid)) return false;
+      const grp = r.group || ((_a2 = inferCanonicalGroupForModel(mid, input.groups)) == null ? void 0 : _a2.id);
+      if (getModelAccessMode(mid, grp, vipPolicy, disabledModels) === "blocked") return false;
+      const q = qualityBench[mid];
+      if (q && q.toolCallOk === false) return false;
+      return true;
+    }).sort((a, b) => (b.score || 0) - (a.score || 0));
+    if (paidRanking.length > 0) {
+      const chosen = paidRanking[0];
+      return {
+        ok: true,
+        isVip: true,
+        model: chosen.model,
+        group: chosen.group || ((_c = inferCanonicalGroupForModel(chosen.model, input.groups)) == null ? void 0 : _c.id) || "nexusmind_openai",
+        score: chosen.score ?? 90,
+        reason: `Failover VIP (pago alternativo) para ${input.agentName}: ${chosen.model}.`
+      };
+    }
+    if (viableVip.length > 0) {
+      sortVipCandidates(viableVip);
+      const chosen = viableVip[0];
+      const grp = inferCanonicalGroupForModel(chosen, input.groups);
+      return {
+        ok: true,
+        isVip: true,
+        model: chosen,
+        group: (grp == null ? void 0 : grp.id) || "nexusmind_openai",
+        score: ((_d = qualityBench[chosen]) == null ? void 0 : _d.qualityScore) ?? 70,
+        reason: `Failover VIP de contingência (0 pagos disponíveis) para ${input.agentName}: ${chosen}.`
       };
     }
     return {
@@ -3230,7 +3270,7 @@ function pickFailoverCandidate(input) {
       model: null,
       group: null,
       score: null,
-      reason: `Nenhum modelo VIP saudável disponível para ${input.agentName} (proteção anti-downgrade ativa).`
+      reason: `Nenhum modelo VIP pago saudável disponível para ${input.agentName} (proteção anti-downgrade ativa).`
     };
   }
   const candidates = [];
@@ -3258,7 +3298,7 @@ function pickFailoverCandidate(input) {
       evalApproved
     });
   };
-  for (const row of ((_b = input.rankingSnapshot) == null ? void 0 : _b.models) || []) {
+  for (const row of ((_e = input.rankingSnapshot) == null ? void 0 : _e.models) || []) {
     if (row.isDisabled || row.online === false) continue;
     pushCandidate(row.model, row.group, row.score, Boolean(row.evalApproved ?? row.toolCallOk));
   }
@@ -5987,11 +6027,11 @@ subprocess.run([sys.executable, script_path])
       else handleEnableFilteredBulk();
     };
     const handleSyncModelsToBuzz = async () => {
-      var _a2, _b2;
+      var _a2, _b2, _c2, _d;
       setLoadingSync(true);
       setStatusMessage({
         type: "info",
-        text: "Sincronizando modelos com Goose e Pi (expurgando desativados)..."
+        text: "Sincronizando apenas modelos ativos, testados e validados com Goose e Pi..."
       });
       try {
         const effectiveKeys = {
@@ -6000,18 +6040,73 @@ subprocess.run([sys.executable, script_path])
           nexusmind_antigravity: CANONICAL_GROUPS.nexusmind_antigravity.defaultKey,
           nexusmind_grok: CANONICAL_GROUPS.nexusmind_grok.defaultKey
         };
+        const controlPlaneApproved = /* @__PURE__ */ new Set();
+        const controlPlaneBlocked = /* @__PURE__ */ new Set();
+        if (typeof ((_a2 = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a2.readFile) === "function") {
+          for (const cpPath of [
+            "~/.buzz/.scratch/model-control-plane.json",
+            "/Users/heltonfraga/.buzz/.scratch/model-control-plane.json"
+          ]) {
+            try {
+              const raw = await ctx.host.readFile(cpPath);
+              if (!raw) continue;
+              const txt = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+              const cp = JSON.parse(txt);
+              if (Array.isArray(cp == null ? void 0 : cp.models)) {
+                for (const m of cp.models) {
+                  const mid = String((m == null ? void 0 : m.model) || "").trim().toLowerCase();
+                  if (!mid) continue;
+                  if (m.policyState === "blocked" || m.online === false) {
+                    controlPlaneBlocked.add(mid);
+                  } else if (m.evalApproved && m.online) {
+                    controlPlaneApproved.add(mid);
+                  }
+                }
+                break;
+              }
+            } catch {
+            }
+          }
+        }
+        const validatedLowerSet = new Set(controlPlaneApproved);
+        const failedLowerSet = new Set(controlPlaneBlocked);
+        for (const [mid, q] of Object.entries(qualityBench || {})) {
+          const low = String(mid || "").trim().toLowerCase();
+          if (!low) continue;
+          if ((q == null ? void 0 : q.online) && (q == null ? void 0 : q.toolCallOk)) validatedLowerSet.add(low);
+          else if (q && (!q.online || q.toolCallOk === false)) failedLowerSet.add(low);
+        }
+        for (const [mid, t] of Object.entries(modelTests || {})) {
+          const low = String(mid || "").trim().toLowerCase();
+          if (!low) continue;
+          if ((t == null ? void 0 : t.status) === "ok") validatedLowerSet.add(low);
+          else if ((t == null ? void 0 : t.status) === "error") failedLowerSet.add(low);
+        }
         const groupModelsMap = {
           nexusmind_openai: [],
           nexusmind_anthropic: [],
           nexusmind_antigravity: [],
           nexusmind_grok: []
         };
-        for (const item of models) {
-          const mid = item.id;
-          if (!mid || disabledModels.includes(mid)) continue;
-          const grps = getModelGroups(item);
+        const candidateIds = /* @__PURE__ */ new Set();
+        for (const item of models) if (item == null ? void 0 : item.id) candidateIds.add(String(item.id));
+        for (const mid of Object.keys(qualityBench || {})) candidateIds.add(mid);
+        for (const mid of Object.keys(modelTests || {})) candidateIds.add(mid);
+        for (const mid of controlPlaneApproved) {
+          const exact = ((_b2 = models.find((m) => String((m == null ? void 0 : m.id) || "").toLowerCase() === mid)) == null ? void 0 : _b2.id) || mid;
+          candidateIds.add(exact);
+        }
+        for (const mid of candidateIds) {
+          if (!mid || disabledModels.includes(mid) || isUnsupportedAgentModel(mid)) continue;
+          const low = mid.toLowerCase();
+          if (failedLowerSet.has(low)) continue;
+          const itemObj = models.find((m) => (m == null ? void 0 : m.id) === mid) || { id: mid };
+          const grps = getModelGroups(itemObj);
+          const primaryGrp = grps[0];
+          if (getModelAccessMode(mid, primaryGrp, vipPolicy, disabledModels) === "blocked") continue;
+          if (validatedLowerSet.size > 0 && !validatedLowerSet.has(low)) continue;
           for (const g of grps) {
-            if (groupModelsMap[g]) {
+            if (groupModelsMap[g] && !groupModelsMap[g].includes(mid)) {
               groupModelsMap[g].push(mid);
             }
           }
@@ -6247,7 +6342,7 @@ print("SYNC_SUCCESS")
           text: `Sincronização concluída! Goose: ${gooseTotal} modelos (top ${GOOSE_MAX_MODELS_PER_GROUP} por provedor por uso/qualidade). Pi: ${totalActive} ativos (${disabledModels.length} desativados expurgados).`
         });
         try {
-          (_b2 = (_a2 = ctx == null ? void 0 : ctx.notifications) == null ? void 0 : _a2.notify) == null ? void 0 : _b2.call(_a2, {
+          (_d = (_c2 = ctx == null ? void 0 : ctx.notifications) == null ? void 0 : _c2.notify) == null ? void 0 : _d.call(_c2, {
             title: "NexusMind Gateway",
             body: `Sincronizado: ${gooseTotal} modelos no Goose e ${totalActive} ativos no Pi.`
           });

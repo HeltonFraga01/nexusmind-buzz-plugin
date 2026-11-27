@@ -12,7 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { Context } from "@buzz/author";
-import { type CanonicalGroupDef, isUnsupportedAgentModel } from "./smart-router";
+import { type CanonicalGroupDef, isFreeModel, isUnsupportedAgentModel } from "./smart-router";
 import {
   type ModelRankingSnapshot,
   inferCanonicalGroupForModel,
@@ -252,7 +252,7 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
   };
 
   if (vip) {
-    // Cadeia VIP ordenada: vipFallbackChain + vipModels
+    // Regra estrita VIP: sempre modelos pagos saudáveis (cadeia VIP -> outros pagos validados). Só cai para :free se 0 pagos estiverem disponíveis.
     const vipPool = Array.from(
       new Set([...(vipPolicy.vipFallbackChain || []), ...(vipPolicy.vipModels || [])])
     );
@@ -266,16 +266,19 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
       return true;
     });
 
-    if (viableVip.length > 0) {
-      // Ordena priorizando toolCallOk e qualityScore quando já testado
-      viableVip.sort((a, b) => {
+    const sortVipCandidates = (list: string[]) =>
+      list.sort((a, b) => {
         const qa = qualityBench[a];
         const qb = qualityBench[b];
         const sa = (qa?.toolCallOk ? 50 : 0) + (qa?.qualityScore ?? 0);
         const sb = (qb?.toolCallOk ? 50 : 0) + (qb?.qualityScore ?? 0);
         return sb - sa;
       });
-      const chosen = viableVip[0];
+
+    const paidVip = viableVip.filter((m) => !isFreeModel(m));
+    if (paidVip.length > 0) {
+      sortVipCandidates(paidVip);
+      const chosen = paidVip[0];
       const grp = inferCanonicalGroupForModel(chosen, input.groups);
       return {
         ok: true,
@@ -283,7 +286,48 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
         model: chosen,
         group: grp?.id || "nexusmind_anthropic",
         score: qualityBench[chosen]?.qualityScore ?? 95,
-        reason: `Failover VIP seguro para ${input.agentName}: ${chosen} (${grp?.id || "vip"}).`,
+        reason: `Failover VIP pago para ${input.agentName}: ${chosen} (${grp?.id || "vip"}).`,
+      };
+    }
+
+    // Fallback para outros modelos PAGOS validados no ranking antes de cogitar qualquer :free
+    const paidRanking = (input.rankingSnapshot?.models || [])
+      .filter((r) => {
+        const mid = String(r?.model || "").trim();
+        if (!mid || mid.toLowerCase() === currentLower || isUnsupportedAgentModel(mid) || isFreeModel(mid)) return false;
+        if (r.isDisabled || r.online === false || isQuarantined(mid) || isBrokenInBench(mid)) return false;
+        const grp = r.group || inferCanonicalGroupForModel(mid, input.groups)?.id;
+        if (getModelAccessMode(mid, grp, vipPolicy, disabledModels) === "blocked") return false;
+        const q = qualityBench[mid];
+        if (q && q.toolCallOk === false) return false;
+        return true;
+      })
+      .sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    if (paidRanking.length > 0) {
+      const chosen = paidRanking[0];
+      return {
+        ok: true,
+        isVip: true,
+        model: chosen.model,
+        group: chosen.group || inferCanonicalGroupForModel(chosen.model, input.groups)?.id || "nexusmind_openai",
+        score: chosen.score ?? 90,
+        reason: `Failover VIP (pago alternativo) para ${input.agentName}: ${chosen.model}.`,
+      };
+    }
+
+    // Último recurso absoluto: apenas se ZERO modelos pagos estiverem online
+    if (viableVip.length > 0) {
+      sortVipCandidates(viableVip);
+      const chosen = viableVip[0];
+      const grp = inferCanonicalGroupForModel(chosen, input.groups);
+      return {
+        ok: true,
+        isVip: true,
+        model: chosen,
+        group: grp?.id || "nexusmind_openai",
+        score: qualityBench[chosen]?.qualityScore ?? 70,
+        reason: `Failover VIP de contingência (0 pagos disponíveis) para ${input.agentName}: ${chosen}.`,
       };
     }
 
@@ -293,7 +337,7 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
       model: null,
       group: null,
       score: null,
-      reason: `Nenhum modelo VIP saudável disponível para ${input.agentName} (proteção anti-downgrade ativa).`,
+      reason: `Nenhum modelo VIP pago saudável disponível para ${input.agentName} (proteção anti-downgrade ativa).`,
     };
   }
 

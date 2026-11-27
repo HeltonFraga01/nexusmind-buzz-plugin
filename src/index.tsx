@@ -4,6 +4,7 @@ import {
   applyBestModelToAgent,
   createNexusMindDecisionProvider,
   scoreModelForTier,
+  isUnsupportedAgentModel,
 } from "./services/smart-router";
 import {
   buildModelRankingSnapshot,
@@ -1536,7 +1537,7 @@ subprocess.run([sys.executable, script_path])
       setLoadingSync(true);
       setStatusMessage({
         type: "info",
-        text: "Sincronizando modelos com Goose e Pi (expurgando desativados)...",
+        text: "Sincronizando apenas modelos ativos, testados e validados com Goose e Pi...",
       });
 
       try {
@@ -1547,6 +1548,50 @@ subprocess.run([sys.executable, script_path])
           nexusmind_grok: CANONICAL_GROUPS.nexusmind_grok.defaultKey,
         };
 
+        // Carrega modelos aprovados no Eval/Control Plane (~/.buzz/.scratch/model-control-plane.json)
+        const controlPlaneApproved = new Set<string>();
+        const controlPlaneBlocked = new Set<string>();
+        if (typeof (ctx as any)?.host?.readFile === "function") {
+          for (const cpPath of [
+            "~/.buzz/.scratch/model-control-plane.json",
+            "/Users/heltonfraga/.buzz/.scratch/model-control-plane.json",
+          ]) {
+            try {
+              const raw = await (ctx as any).host.readFile(cpPath);
+              if (!raw) continue;
+              const txt = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+              const cp = JSON.parse(txt);
+              if (Array.isArray(cp?.models)) {
+                for (const m of cp.models) {
+                  const mid = String(m?.model || "").trim().toLowerCase();
+                  if (!mid) continue;
+                  if (m.policyState === "blocked" || m.online === false) {
+                    controlPlaneBlocked.add(mid);
+                  } else if (m.evalApproved && m.online) {
+                    controlPlaneApproved.add(mid);
+                  }
+                }
+                break;
+              }
+            } catch {}
+          }
+        }
+
+        const validatedLowerSet = new Set<string>(controlPlaneApproved);
+        const failedLowerSet = new Set<string>(controlPlaneBlocked);
+        for (const [mid, q] of Object.entries(qualityBench || {})) {
+          const low = String(mid || "").trim().toLowerCase();
+          if (!low) continue;
+          if (q?.online && q?.toolCallOk) validatedLowerSet.add(low);
+          else if (q && (!q.online || q.toolCallOk === false)) failedLowerSet.add(low);
+        }
+        for (const [mid, t] of Object.entries(modelTests || {})) {
+          const low = String(mid || "").trim().toLowerCase();
+          if (!low) continue;
+          if (t?.status === "ok") validatedLowerSet.add(low);
+          else if (t?.status === "error") failedLowerSet.add(low);
+        }
+
         const groupModelsMap: Record<string, string[]> = {
           nexusmind_openai: [],
           nexusmind_anthropic: [],
@@ -1554,26 +1599,41 @@ subprocess.run([sys.executable, script_path])
           nexusmind_grok: [],
         };
 
-        for (const item of models) {
-          const mid = item.id;
-          if (!mid || disabledModels.includes(mid)) continue; // STRICT PURGE OF DISABLED MODELS
+        const candidateIds = new Set<string>();
+        for (const item of models) if (item?.id) candidateIds.add(String(item.id));
+        for (const mid of Object.keys(qualityBench || {})) candidateIds.add(mid);
+        for (const mid of Object.keys(modelTests || {})) candidateIds.add(mid);
+        for (const mid of controlPlaneApproved) {
+          const exact = models.find((m: any) => String(m?.id || "").toLowerCase() === mid)?.id || mid;
+          candidateIds.add(exact);
+        }
 
-          const grps = getModelGroups(item);
+        for (const mid of candidateIds) {
+          if (!mid || disabledModels.includes(mid) || isUnsupportedAgentModel(mid)) continue;
+          const low = mid.toLowerCase();
+          if (failedLowerSet.has(low)) continue;
+          const itemObj = models.find((m: any) => m?.id === mid) || { id: mid };
+          const grps = getModelGroups(itemObj);
+          const primaryGrp = grps[0];
+          if (getModelAccessMode(mid, primaryGrp, vipPolicy, disabledModels) === "blocked") continue;
+          // Filtro estrito para o dropdown nativo do Buzz: somente modelos testados e validados
+          if (validatedLowerSet.size > 0 && !validatedLowerSet.has(low)) continue;
+
           for (const g of grps) {
-            if (groupModelsMap[g]) {
+            if (groupModelsMap[g] && !groupModelsMap[g].includes(mid)) {
               groupModelsMap[g].push(mid);
             }
           }
         }
 
-        // Fallbacks
+        // Fallback seguro caso algum grupo ainda não tenha nenhum modelo testado
         for (const [pid, def] of Object.entries(CANONICAL_GROUPS)) {
           if (!groupModelsMap[pid] || groupModelsMap[pid].length === 0) {
             groupModelsMap[pid] = [def.defaultModel];
           }
         }
 
-        // Prioriza os top 40 modelos por provedor no Goose via ranking real (uso + qualidade + ping)
+        // Ordena os modelos validados por ranking real (uso + qualidade + ping)
         let usageData: { byModel: Record<string, any>; sampleSize: number } = { byModel: {}, sampleSize: 0 };
         try {
           usageData = await loadGatewayUsageByModel(ctx);

@@ -7,6 +7,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { Context } from "@buzz/author";
+import { isVipAgent, loadVipPolicy } from "./vip-policy";
 
 export type NexusTier = "tier1_fast" | "tier2_balanced" | "tier3_frontier" | "reasoning" | "decision";
 
@@ -39,6 +40,7 @@ export interface BestModelInput {
   exclude_models?: string[];
   prefer_free?: boolean;
   avoid_free?: boolean;
+  is_vip?: boolean;
   max_probes?: number;
 }
 
@@ -64,6 +66,8 @@ export function isUnsupportedAgentModel(modelId: string): boolean {
   const m = String(modelId || "").trim().toLowerCase();
   if (!m) return true;
   return (
+    m.includes("pol/community/") ||
+    m.includes("pollinations/community/") ||
     m.startsWith("auto/") ||
     m.includes("tab_jump") ||
     m.includes("autocomplete") ||
@@ -197,8 +201,10 @@ export async function selectBestModelByTier(
     const rawPol = (globalThis as any)?.localStorage?.getItem?.("nexusmind_routing_policy");
     if (rawPol) savedPolicy = JSON.parse(rawPol) || {};
   } catch {}
-  const preferFree = input.prefer_free !== undefined ? Boolean(input.prefer_free) : Boolean(savedPolicy.forceFree);
-  const avoidFree = input.avoid_free !== false && !preferFree;
+  // Regra estrita VIP: agentes VIP sempre priorizam modelos pagos mesmo quando forceFree está ativo (só caem em :free se 0 pagos disponíveis).
+  const isVip = Boolean(input.is_vip);
+  const preferFree = isVip ? false : input.prefer_free !== undefined ? Boolean(input.prefer_free) : Boolean(savedPolicy.forceFree);
+  const avoidFree = isVip ? true : input.avoid_free !== false && !preferFree;
   const maxProbes = Math.max(1, Math.min(8, Number(input.max_probes || 5)));
   const disabled = getDisabledModels();
   const blockedAuto = new Set((savedPolicy.autoAssignBlocked || []).map((x) => String(x || "").trim().toLowerCase()).filter(Boolean));
@@ -316,7 +322,8 @@ export async function applyBestModelToAgent(
   groups: Record<string, CanonicalGroupDef>,
   input: BestModelInput & { agente: string }
 ): Promise<BestModelResult & { applied: boolean; agentKey: string | null; previousModel: string | null }> {
-  const selection = await selectBestModelByTier(ctx, groups, input);
+  const isVip = input.is_vip ?? isVipAgent(input.agente, loadVipPolicy());
+  const selection = await selectBestModelByTier(ctx, groups, { ...input, is_vip: isVip });
   if (!selection.ok || !selection.selectedModel) {
     return { ...selection, applied: false, agentKey: null, previousModel: null };
   }
