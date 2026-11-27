@@ -32,8 +32,30 @@ export interface QualityProbeResult {
   streamOk: boolean;
   latencyMs: number | null;
   qualityScore: number; // 0..100
+  inputTokens?: number;
+  outputTokens?: number;
+  estimatedCostUsd?: number | null;
   errorKind: GatewayErrorKind;
   errorMsg?: string;
+}
+
+export function estimateProbeCostUsd(modelId: string, inputTokens: number, outputTokens: number): number | null {
+  const m = String(modelId || "").toLowerCase();
+  if (m.includes(":free") || m.includes("-free") || m.endsWith("free")) return 0;
+  if (!Number.isFinite(inputTokens) && !Number.isFinite(outputTokens)) return null;
+  const inTok = Math.max(0, Number(inputTokens || 0));
+  const outTok = Math.max(0, Number(outputTokens || 0));
+  if (inTok === 0 && outTok === 0) return null;
+  let per1mIn = 1.0;
+  let per1mOut = 3.0;
+  if (m.includes("opus")) { per1mIn = 15.0; per1mOut = 75.0; }
+  else if (m.includes("sonnet")) { per1mIn = 3.0; per1mOut = 15.0; }
+  else if (m.includes("haiku")) { per1mIn = 0.8; per1mOut = 4.0; }
+  else if (m.includes("flash")) { per1mIn = 0.15; per1mOut = 0.6; }
+  else if (m.includes("gemini") || m.includes("hydrogen")) { per1mIn = 1.25; per1mOut = 5.0; }
+  else if (m.includes("gpt-6") || m.includes("gpt-5")) { per1mIn = 2.5; per1mOut = 10.0; }
+  else if (m.includes("grok")) { per1mIn = 0.5; per1mOut = 1.5; }
+  return Number(((inTok / 1_000_000) * per1mIn + (outTok / 1_000_000) * per1mOut).toFixed(6));
 }
 
 export const LOCAL_STORAGE_QUALITY_BENCH_KEY = "nexusmind_quality_bench_v1";
@@ -81,8 +103,9 @@ export function buildOrgfyEvalMarkdown(results: Record<string, QualityProbeResul
     const respStr = r.online ? "10/10" : "0/10";
     const tcStr = r.toolCallOk ? "10/10" : "0/10";
     const msStr = typeof r.latencyMs === "number" ? String(Math.round(r.latencyMs)) : "—";
+    const costStr = typeof r.estimatedCostUsd === "number" ? `$${r.estimatedCostUsd.toFixed(5)}` : "—";
     const errStr = r.errorMsg ? String(r.errorMsg).replace(/\|/g, "/").replace(/\n/g, " ").slice(0, 90) : "—";
-    lines.push(`| ${r.group} | ${r.model} | ${respStr} | ${tcStr} | score ${r.qualityScore}/100 | ${msStr} | — | ${errStr} |`);
+    lines.push(`| ${r.group} | ${r.model} | ${respStr} | ${tcStr} | score ${r.qualityScore}/100 | ${msStr} | ${costStr} | ${errStr} |`);
   }
   return lines.join("\n") + "\n";
 }
@@ -364,6 +387,10 @@ export async function runModelQualityProbe(
     // - 25 pts: Velocidade (latência)
     const speedPts = Math.max(0, Math.min(25, Math.round(25 - (latencyMs / 1000) * 2.5)));
     const qualityScore = (toolCallOk ? 45 : 0) + (streamOk ? 30 : 0) + speedPts;
+    const usage = parsed?.usage || {};
+    const inputTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0;
+    const outputTokens = Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0;
+    const estimatedCostUsd = estimateProbeCostUsd(modelId, inputTokens, outputTokens);
 
     return {
       model: modelId,
@@ -374,6 +401,9 @@ export async function runModelQualityProbe(
       streamOk,
       latencyMs,
       qualityScore,
+      inputTokens,
+      outputTokens,
+      estimatedCostUsd,
       errorKind: "ok",
       ...(toolCallOk ? {} : { errorMsg: "Respondeu texto mas não executou tool_call estruturado" }),
     };

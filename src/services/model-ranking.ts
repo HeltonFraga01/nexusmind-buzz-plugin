@@ -166,6 +166,9 @@ export function inferCanonicalGroupForModel(
 ): CanonicalGroupDef {
   const m = String(modelId || "").toLowerCase();
   if (m.includes("grok") && groups.nexusmind_grok) return groups.nexusmind_grok;
+  if ((m.includes("/") || m.includes(":free")) && groups.nexusmind_openai) {
+    return groups.nexusmind_openai;
+  }
   if (
     (m.includes("gemini") || m.includes("antigravity") || m.includes("thinking") || m.includes("-high") || m.includes("-medium") || m.includes("-low")) &&
     groups.nexusmind_antigravity

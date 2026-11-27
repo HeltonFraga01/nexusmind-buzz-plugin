@@ -1009,6 +1009,9 @@ function decodeFileContent(raw) {
 function inferCanonicalGroupForModel(modelId, groups) {
   const m = String(modelId || "").toLowerCase();
   if (m.includes("grok") && groups.nexusmind_grok) return groups.nexusmind_grok;
+  if ((m.includes("/") || m.includes(":free")) && groups.nexusmind_openai) {
+    return groups.nexusmind_openai;
+  }
   if ((m.includes("gemini") || m.includes("antigravity") || m.includes("thinking") || m.includes("-high") || m.includes("-medium") || m.includes("-low")) && groups.nexusmind_antigravity) {
     return groups.nexusmind_antigravity;
   }
@@ -1309,6 +1312,39 @@ async function persistModelRankingSnapshot(ctx, snapshot) {
   }
   return false;
 }
+function estimateProbeCostUsd(modelId, inputTokens, outputTokens) {
+  const m = String(modelId || "").toLowerCase();
+  if (m.includes(":free") || m.includes("-free") || m.endsWith("free")) return 0;
+  if (!Number.isFinite(inputTokens) && !Number.isFinite(outputTokens)) return null;
+  const inTok = Math.max(0, Number(inputTokens || 0));
+  const outTok = Math.max(0, Number(outputTokens || 0));
+  if (inTok === 0 && outTok === 0) return null;
+  let per1mIn = 1;
+  let per1mOut = 3;
+  if (m.includes("opus")) {
+    per1mIn = 15;
+    per1mOut = 75;
+  } else if (m.includes("sonnet")) {
+    per1mIn = 3;
+    per1mOut = 15;
+  } else if (m.includes("haiku")) {
+    per1mIn = 0.8;
+    per1mOut = 4;
+  } else if (m.includes("flash")) {
+    per1mIn = 0.15;
+    per1mOut = 0.6;
+  } else if (m.includes("gemini") || m.includes("hydrogen")) {
+    per1mIn = 1.25;
+    per1mOut = 5;
+  } else if (m.includes("gpt-6") || m.includes("gpt-5")) {
+    per1mIn = 2.5;
+    per1mOut = 10;
+  } else if (m.includes("grok")) {
+    per1mIn = 0.5;
+    per1mOut = 1.5;
+  }
+  return Number((inTok / 1e6 * per1mIn + outTok / 1e6 * per1mOut).toFixed(6));
+}
 const LOCAL_STORAGE_QUALITY_BENCH_KEY = "nexusmind_quality_bench_v1";
 const SHARED_QUALITY_BENCH_PATH = "/Users/heltonfraga/.buzz/.scratch/nexusmind-quality-bench.json";
 const ORGFY_EVAL_DOC_PATH = "/Users/heltonfraga/.buzz/REPOS/orgfy/docs/eval-modelos-onda5.md";
@@ -1352,8 +1388,9 @@ function buildOrgfyEvalMarkdown(results) {
     const respStr = r.online ? "10/10" : "0/10";
     const tcStr = r.toolCallOk ? "10/10" : "0/10";
     const msStr = typeof r.latencyMs === "number" ? String(Math.round(r.latencyMs)) : "—";
+    const costStr = typeof r.estimatedCostUsd === "number" ? `$${r.estimatedCostUsd.toFixed(5)}` : "—";
     const errStr = r.errorMsg ? String(r.errorMsg).replace(/\|/g, "/").replace(/\n/g, " ").slice(0, 90) : "—";
-    lines.push(`| ${r.group} | ${r.model} | ${respStr} | ${tcStr} | score ${r.qualityScore}/100 | ${msStr} | — | ${errStr} |`);
+    lines.push(`| ${r.group} | ${r.model} | ${respStr} | ${tcStr} | score ${r.qualityScore}/100 | ${msStr} | ${costStr} | ${errStr} |`);
   }
   return lines.join("\n") + "\n";
 }
@@ -1589,6 +1626,10 @@ async function runModelQualityProbe(ctx, modelId, group) {
     }
     const speedPts = Math.max(0, Math.min(25, Math.round(25 - latencyMs / 1e3 * 2.5)));
     const qualityScore = (toolCallOk ? 45 : 0) + (streamOk ? 30 : 0) + speedPts;
+    const usage = (parsed == null ? void 0 : parsed.usage) || {};
+    const inputTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0;
+    const outputTokens = Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0;
+    const estimatedCostUsd = estimateProbeCostUsd(modelId, inputTokens, outputTokens);
     return {
       model: modelId,
       group: group.id,
@@ -1598,6 +1639,9 @@ async function runModelQualityProbe(ctx, modelId, group) {
       streamOk,
       latencyMs,
       qualityScore,
+      inputTokens,
+      outputTokens,
+      estimatedCostUsd,
       errorKind: "ok",
       ...toolCallOk ? {} : { errorMsg: "Respondeu texto mas não executou tool_call estruturado" }
     };
@@ -1660,10 +1704,16 @@ function fmtMs(ms) {
   if (ms >= 1e3) return `${(ms / 1e3).toFixed(1)}s`;
   return `${Math.round(ms)}ms`;
 }
-function fmtCost(usd) {
-  if (!Number.isFinite(usd) || usd <= 0) return "$0";
-  if (usd < 1e-3) return `$${(usd * 1e3).toFixed(2)}/1k`;
-  return `$${usd.toFixed(4)}`;
+function fmtCost(usd, opts) {
+  if (opts == null ? void 0 : opts.isFree) return "FREE";
+  if (Number.isFinite(usd) && usd > 0) {
+    if (usd < 1e-3) return `$${(usd * 1e3).toFixed(2)}/1k`;
+    return `$${usd.toFixed(4)}`;
+  }
+  if (typeof (opts == null ? void 0 : opts.estimatedProbeUsd) === "number" && opts.estimatedProbeUsd > 0) {
+    return `~$${opts.estimatedProbeUsd.toFixed(4)}`;
+  }
+  return "—";
 }
 function createModelRankingTabComponent(ctx, groups) {
   const React = ctx.react;
@@ -2146,6 +2196,7 @@ function createModelRankingTabComponent(ctx, groups) {
                 "Nenhum modelo corresponde aos critérios atuais."
               )
             ) : visibleRows.map((row, idx) => {
+              var _a;
               const isPinned = pinnedForTier === row.model;
               const healthLabel = row.online === true ? `OK · ${fmtMs(row.pingLatencyMs)}` : row.online === false ? `Erro` : "—";
               const healthColor = row.online === true ? "var(--green-11, #3dd68c)" : row.online === false ? "var(--red-11, #ff9592)" : "var(--text-tertiary, #808080)";
@@ -2235,8 +2286,8 @@ function createModelRankingTabComponent(ctx, groups) {
                   row.quarantined ? "Quarentena" : healthLabel
                 ),
                 h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-secondary, #c7c7c7)" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
-                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs)),
-                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd)),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs ?? row.pingLatencyMs)),
+                h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd, { isFree: row.isFree, estimatedProbeUsd: ((_a = qualityBench == null ? void 0 : qualityBench[row.model]) == null ? void 0 : _a.estimatedCostUsd) ?? null })),
                 h(
                   "td",
                   { style: { padding: "8px 12px", whiteSpace: "nowrap" } },
@@ -3232,6 +3283,28 @@ function fmtTime(iso) {
     return iso;
   }
 }
+function isValidModelId(val) {
+  const s = String(val || "").trim();
+  if (!s) return false;
+  const low = s.toLowerCase();
+  return low !== "padrão" && low !== "padrao" && low !== "default" && low !== "none" && low !== "null";
+}
+function normalizeModelId(val) {
+  return String(val || "").trim().toLowerCase();
+}
+function uniqueModels(list) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const raw of list) {
+    if (!isValidModelId(raw)) continue;
+    const clean = raw.trim();
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
 function createAutopilotFailoverTabComponent(ctx, groups) {
   const React = ctx.react;
   const h = React.createElement;
@@ -3252,7 +3325,10 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
     onNotify
   }) {
     const [benchRunning, setBenchRunning] = React.useState(false);
+    const [benchScopeActive, setBenchScopeActive] = React.useState(null);
     const [benchProgress, setBenchProgress] = React.useState("");
+    const [singleTestingModel, setSingleTestingModel] = React.useState(null);
+    const [benchFilter, setBenchFilter] = React.useState("all");
     const [failoverBusyAgent, setFailoverBusyAgent] = React.useState(null);
     const [vipChainInput, setVipChainInput] = React.useState(
       () => (vipPolicy.vipFallbackChain || []).join(", ")
@@ -3281,44 +3357,166 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
     }, [failoverLog.length, failoverBusyAgent]);
     const vipAgents = buzzAgents.filter((a) => isVipAgent(a.name || a.key, vipPolicy));
     const workerAgents = buzzAgents.filter((a) => !isVipAgent(a.name || a.key, vipPolicy));
+    const providerHintByModel = React.useMemo(() => {
+      var _a, _b;
+      const map = /* @__PURE__ */ new Map();
+      for (const m of models || []) {
+        const mid = String((m == null ? void 0 : m.id) || "").trim();
+        const grp = (m == null ? void 0 : m.primaryGroup) || (Array.isArray(m == null ? void 0 : m.groups) ? m.groups[0] : void 0);
+        if (mid && grp && groups[grp]) {
+          map.set(mid.toLowerCase(), grp);
+        }
+      }
+      for (const a of buzzAgents) {
+        const mid = String(((_a = a == null ? void 0 : a.config) == null ? void 0 : _a.model) || "").trim();
+        const prov = String(((_b = a == null ? void 0 : a.config) == null ? void 0 : _b.provider) || "").trim();
+        if (isValidModelId(mid) && prov && groups[prov] && !map.has(mid.toLowerCase())) {
+          map.set(mid.toLowerCase(), prov);
+        }
+      }
+      return map;
+    }, [models, buzzAgents]);
+    const resolveGroupForModel2 = (modelId) => {
+      const hinted = providerHintByModel.get(modelId.toLowerCase());
+      if (hinted && groups[hinted]) return groups[hinted];
+      if (modelId.includes("/") || modelId.toLowerCase().includes(":free")) {
+        if (groups.nexusmind_openai) return groups.nexusmind_openai;
+      }
+      return inferCanonicalGroupForModel(modelId, groups);
+    };
+    const vipAgentActiveModels = React.useMemo(
+      () => uniqueModels(vipAgents.map((a) => {
+        var _a;
+        return String(((_a = a == null ? void 0 : a.config) == null ? void 0 : _a.model) || "");
+      })),
+      [vipAgents]
+    );
+    const allAgentActiveModels = React.useMemo(
+      () => uniqueModels(buzzAgents.map((a) => {
+        var _a;
+        return String(((_a = a == null ? void 0 : a.config) == null ? void 0 : _a.model) || "");
+      })),
+      [buzzAgents]
+    );
+    const allVipTargetModels = React.useMemo(
+      () => uniqueModels([
+        ...vipAgentActiveModels,
+        ...vipPolicy.vipModels || [],
+        ...vipPolicy.vipFallbackChain || []
+      ]),
+      [vipAgentActiveModels, vipPolicy.vipModels, vipPolicy.vipFallbackChain]
+    );
+    const vipModelSet = React.useMemo(
+      () => new Set(allVipTargetModels.map(normalizeModelId)),
+      [allVipTargetModels]
+    );
+    const inUseModelSet = React.useMemo(
+      () => new Set(allAgentActiveModels.map(normalizeModelId)),
+      [allAgentActiveModels]
+    );
+    const findBenchForModel = (rawModel) => {
+      if (!isValidModelId(rawModel)) return null;
+      const exact = qualityBench[rawModel.trim()];
+      if (exact) return exact;
+      const low = rawModel.trim().toLowerCase();
+      const short = String(rawModel.split("/").pop() || rawModel).trim().toLowerCase();
+      for (const [k, v] of Object.entries(qualityBench || {})) {
+        const kl = k.toLowerCase();
+        if (kl === low || kl === short || String(k.split("/").pop() || k).toLowerCase() === short) {
+          return v;
+        }
+      }
+      return null;
+    };
     const quarantineList = Object.values(quarantines || {});
-    const benchList = Object.values(qualityBench || {}).sort((a, b) => b.qualityScore - a.qualityScore);
-    const toolOkCount = benchList.filter((b) => b.toolCallOk).length;
+    const benchList = Object.values(qualityBench || {}).sort((a, b) => {
+      if (a.online !== b.online) return a.online ? -1 : 1;
+      if (a.toolCallOk !== b.toolCallOk) return a.toolCallOk ? -1 : 1;
+      return b.qualityScore - a.qualityScore;
+    });
+    const toolOkCount = benchList.filter((b) => b.online && b.toolCallOk).length;
+    const benchIssuesCount = benchList.filter((b) => !b.online || !b.toolCallOk).length;
+    const benchVipCount = benchList.filter((b) => vipModelSet.has(normalizeModelId(b.model))).length;
+    const benchInUseCount = benchList.filter((b) => inUseModelSet.has(normalizeModelId(b.model))).length;
+    const filteredBenchList = React.useMemo(() => {
+      return benchList.filter((b) => {
+        if (benchFilter === "vip") return vipModelSet.has(normalizeModelId(b.model));
+        if (benchFilter === "in_use") return inUseModelSet.has(normalizeModelId(b.model));
+        if (benchFilter === "ok") return b.online && b.toolCallOk;
+        if (benchFilter === "issues") return !b.online || !b.toolCallOk;
+        return true;
+      });
+    }, [benchList, benchFilter, vipModelSet, inUseModelSet]);
     const handleRunQualityBench = async (scope) => {
       setBenchRunning(true);
+      setBenchScopeActive(scope);
       try {
         let targetModels = [];
-        if (scope === "vip_chain") {
-          targetModels = Array.from(
-            /* @__PURE__ */ new Set([...vipPolicy.vipFallbackChain || [], ...vipPolicy.vipModels || []])
-          ).slice(0, 6);
+        let scopeLabel = "";
+        if (scope === "vip_all") {
+          targetModels = allVipTargetModels;
+          scopeLabel = "VIPs (agentes VIP + marcados + cadeia)";
+        } else if (scope === "in_use") {
+          targetModels = allAgentActiveModels;
+          scopeLabel = "modelos em uso nos agentes";
         } else {
           const fromRank = ((rankingSnapshot == null ? void 0 : rankingSnapshot.models) || []).filter((r) => r.accessMode === "auto" && !r.isDisabled).slice(0, 8).map((r) => r.model);
           targetModels = fromRank.length > 0 ? fromRank : Object.values(groups).filter((g) => g.id !== "nexusmind_anthropic").map((g) => g.defaultModel);
+          scopeLabel = "Pool Auto (Top 8)";
         }
         if (targetModels.length === 0) {
-          onNotify({ type: "info", text: "Nenhum modelo elegível encontrado para benchmark." });
+          onNotify({ type: "info", text: `Nenhum modelo encontrado para testar em ${scopeLabel}.` });
           return;
         }
         const candidates = targetModels.map((m) => ({
           model: m,
-          group: inferCanonicalGroupForModel(m, groups)
+          group: resolveGroupForModel2(m)
         }));
-        setBenchProgress(`Testando 0/${candidates.length} (Tool-Calling + Stream)...`);
+        if (scope === "vip_all") setBenchFilter("vip");
+        else if (scope === "in_use") setBenchFilter("in_use");
+        else setBenchFilter("all");
+        setBenchProgress(`Testando 0/${candidates.length} (${scopeLabel})...`);
         const updated = await runBatchQualityBench(ctx, candidates, (done, total, latest) => {
           setBenchProgress(
-            `${done}/${total} · ${latest.model} (${latest.online ? `Score ${latest.qualityScore}` : latest.errorKind})`
+            `${done}/${total} · ${latest.model} (${latest.online ? latest.toolCallOk ? `TC OK · ${latest.qualityScore}` : `Sem TC · ${latest.qualityScore}` : latest.errorKind})`
           );
         });
         onUpdateQualityBench(updated);
+        await syncQualityBenchToOrgfyEval(ctx, updated);
+        const testedResults = targetModels.map((m) => updated[m]).filter(Boolean);
+        const okTc = testedResults.filter((r) => r.online && r.toolCallOk).length;
+        const failed = testedResults.filter((r) => !r.online || !r.toolCallOk).length;
         onNotify({
-          type: "success",
-          text: `Benchmark de qualidade concluído (${candidates.length} modelos testados).`
+          type: failed > 0 ? "info" : "success",
+          text: `Bench ${scopeLabel}: ${okTc}/${testedResults.length} OK em Tool-Calling${failed > 0 ? ` · ${failed} com falha` : ""}. Ranking e OrgFy sincronizados.`
         });
       } finally {
         setBenchRunning(false);
+        setBenchScopeActive(null);
         setBenchProgress("");
       }
+    };
+    const handleTestSingleBenchModel = async (modelId) => {
+      setSingleTestingModel(modelId);
+      try {
+        const grp = resolveGroupForModel2(modelId);
+        const res = await runModelQualityProbe(ctx, modelId, grp);
+        const next = { ...qualityBench || {}, [modelId]: res };
+        await saveQualityBench(ctx, next);
+        await syncQualityBenchToOrgfyEval(ctx, next);
+        onUpdateQualityBench(next);
+        onNotify({
+          type: res.online && res.toolCallOk ? "success" : "error",
+          text: res.online && res.toolCallOk ? `${modelId}: OK (Tool-Calling + ${res.latencyMs}ms · ${res.qualityScore}/100).` : `${modelId}: ${res.errorMsg || res.errorKind} (${res.qualityScore}/100).`
+        });
+      } finally {
+        setSingleTestingModel(null);
+      }
+    };
+    const handleClearBenchHistory = async () => {
+      await saveQualityBench(ctx, {});
+      onUpdateQualityBench({});
+      onNotify({ type: "info", text: "Histórico do benchmark limpo." });
     };
     const handleManualFailover = async (agent) => {
       setFailoverBusyAgent(agent.key);
@@ -3395,7 +3593,7 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
           h(
             "div",
             { style: { fontSize: "11px", color: "var(--nm-muted)" } },
-            `${vipPolicy.vipModels.length} modelos VIP · ${vipPolicy.blockedModels.length} bloqueados`
+            `${allVipTargetModels.length} modelos VIP (${vipAgentActiveModels.length} em uso · ${vipPolicy.vipModels.length} marcados)`
           )
         ),
         h(
@@ -3421,11 +3619,11 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
           h(
             "div",
             { style: { fontSize: "11px", color: "var(--nm-muted)" } },
-            benchProgress || "Valida tool_calls + stream + latência"
+            benchProgress || (benchIssuesCount > 0 ? `${benchIssuesCount} modelo(s) com erro ou sem TC` : "Valida tool_calls + stream + latência")
           )
         )
       ),
-      // 2. Controles do Autopiloto + Ações Rápidas
+      // 2. Controles do Autopiloto + Ações Rápidas (com escopos claros e contagens reais)
       h(
         "div",
         {
@@ -3494,10 +3692,25 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
               type: "button",
               className: "nm-btn",
               "data-variant": "primary",
-              disabled: benchRunning,
-              onClick: () => handleRunQualityBench("auto_top")
+              "data-bench-vip-all": "true",
+              disabled: benchRunning || allVipTargetModels.length === 0,
+              onClick: () => handleRunQualityBench("vip_all"),
+              title: `Testa todos os ${allVipTargetModels.length} modelos VIP: modelos atuais dos agentes VIP + marcados como VIP + cadeia de fallback`
             },
-            benchRunning ? "Testando..." : "Rodar Bench Qualidade (Top 8)"
+            benchRunning && benchScopeActive === "vip_all" ? "Testando VIPs..." : `Testar VIPs (${allVipTargetModels.length})`
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "soft",
+              "data-bench-in-use": "true",
+              disabled: benchRunning || allAgentActiveModels.length === 0,
+              onClick: () => handleRunQualityBench("in_use"),
+              title: `Testa todos os ${allAgentActiveModels.length} modelos distintos configurados nos agentes do Buzz agora`
+            },
+            benchRunning && benchScopeActive === "in_use" ? "Testando em uso..." : `Testar em Uso (${allAgentActiveModels.length})`
           ),
           h(
             "button",
@@ -3505,9 +3718,10 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
               type: "button",
               className: "nm-btn",
               disabled: benchRunning,
-              onClick: () => handleRunQualityBench("vip_chain")
+              onClick: () => handleRunQualityBench("auto_top"),
+              title: "Testa os 8 melhores candidatos do pool automático para workers"
             },
-            "Testar Cadeia VIP"
+            benchRunning && benchScopeActive === "auto_top" ? "Testando Pool..." : "Bench Pool Auto (Top 8)"
           )
         )
       ),
@@ -3574,7 +3788,7 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
           )
         )
       ),
-      // 4. Escudo VIP: Cadeia VIP + Agentes VIP vs Pool Automático
+      // 4. Escudo VIP: Cadeia VIP + Agentes VIP vs Pool Automático (com status ao vivo do bench por agente)
       h(
         "div",
         { className: "nm-card-pad", style: { display: "flex", flexDirection: "column", gap: "10px" } },
@@ -3601,28 +3815,49 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
             "Salvar Cadeia VIP"
           )
         ),
+        allVipTargetModels.length > 0 && h(
+          "div",
+          { style: { fontSize: "11px", color: "var(--nm-muted)", lineHeight: "1.45" } },
+          h("strong", { style: { color: "var(--nm-fg-secondary)", fontWeight: 600 } }, `Modelos incluídos em "Testar VIPs (${allVipTargetModels.length})": `),
+          h("span", { className: "nm-mono" }, allVipTargetModels.join(" · "))
+        ),
         buzzAgents.length > 0 && h(
           "div",
           { style: { display: "flex", flexWrap: "wrap", gap: "6px", paddingTop: "4px" } },
           buzzAgents.map((a) => {
             var _a;
             const vip = isVipAgent(a.name || a.key, vipPolicy);
+            const rawModel = String(((_a = a.config) == null ? void 0 : _a.model) || "padrão");
+            const shortModel = rawModel.split("/").pop() || rawModel;
+            const bench = findBenchForModel(rawModel);
+            const healthDotColor = !bench ? null : !bench.online ? "var(--nm-danger)" : bench.toolCallOk ? "var(--nm-ok)" : "var(--nm-warn)";
+            const healthTitle = !bench ? "Modelo ainda não testado no Bench" : !bench.online ? `Falha no Bench: ${bench.errorMsg || bench.errorKind}` : bench.toolCallOk ? `Bench OK · Tool-Calling válido (${bench.latencyMs ?? "?"}ms · ${bench.qualityScore}/100)` : `Respondeu mas falhou em Tool-Calling (${bench.qualityScore}/100)`;
             return h(
               "div",
               {
                 key: a.key,
                 className: "nm-surface",
+                title: healthTitle,
                 style: {
                   display: "inline-flex",
                   alignItems: "center",
                   gap: "7px",
                   padding: "4px 8px",
                   fontSize: "11px",
-                  borderColor: vip ? "var(--nm-warn-border)" : "var(--nm-border)"
+                  borderColor: bench && (!bench.online || !bench.toolCallOk) ? "var(--nm-danger)" : vip ? "var(--nm-warn-border)" : "var(--nm-border)"
                 }
               },
+              healthDotColor && h("span", {
+                style: {
+                  width: "7px",
+                  height: "7px",
+                  borderRadius: "999px",
+                  backgroundColor: healthDotColor,
+                  flexShrink: 0
+                }
+              }),
               h("span", { style: { fontWeight: 600 } }, a.name || a.key),
-              h("span", { className: "nm-mono", style: { fontSize: "10px", color: "var(--nm-muted)" } }, String(((_a = a.config) == null ? void 0 : _a.model) || "padrão").split("/").pop()),
+              h("span", { className: "nm-mono", style: { fontSize: "10px", color: "var(--nm-muted)" } }, shortModel),
               h(
                 "button",
                 {
@@ -3652,14 +3887,63 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
           })
         )
       ),
-      // 5. Resultados do Benchmark de Qualidade (Tool-Calling + Stream)
+      // 5. Resultados do Benchmark de Qualidade (Tool-Calling + Stream + Filtros + Re-testar)
       benchList.length > 0 && h(
         "div",
         { className: "nm-card", style: { overflowX: "auto" } },
         h(
           "div",
-          { style: { padding: "10px 14px", borderBottom: "1px solid var(--nm-border)", fontSize: "12px", fontWeight: 600 } },
-          `Benchmark de Qualidade Real (${benchList.length} modelos testados)`
+          {
+            style: {
+              padding: "10px 14px",
+              borderBottom: "1px solid var(--nm-border)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "8px"
+            }
+          },
+          h(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+            h("span", { style: { fontSize: "12px", fontWeight: 600 } }, `Benchmark de Qualidade Real (${filteredBenchList.length}/${benchList.length})`),
+            h(
+              "div",
+              { className: "nm-segmented" },
+              [
+                { id: "all", label: `Todos (${benchList.length})` },
+                { id: "vip", label: `VIPs (${benchVipCount})` },
+                { id: "in_use", label: `Em uso (${benchInUseCount})` },
+                { id: "ok", label: `TC OK (${toolOkCount})` },
+                { id: "issues", label: `Com problema (${benchIssuesCount})` }
+              ].map(
+                (tab) => h(
+                  "button",
+                  {
+                    key: tab.id,
+                    type: "button",
+                    className: "nm-seg-btn",
+                    "data-active": benchFilter === tab.id ? "true" : "false",
+                    onClick: () => setBenchFilter(tab.id),
+                    style: { fontSize: "10.5px", padding: "3px 7px" }
+                  },
+                  tab.label
+                )
+              )
+            )
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "ghost",
+              onClick: handleClearBenchHistory,
+              style: { fontSize: "11px", padding: "3px 8px" }
+            },
+            "Limpar histórico"
+          )
         ),
         h(
           "table",
@@ -3670,7 +3954,7 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
             h(
               "tr",
               null,
-              ["Modelo", "Qualidade", "Tool-Call", "Stream", "Latência", "Status / Erro"].map(
+              ["Modelo", "Escopo", "Qualidade", "Tool-Call", "Stream", "Latência", "Status / Erro", "Ação"].map(
                 (col) => h("th", { key: col }, col)
               )
             )
@@ -3678,14 +3962,47 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
           h(
             "tbody",
             null,
-            benchList.slice(0, 16).map(
-              (b) => h(
+            filteredBenchList.length === 0 ? h(
+              "tr",
+              null,
+              h("td", { colSpan: 8, style: { padding: "18px", textAlign: "center", color: "var(--nm-muted)", fontSize: "11.5px" } }, "Nenhum modelo testado neste filtro.")
+            ) : filteredBenchList.slice(0, 30).map((b) => {
+              const isVipM = vipModelSet.has(normalizeModelId(b.model));
+              const isInUseM = inUseModelSet.has(normalizeModelId(b.model));
+              const isTestingThis = singleTestingModel === b.model;
+              return h(
                 "tr",
                 { key: b.model },
-                h("td", { className: "nm-mono", style: { fontWeight: 500 } }, b.model),
                 h(
                   "td",
-                  { className: "nm-mono nm-num", style: { fontWeight: 700, color: b.qualityScore >= 75 ? "var(--nm-ok)" : b.qualityScore >= 40 ? "var(--nm-warn)" : "var(--nm-danger)" } },
+                  { className: "nm-mono", style: { fontWeight: 500 } },
+                  h("span", null, b.model),
+                  h(
+                    "span",
+                    { style: { marginLeft: "6px", fontSize: "10px", color: "var(--nm-muted)" } },
+                    String(b.group || "").replace("nexusmind_", "")
+                  )
+                ),
+                h(
+                  "td",
+                  null,
+                  h(
+                    "div",
+                    { style: { display: "flex", gap: "4px", flexWrap: "wrap" } },
+                    isVipM && h("span", { className: "nm-pill", "data-tone": "warn", style: { fontSize: "9.5px" } }, "VIP"),
+                    isInUseM && h("span", { className: "nm-pill", "data-tone": "info", style: { fontSize: "9.5px" } }, "Em uso"),
+                    !isVipM && !isInUseM && h("span", { style: { fontSize: "10px", color: "var(--nm-muted)" } }, "Pool")
+                  )
+                ),
+                h(
+                  "td",
+                  {
+                    className: "nm-mono nm-num",
+                    style: {
+                      fontWeight: 700,
+                      color: b.qualityScore >= 75 ? "var(--nm-ok)" : b.qualityScore >= 40 ? "var(--nm-warn)" : "var(--nm-danger)"
+                    }
+                  },
                   `${b.qualityScore}/100`
                 ),
                 h(
@@ -3699,9 +4016,24 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
                   h("span", { className: "nm-pill", "data-tone": b.streamOk ? "ok" : "danger" }, b.streamOk ? "Íntegro" : "Corte")
                 ),
                 h("td", { className: "nm-mono nm-num", style: { color: "var(--nm-muted)" } }, b.latencyMs !== null ? `${b.latencyMs}ms` : "—"),
-                h("td", { style: { fontSize: "11px", color: b.online ? "var(--nm-muted)" : "var(--nm-danger)" } }, b.errorMsg || "Saudável")
-              )
-            )
+                h("td", { style: { fontSize: "11px", color: b.online ? "var(--nm-muted)" : "var(--nm-danger)" } }, b.errorMsg || "Saudável"),
+                h(
+                  "td",
+                  null,
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      className: "nm-btn",
+                      disabled: isTestingThis || benchRunning,
+                      onClick: () => handleTestSingleBenchModel(b.model),
+                      style: { padding: "3px 7px", fontSize: "10px" }
+                    },
+                    isTestingThis ? "..." : "Re-testar"
+                  )
+                )
+              );
+            })
           )
         )
       ),

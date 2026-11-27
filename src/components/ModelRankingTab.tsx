@@ -54,10 +54,16 @@ function fmtMs(ms: number | null | undefined): string {
   return `${Math.round(ms)}ms`;
 }
 
-function fmtCost(usd: number): string {
-  if (!Number.isFinite(usd) || usd <= 0) return "$0";
-  if (usd < 0.001) return `$${(usd * 1000).toFixed(2)}/1k`;
-  return `$${usd.toFixed(4)}`;
+function fmtCost(usd: number, opts?: { isFree?: boolean; estimatedProbeUsd?: number | null }): string {
+  if (opts?.isFree) return "FREE";
+  if (Number.isFinite(usd) && usd > 0) {
+    if (usd < 0.001) return `$${(usd * 1000).toFixed(2)}/1k`;
+    return `$${usd.toFixed(4)}`;
+  }
+  if (typeof opts?.estimatedProbeUsd === "number" && opts.estimatedProbeUsd > 0) {
+    return `~$${opts.estimatedProbeUsd.toFixed(4)}`;
+  }
+  return "—";
 }
 
 export function createModelRankingTabComponent(
@@ -688,8 +694,8 @@ export function createModelRankingTabComponent(
                       row.quarantined ? "Quarentena" : healthLabel
                     ),
                     h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-secondary, #c7c7c7)" } }, row.calls > 0 ? row.calls.toLocaleString("pt-BR") : "—"),
-                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs)),
-                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd)),
+                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtMs(row.avgFirstTokenMs ?? row.avgDurationMs ?? row.pingLatencyMs)),
+                    h("td", { style: { padding: "8px 12px", fontFamily: "monospace", color: "var(--text-tertiary, #a4a4a4)" } }, fmtCost(row.avgCostUsd, { isFree: row.isFree, estimatedProbeUsd: qualityBench?.[row.model]?.estimatedCostUsd ?? null })),
                     h(
                       "td",
                       { style: { padding: "8px 12px", whiteSpace: "nowrap" } },
