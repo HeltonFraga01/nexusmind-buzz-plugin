@@ -45,7 +45,7 @@ const mockCtx = {
           body: JSON.stringify({
             data: [
               { id: "qwen/qwen3:free" },
-              { id: "gemini-3.8-flash-medium" },
+              { id: "gemini-2.5-flash" },
               { id: "claude-opus-4-6-thinking" },
             ],
           }),
@@ -89,7 +89,7 @@ const groups = {
     groupName: "Antigravity-Saldo",
     displayName: "NexusMind Anti-Gravity",
     defaultKey: "sk-test",
-    defaultModel: "gemini-3.8-flash-medium",
+    defaultModel: "gemini-2.5-flash",
     defaultCtx: 1048576,
     defaultOut: 65536,
   },
@@ -97,7 +97,7 @@ const groups = {
 
 const bestFast = await nmMod.selectBestModelByTier(mockCtx, groups, { tier: "tier1_fast" });
 assert.equal(bestFast.ok, true);
-assert.equal(bestFast.selectedModel, "gemini-3.8-flash-medium");
+assert.equal(bestFast.selectedModel, "gemini-2.5-flash");
 assert.equal(bestFast.ranking.some((r) => r.isFree), false, "avoid_free=true deve excluir modelos :free por padrão");
 
 const applied = await nmMod.applyBestModelToAgent(mockCtx, groups, {
