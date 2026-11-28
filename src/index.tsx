@@ -16,6 +16,13 @@ import {
 import { createModelRankingTabComponent } from "./components/ModelRankingTab";
 import { createNexusMindAgentsTabComponent } from "./components/NexusMindAgentsTab";
 import { createAutopilotFailoverTabComponent } from "./components/AutopilotFailoverTab";
+import { createLocalRouterTabComponent } from "./components/LocalRouterTab";
+import {
+  getRouterHealth,
+  getRouterMetrics,
+  registerRouterProviderViaPlugin,
+  resetRouterCircuits,
+} from "./services/local-router";
 import { NEXUSMIND_THEME_CSS } from "./styles/nexusmind-theme";
 import {
   type ModelAccessMode,
@@ -795,8 +802,8 @@ export function apply(ctx: Context) {
       Record<string, { status: "testing" | "ok" | "error"; latency?: number; errorMsg?: string }>
     >({});
 
-    // Primary Workspace Section (Modelos | Ranking & Roteamento | Autopiloto & VIP | Agentes Buzz)
-    const [activeSection, setActiveSection] = React.useState<"catalog" | "ranking" | "autopilot" | "agents">("catalog");
+    // Primary Workspace Section (Modelos | Ranking & Roteamento | Roteador Local | Autopiloto & VIP | Agentes Buzz)
+    const [activeSection, setActiveSection] = React.useState<"catalog" | "ranking" | "router" | "autopilot" | "agents">("catalog");
     const [showGatewayDetails, setShowGatewayDetails] = React.useState<boolean>(false);
     const [vipPolicy, setVipPolicy] = React.useState<VipPolicyConfig>(() => loadVipPolicy());
     const [autopilotCfg, setAutopilotCfg] = React.useState<AutopilotConfig>(() => loadAutopilotConfig());
@@ -809,6 +816,10 @@ export function apply(ctx: Context) {
 
     const ModelRankingTab = React.useMemo(
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS as any),
+      []
+    );
+    const LocalRouterTab = React.useMemo(
+      () => createLocalRouterTabComponent(ctx),
       []
     );
     const NexusMindAgentsTab = React.useMemo(
@@ -1846,6 +1857,7 @@ print("SYNC_SUCCESS")
             args: [pythonSyncScript],
           });
           await proc.exited;
+          await registerRouterProviderViaPlugin(ctx).catch(() => {});
         }
 
         const now = new Date().toLocaleTimeString("pt-BR", {
@@ -2287,6 +2299,7 @@ print("SYNC_SUCCESS")
                   [
                     { id: "catalog", label: "Modelos" },
                     { id: "ranking", label: "Ranking & Roteamento" },
+                    { id: "router", label: "Roteador Local" },
                     {
                       id: "autopilot",
                       label:
@@ -2304,7 +2317,7 @@ print("SYNC_SUCCESS")
                         type: "button",
                         className: "nm-seg-btn",
                         "data-active": active ? "true" : "false",
-                        onClick: () => setActiveSection(tab.id as "catalog" | "ranking" | "autopilot" | "agents"),
+                        onClick: () => setActiveSection(tab.id as "catalog" | "ranking" | "router" | "autopilot" | "agents"),
                       },
                       tab.label
                     );
@@ -2431,6 +2444,10 @@ print("SYNC_SUCCESS")
                   qualityBench,
                   onUpdateQualityBench: setQualityBench,
                   quarantines,
+                })
+              : activeSection === "router"
+              ? h(LocalRouterTab, {
+                  onNotify: setStatusMessage,
                 })
               : activeSection === "autopilot"
               ? h(AutopilotFailoverTab, {
@@ -4163,7 +4180,33 @@ Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model 
         },
       });
 
-      console.log("[NEXUSMIND] 8 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
+      (ctx.agents as any).addTool({
+        name: "nexusmind_router_status",
+        description: "Consulta saúde, métricas reais (taxa de sucesso, hops, latência p50, circuitos abertos) ou reseta os Circuit Breakers do Roteador Local NexusMind (porta 4199).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              enum: ["status", "metrics", "reset_circuits"],
+              description: "Ação desejada (default: 'status')",
+            },
+          },
+        },
+        call: async (_client: any, _context: any, args: any) => {
+          const action = String(args?.action || "status");
+          if (action === "reset_circuits") {
+            return JSON.stringify(await resetRouterCircuits(ctx), null, 2);
+          }
+          if (action === "metrics") {
+            return JSON.stringify(await getRouterMetrics(ctx), null, 2);
+          }
+          const [health, metrics] = await Promise.all([getRouterHealth(ctx), getRouterMetrics(ctx)]);
+          return JSON.stringify({ health, metrics }, null, 2);
+        },
+      });
+
+      console.log("[NEXUSMIND] 9 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar agentTools:", err);
     }

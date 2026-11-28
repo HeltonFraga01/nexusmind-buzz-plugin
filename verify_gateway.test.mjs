@@ -22,7 +22,7 @@ nmMod.apply({
   host: {},
 });
 
-assert.equal(tools.size, 8, "devem existir exatamente 8 agentTools no NexusMind Gateway v3.0");
+assert.equal(tools.size, 9, "devem existir exatamente 9 agentTools no NexusMind Gateway v3.1");
 assert.ok(tools.has("nexusmind_models"));
 assert.ok(tools.has("nexusmind_status"));
 assert.ok(tools.has("nexusmind_best_model"));
@@ -31,6 +31,7 @@ assert.ok(tools.has("nexusmind_model_ranking"));
 assert.ok(tools.has("nexusmind_failover_agent"));
 assert.ok(tools.has("nexusmind_quality_bench"));
 assert.ok(tools.has("nexusmind_vip_policy"));
+assert.ok(tools.has("nexusmind_router_status"));
 assert.ok(registeredProvider && registeredProvider.id === "nexusmind-fast", "DecisionProvider 'nexusmind-fast' deve ser registrado");
 
 // 2. Testar selectBestModelByTier evitando :free por padrão e elegendo tier1_fast / tier3_frontier

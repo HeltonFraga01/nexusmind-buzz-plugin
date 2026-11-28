@@ -4373,6 +4373,828 @@ function createAutopilotFailoverTabComponent(ctx, groups) {
     );
   };
 }
+const LOCAL_ROUTER_HOST = "127.0.0.1";
+const LOCAL_ROUTER_PORT = 4199;
+const LOCAL_ROUTER_BASE_URL = `http://${LOCAL_ROUTER_HOST}:${LOCAL_ROUTER_PORT}`;
+const LOCAL_ROUTER_TELEMETRY_PATH = "~/.buzz/.scratch/router-telemetry.jsonl";
+function parseJsonSafe(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+async function runRouterCliFlag(ctx, flag) {
+  var _a;
+  if (!((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.spawn)) {
+    throw new Error("ctx.host.spawn indisponível neste runtime.");
+  }
+  const pyCode = [
+    "import os, sys, subprocess",
+    "script = os.path.expanduser('~/.buzz/REPOS/nexusmind-buzz-plugin/scripts/local_router.py')",
+    `res = subprocess.run([sys.executable, script, ${JSON.stringify(flag)}], capture_output=True, text=True)`,
+    "print(res.stdout or res.stderr)",
+    "sys.exit(res.returncode)"
+  ].join("\n");
+  let stdout = "";
+  const proc = await ctx.host.spawn("python", {
+    args: [pyCode],
+    onStdout: (chunk) => {
+      stdout += chunk;
+    }
+  });
+  const code = Number(await proc.exited);
+  return { code, stdout: stdout.trim() };
+}
+async function getRouterHealth(ctx) {
+  var _a;
+  if (!((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request)) {
+    return {
+      online: false,
+      open_circuits: {},
+      open_provider_circuits: {},
+      tierFallbackGroups: {},
+      error: "ctx.host.request indisponível"
+    };
+  }
+  try {
+    const res = await ctx.host.request({
+      url: `${LOCAL_ROUTER_BASE_URL}/health`,
+      method: "GET",
+      headers: { Accept: "application/json" },
+      timeoutMs: 3e3
+    });
+    const data = parseJsonSafe(res.body);
+    if (res.status === 200 && (data == null ? void 0 : data.ok)) {
+      return {
+        online: true,
+        service: data.service,
+        version: data.version || "1.x",
+        pid: data.pid,
+        uptime_sec: data.uptime_sec,
+        stats: data.stats,
+        open_circuits: data.open_circuits || {},
+        open_provider_circuits: data.open_provider_circuits || {},
+        vip_sticky_policy: data.vip_sticky_policy,
+        tierFallbackGroups: data.tierFallbackGroups || {}
+      };
+    }
+    return {
+      online: false,
+      open_circuits: {},
+      open_provider_circuits: {},
+      tierFallbackGroups: {},
+      error: `HTTP ${res.status}`
+    };
+  } catch (err) {
+    return {
+      online: false,
+      open_circuits: {},
+      open_provider_circuits: {},
+      tierFallbackGroups: {},
+      error: (err == null ? void 0 : err.message) || "Roteador local offline na porta 4199"
+    };
+  }
+}
+async function getRouterMetrics(ctx) {
+  var _a, _b;
+  if ((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request) {
+    try {
+      const res = await ctx.host.request({
+        url: `${LOCAL_ROUTER_BASE_URL}/metrics`,
+        method: "GET",
+        headers: { Accept: "application/json" },
+        timeoutMs: 4e3
+      });
+      const data = parseJsonSafe(res.body);
+      if (res.status === 200 && (data == null ? void 0 : data.ok)) {
+        return {
+          online: true,
+          window_size: Number(data.window_size || 0),
+          ok_count: Number(data.ok_count || 0),
+          failed_count: Number(data.failed_count || 0),
+          success_rate_pct: Number(data.success_rate_pct ?? 100),
+          hops_recovered: Number(data.hops_recovered || 0),
+          p50_latency_ms: Number(data.p50_latency_ms || 0),
+          by_tier: data.by_tier || {},
+          by_model: data.by_model || {},
+          absorbed_errors: data.absorbed_errors || {},
+          open_circuits: data.open_circuits || {},
+          open_provider_circuits: data.open_provider_circuits || {},
+          recent_events: Array.isArray(data.recent_events) ? data.recent_events : []
+        };
+      }
+    } catch {
+    }
+  }
+  if (typeof ((_b = ctx == null ? void 0 : ctx.host) == null ? void 0 : _b.readFile) === "function") {
+    for (const p of [
+      LOCAL_ROUTER_TELEMETRY_PATH,
+      "/Users/heltonfraga/.buzz/.scratch/router-telemetry.jsonl"
+    ]) {
+      try {
+        const raw = await ctx.host.readFile(p);
+        if (!raw) continue;
+        const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+        const lines = text.split("\n").filter((l) => l.trim().length > 0).slice(-300);
+        const events = [];
+        for (const l of lines) {
+          const parsed = parseJsonSafe(l);
+          if (parsed) events.push(parsed);
+        }
+        const okCount = events.filter((e) => Number(e.status) === 200).length;
+        const hops = events.filter((e) => Number(e.status) === 200 && Number(e.hop) > 0).length;
+        const lats = events.map((e) => Number(e.latency_ms || 0)).filter((n) => n > 0).sort((a, b) => a - b);
+        const p50 = lats.length > 0 ? lats[Math.floor(lats.length / 2)] : 0;
+        const byTier = {};
+        const byModel = {};
+        const absorbed = {};
+        for (const ev of events) {
+          const t = String(ev.requested_model || "unknown");
+          byTier[t] = (byTier[t] || 0) + 1;
+          if (ev.actual_model) {
+            const mk = `${ev.actual_model} (${ev.provider || "nexusmind"})`;
+            byModel[mk] = (byModel[mk] || 0) + 1;
+          }
+          for (const fa of ev.failed_attempts || []) {
+            const ak = `${fa.model} HTTP ${fa.status}`;
+            absorbed[ak] = (absorbed[ak] || 0) + 1;
+          }
+        }
+        return {
+          online: false,
+          window_size: events.length,
+          ok_count: okCount,
+          failed_count: events.length - okCount,
+          success_rate_pct: events.length > 0 ? Math.round(okCount / events.length * 1e4) / 100 : 100,
+          hops_recovered: hops,
+          p50_latency_ms: p50,
+          by_tier: byTier,
+          by_model: byModel,
+          absorbed_errors: absorbed,
+          open_circuits: {},
+          open_provider_circuits: {},
+          recent_events: events.slice(-20).reverse()
+        };
+      } catch {
+      }
+    }
+  }
+  return {
+    online: false,
+    window_size: 0,
+    ok_count: 0,
+    failed_count: 0,
+    success_rate_pct: 100,
+    hops_recovered: 0,
+    p50_latency_ms: 0,
+    by_tier: {},
+    by_model: {},
+    absorbed_errors: {},
+    open_circuits: {},
+    open_provider_circuits: {},
+    recent_events: []
+  };
+}
+async function resetRouterCircuits(ctx) {
+  var _a;
+  if (!((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request)) {
+    return { ok: false, message: "ctx.host.request indisponível." };
+  }
+  try {
+    const res = await ctx.host.request({
+      url: `${LOCAL_ROUTER_BASE_URL}/circuits/reset`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      timeoutMs: 4e3
+    });
+    const data = parseJsonSafe(res.body);
+    if (res.status === 200 && (data == null ? void 0 : data.ok)) {
+      return {
+        ok: true,
+        message: `Circuitos limpos: ${data.models_cleared ?? 0} modelo(s) e ${data.providers_cleared ?? 0} provedor(es).`
+      };
+    }
+    return { ok: false, message: `Falha ao limpar circuitos (HTTP ${res.status}).` };
+  } catch (err) {
+    return { ok: false, message: (err == null ? void 0 : err.message) || "Roteador local não respondeu." };
+  }
+}
+async function startOrRestartLocalRouter(ctx) {
+  try {
+    const { code } = await runRouterCliFlag(ctx, "--start-daemon");
+    if (code !== 0) {
+      return { ok: false, message: `Falha ao iniciar roteador (exit ${code}).` };
+    }
+    await new Promise((r) => setTimeout(r, 900));
+    const health = await getRouterHealth(ctx);
+    if (health.online) {
+      return {
+        ok: true,
+        message: `Roteador Local v${health.version || "2.0"} ativo na porta ${LOCAL_ROUTER_PORT} (PID ${health.pid || "-"}).`
+      };
+    }
+    return {
+      ok: false,
+      message: "Processo disparado, mas /health ainda não respondeu. Verifique ~/.buzz/.scratch/local-router.log."
+    };
+  } catch (err) {
+    return { ok: false, message: `Erro ao iniciar roteador: ${(err == null ? void 0 : err.message) || String(err)}` };
+  }
+}
+async function stopLocalRouter(ctx) {
+  try {
+    const { code } = await runRouterCliFlag(ctx, "--stop-daemon");
+    return code === 0 ? { ok: true, message: "Roteador local parado." } : { ok: false, message: `Falha ao parar roteador (exit ${code}).` };
+  } catch (err) {
+    return { ok: false, message: `Erro ao parar roteador: ${(err == null ? void 0 : err.message) || String(err)}` };
+  }
+}
+async function registerRouterProviderViaPlugin(ctx) {
+  try {
+    const { code, stdout } = await runRouterCliFlag(ctx, "--register-provider");
+    if (code === 0) {
+      return { ok: true, message: "Provedor nexusmind_router registrado no Goose e no Pi." };
+    }
+    return { ok: false, message: `Falha ao registrar provedor (exit ${code}): ${stdout.slice(0, 140)}` };
+  } catch (err) {
+    return { ok: false, message: `Erro ao registrar provedor: ${(err == null ? void 0 : err.message) || String(err)}` };
+  }
+}
+async function installRouterLaunchAgent(ctx) {
+  try {
+    const { code, stdout } = await runRouterCliFlag(ctx, "--install-launchagent");
+    const parsed = parseJsonSafe(stdout);
+    if (code === 0 && (parsed == null ? void 0 : parsed.ok)) {
+      return {
+        ok: true,
+        message: parsed.loaded ? `LaunchAgent instalado e ativo (${parsed.label}). Sobrevive a reinícios do Mac.` : `Plist gravado em ${parsed.plist_path}. Execute launchctl bootstrap se necessário.`
+      };
+    }
+    return { ok: false, message: `Falha ao instalar LaunchAgent (exit ${code}).` };
+  } catch (err) {
+    return { ok: false, message: `Erro ao instalar LaunchAgent: ${(err == null ? void 0 : err.message) || String(err)}` };
+  }
+}
+async function testRouterTier(ctx, tierId) {
+  var _a;
+  const t0 = Date.now();
+  if (!((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request)) {
+    return {
+      tier: tierId,
+      ok: false,
+      status: 0,
+      actualModel: null,
+      provider: null,
+      hop: 0,
+      latencyMs: 0,
+      error: "ctx.host.request indisponível"
+    };
+  }
+  try {
+    const res = await ctx.host.request({
+      url: `${LOCAL_ROUTER_BASE_URL}/v1/chat/completions`,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer local-router-key"
+      },
+      body: JSON.stringify({
+        model: tierId,
+        messages: [{ role: "user", content: "Responda apenas OK" }],
+        max_tokens: 4
+      }),
+      timeoutMs: 25e3
+    });
+    const latencyMs = Date.now() - t0;
+    const headers = {};
+    for (const [k, v] of Object.entries(res.headers || {})) {
+      headers[k.toLowerCase()] = String(v);
+    }
+    return {
+      tier: tierId,
+      ok: res.status === 200,
+      status: res.status,
+      actualModel: headers["x-nexusmind-actual-model"] || null,
+      provider: headers["x-nexusmind-provider"] || null,
+      hop: Number(headers["x-nexusmind-fallback-hop"] || 0),
+      latencyMs,
+      error: res.status === 200 ? void 0 : String(res.body || `HTTP ${res.status}`).slice(0, 140)
+    };
+  } catch (err) {
+    return {
+      tier: tierId,
+      ok: false,
+      status: 0,
+      actualModel: null,
+      provider: null,
+      hop: 0,
+      latencyMs: Date.now() - t0,
+      error: (err == null ? void 0 : err.message) || "Falha de rede"
+    };
+  }
+}
+const TIER_DISPLAY = [
+  { alias: "tier/vip-iris", groupKey: "group/vip-iris", label: "VIP Iris (CEO)", badge: "Sticky Retry 2×5s" },
+  { alias: "tier/diretoria", groupKey: "group/vip-leadership", label: "Diretoria & Conselho" },
+  { alias: "tier/frontier", groupKey: "group/frontier", label: "Frontier / Arquitetura" },
+  { alias: "tier/reasoning", groupKey: "group/reasoning", label: "Raciocínio / QA" },
+  { alias: "tier/code", groupKey: "group/code", label: "Código / Dev" },
+  { alias: "tier/fast", groupKey: "group/fast", label: "Rápido / Operações" }
+];
+function formatUptime(sec) {
+  if (!sec || sec < 0) return "—";
+  if (sec < 60) return `${Math.round(sec)}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor(sec % 3600 / 60);
+  return `${h}h ${m}m`;
+}
+function formatShortTime(ts) {
+  if (!ts) return "—";
+  try {
+    return new Date(ts).toLocaleTimeString("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  } catch {
+    return ts.slice(11, 19) || "—";
+  }
+}
+function createLocalRouterTabComponent(ctx) {
+  const React = ctx.react;
+  const h = React.createElement;
+  return function LocalRouterTab(props) {
+    const [health, setHealth] = React.useState(null);
+    const [metrics, setMetrics] = React.useState(null);
+    const [busyAction, setBusyAction] = React.useState(null);
+    const [tierProbes, setTierProbes] = React.useState({});
+    const [testingTier, setTestingTier] = React.useState(null);
+    const refreshAll = React.useCallback(async () => {
+      const [hRes, mRes] = await Promise.all([getRouterHealth(ctx), getRouterMetrics(ctx)]);
+      setHealth(hRes);
+      setMetrics(mRes);
+    }, []);
+    React.useEffect(() => {
+      void refreshAll();
+      const timer = setInterval(() => {
+        void refreshAll();
+      }, 8e3);
+      return () => clearInterval(timer);
+    }, [refreshAll]);
+    const runAction = async (actionId, fn) => {
+      var _a;
+      setBusyAction(actionId);
+      try {
+        const res = await fn();
+        (_a = props.onNotify) == null ? void 0 : _a.call(props, { type: res.ok ? "success" : "error", text: res.message });
+        await refreshAll();
+      } finally {
+        setBusyAction(null);
+      }
+    };
+    const handleProbeTier = async (tierAlias) => {
+      var _a;
+      setTestingTier(tierAlias);
+      try {
+        const res = await testRouterTier(ctx, tierAlias);
+        setTierProbes((prev) => ({ ...prev, [tierAlias]: res }));
+        (_a = props.onNotify) == null ? void 0 : _a.call(props, {
+          type: res.ok ? "success" : "error",
+          text: res.ok ? `${tierAlias} → ${res.actualModel || "OK"} (${res.provider || "router"}, hop ${res.hop}, ${res.latencyMs}ms)` : `${tierAlias} falhou: ${res.error || `HTTP ${res.status}`}`
+        });
+        await refreshAll();
+      } finally {
+        setTestingTier(null);
+      }
+    };
+    const isOnline = Boolean(health == null ? void 0 : health.online);
+    const openModelCircuits = (health == null ? void 0 : health.open_circuits) || {};
+    const openProviderCircuits = (health == null ? void 0 : health.open_provider_circuits) || {};
+    const totalOpenCircuits = Object.keys(openModelCircuits).length + Object.keys(openProviderCircuits).length;
+    const absorbedEntries = Object.entries((metrics == null ? void 0 : metrics.absorbed_errors) || {});
+    const totalAbsorbed = absorbedEntries.reduce((acc, [, n]) => acc + Number(n || 0), 0);
+    return h(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: "14px" } },
+      // 1. Barra de Controle do Daemon Local
+      h(
+        "div",
+        {
+          className: "nm-surface",
+          style: {
+            padding: "12px 14px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "10px"
+          }
+        },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" } },
+          h(
+            "span",
+            {
+              className: "nm-pill",
+              "data-tone": isOnline ? "ok" : "err",
+              style: { fontSize: "11px", fontWeight: 600 }
+            },
+            isOnline ? "Online" : "Offline"
+          ),
+          h(
+            "span",
+            { className: "nm-mono", style: { fontSize: "12px", fontWeight: 600, color: "var(--nm-fg)" } },
+            LOCAL_ROUTER_BASE_URL
+          ),
+          isOnline && h(
+            "span",
+            { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `v${(health == null ? void 0 : health.version) || "2.0"} · PID ${(health == null ? void 0 : health.pid) || "—"} · Uptime ${formatUptime(health == null ? void 0 : health.uptime_sec)}`
+          )
+        ),
+        h(
+          "div",
+          { style: { display: "flex", gap: "6px", flexWrap: "wrap" } },
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "primary",
+              disabled: busyAction !== null,
+              onClick: () => runAction("start", () => startOrRestartLocalRouter(ctx))
+            },
+            busyAction === "start" ? "Iniciando..." : isOnline ? "Reiniciar" : "Iniciar Roteador"
+          ),
+          isOnline && h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              disabled: busyAction !== null,
+              onClick: () => runAction("stop", () => stopLocalRouter(ctx))
+            },
+            busyAction === "stop" ? "Parando..." : "Parar"
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              disabled: busyAction !== null || !isOnline,
+              onClick: () => runAction("reset", () => resetRouterCircuits(ctx))
+            },
+            busyAction === "reset" ? "Limpando..." : "Resetar Circuitos"
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              disabled: busyAction !== null,
+              onClick: () => runAction("register", () => registerRouterProviderViaPlugin(ctx))
+            },
+            busyAction === "register" ? "Registrando..." : "Registrar Goose & Pi"
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              disabled: busyAction !== null,
+              onClick: () => runAction("launchagent", () => installRouterLaunchAgent(ctx))
+            },
+            busyAction === "launchagent" ? "Instalando..." : "Auto-Start macOS"
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "ghost",
+              onClick: () => void refreshAll()
+            },
+            "Atualizar"
+          )
+        )
+      ),
+      // 2. KPI Strip (4 cards)
+      h(
+        "div",
+        { className: "nm-kpi-grid" },
+        h(
+          "div",
+          { className: "nm-kpi-card" },
+          h("span", { className: "nm-kpi-label" }, "TAXA DE SUCESSO"),
+          h(
+            "div",
+            { className: "nm-kpi-val" },
+            `${((metrics == null ? void 0 : metrics.success_rate_pct) ?? 100).toFixed(1)}%`
+          ),
+          h(
+            "div",
+            { className: "nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `${(metrics == null ? void 0 : metrics.ok_count) ?? 0}/${(metrics == null ? void 0 : metrics.window_size) ?? 0} HTTP 200 · ${(metrics == null ? void 0 : metrics.failed_count) ?? 0} falhas`
+          )
+        ),
+        h(
+          "div",
+          { className: "nm-kpi-card" },
+          h("span", { className: "nm-kpi-label" }, "RECUPERAÇÕES EM VOO"),
+          h("div", { className: "nm-kpi-val" }, String((metrics == null ? void 0 : metrics.hops_recovered) ?? 0)),
+          h(
+            "div",
+            { className: "nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `${totalAbsorbed} erro(s) upstream absorvidos`
+          )
+        ),
+        h(
+          "div",
+          { className: "nm-kpi-card" },
+          h("span", { className: "nm-kpi-label" }, "LATÊNCIA MEDIANA (P50)"),
+          h(
+            "div",
+            { className: "nm-kpi-val" },
+            (metrics == null ? void 0 : metrics.p50_latency_ms) ? `${(metrics.p50_latency_ms / 1e3).toFixed(2)}s` : "—"
+          ),
+          h(
+            "div",
+            { className: "nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `SSE Keepalive 15s · Hot-path determinístico`
+          )
+        ),
+        h(
+          "div",
+          { className: "nm-kpi-card" },
+          h("span", { className: "nm-kpi-label" }, "CIRCUITOS ABERTOS"),
+          h("div", { className: "nm-kpi-val" }, String(totalOpenCircuits)),
+          h(
+            "div",
+            { className: "nm-num", style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `${Object.keys(openModelCircuits).length} modelo(s) · ${Object.keys(openProviderCircuits).length} provedor(es)`
+          )
+        )
+      ),
+      // 3. Circuitos Abertos (apenas se houver algum em cooldown)
+      totalOpenCircuits > 0 && h(
+        "div",
+        {
+          className: "nm-surface",
+          style: {
+            padding: "12px 14px",
+            borderColor: "var(--nm-warn-border)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px"
+          }
+        },
+        h(
+          "div",
+          { style: { fontSize: "12px", fontWeight: 600, color: "var(--nm-warn)" } },
+          "Circuit Breakers Ativos (Cooldown 180s)"
+        ),
+        h(
+          "div",
+          { style: { display: "flex", flexWrap: "wrap", gap: "8px" } },
+          ...Object.entries(openProviderCircuits).map(
+            ([prov, info]) => h(
+              "span",
+              {
+                key: `prov-${prov}`,
+                className: "nm-pill",
+                "data-tone": "err",
+                title: info.reason
+              },
+              `PROVEDOR ${prov} · ${Math.round(info.remaining_sec)}s`
+            )
+          ),
+          ...Object.entries(openModelCircuits).map(
+            ([mod, info]) => h(
+              "span",
+              {
+                key: `mod-${mod}`,
+                className: "nm-pill",
+                "data-tone": "warn",
+                title: info.reason
+              },
+              `${mod} · ${Math.round(info.remaining_sec)}s`
+            )
+          )
+        )
+      ),
+      // 4. Escadas Ativas por Tier (Top-5 do Control Plane)
+      h(
+        "div",
+        {
+          className: "nm-surface",
+          style: { padding: "12px 14px", display: "flex", flexDirection: "column", gap: "10px" }
+        },
+        h(
+          "div",
+          { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+          h(
+            "span",
+            { style: { fontSize: "13px", fontWeight: 600, color: "var(--nm-fg)" } },
+            "Escadas de Failover por Tier (model-control-plane.json)"
+          ),
+          h(
+            "span",
+            { style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            "Priority routing (preserva Prompt Cache) · Intercalação entre provedores"
+          )
+        ),
+        h(
+          "div",
+          { style: { display: "flex", flexDirection: "column", gap: "8px" } },
+          TIER_DISPLAY.map((tier) => {
+            var _a;
+            const ladder = ((_a = health == null ? void 0 : health.tierFallbackGroups) == null ? void 0 : _a[tier.groupKey]) || [];
+            const probe = tierProbes[tier.alias];
+            const isTesting = testingTier === tier.alias;
+            return h(
+              "div",
+              {
+                key: tier.alias,
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  flexWrap: "wrap",
+                  gap: "10px",
+                  padding: "9px 11px",
+                  borderRadius: "8px",
+                  backgroundColor: "var(--surface-inset, #101010)",
+                  border: "1px solid var(--border-primary, #2a2a2a)"
+                }
+              },
+              h(
+                "div",
+                { style: { display: "flex", flexDirection: "column", gap: "5px", minWidth: "220px", flex: 1 } },
+                h(
+                  "div",
+                  { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+                  h(
+                    "code",
+                    { className: "nm-mono", style: { fontSize: "12px", fontWeight: 600, color: "var(--nm-fg)" } },
+                    tier.alias
+                  ),
+                  h("span", { style: { fontSize: "11px", color: "var(--nm-muted)" } }, tier.label),
+                  tier.badge && h(
+                    "span",
+                    { className: "nm-pill", "data-tone": "accent", style: { fontSize: "10px" } },
+                    tier.badge
+                  )
+                ),
+                h(
+                  "div",
+                  { style: { display: "flex", gap: "6px", flexWrap: "wrap" } },
+                  ladder.length === 0 ? h("span", { style: { fontSize: "11px", color: "var(--nm-muted)" } }, "Aguardando Control Plane...") : ladder.slice(0, 5).map((item, idx) => {
+                    const modOpen = Boolean(openModelCircuits[item.model.toLowerCase()]);
+                    const provOpen = Boolean(openProviderCircuits[item.provider.toLowerCase()]);
+                    const tone = modOpen || provOpen ? "warn" : idx === 0 ? "ok" : void 0;
+                    return h(
+                      "span",
+                      {
+                        key: `${tier.alias}-${item.model}`,
+                        className: "nm-pill nm-mono",
+                        "data-tone": tone,
+                        style: { fontSize: "10.5px" },
+                        title: `${item.provider}${modOpen ? " (circuito modelo aberto)" : provOpen ? " (circuito provedor aberto)" : ""}`
+                      },
+                      `#${idx + 1} ${item.model}`
+                    );
+                  })
+                )
+              ),
+              h(
+                "div",
+                { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                probe && h(
+                  "span",
+                  {
+                    className: "nm-pill nm-mono",
+                    "data-tone": probe.ok ? "ok" : "err",
+                    style: { fontSize: "10.5px" }
+                  },
+                  probe.ok ? `${probe.actualModel || "OK"} · hop ${probe.hop} · ${probe.latencyMs}ms` : `HTTP ${probe.status || "ERR"}`
+                ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    className: "nm-btn",
+                    disabled: !isOnline || isTesting,
+                    onClick: () => void handleProbeTier(tier.alias),
+                    style: { fontSize: "11px", padding: "4px 10px" }
+                  },
+                  isTesting ? "Testando..." : "Testar"
+                )
+              )
+            );
+          })
+        )
+      ),
+      // 5. Telemetria Recente (Últimas Requisições)
+      h(
+        "div",
+        {
+          className: "nm-surface",
+          style: { padding: "12px 14px", display: "flex", flexDirection: "column", gap: "8px" }
+        },
+        h(
+          "div",
+          { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+          h(
+            "span",
+            { style: { fontSize: "13px", fontWeight: 600, color: "var(--nm-fg)" } },
+            "Últimas Requisições no Roteador"
+          ),
+          absorbedEntries.length > 0 && h(
+            "span",
+            { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `Erros absorvidos: ${absorbedEntries.slice(0, 3).map(([k, v]) => `${k} (${v}×)`).join(" · ")}`
+          )
+        ),
+        ((metrics == null ? void 0 : metrics.recent_events) || []).length === 0 ? h(
+          "div",
+          { style: { fontSize: "12px", color: "var(--nm-muted)", padding: "12px 0" } },
+          "Nenhuma requisição registrada ainda em router-telemetry.jsonl."
+        ) : h(
+          "div",
+          { style: { overflowX: "auto" } },
+          h(
+            "table",
+            { style: { width: "100%", borderCollapse: "collapse", fontSize: "11.5px" } },
+            h(
+              "thead",
+              null,
+              h(
+                "tr",
+                { style: { textAlign: "left", color: "var(--nm-muted)", borderBottom: "1px solid var(--border-primary, #2e2e2e)" } },
+                ["Hora", "Tier", "Modelo Real", "Provedor", "Hop", "Status", "Latência"].map(
+                  (col) => h("th", { key: col, style: { padding: "6px 8px", fontWeight: 500 } }, col)
+                )
+              )
+            ),
+            h(
+              "tbody",
+              null,
+              ((metrics == null ? void 0 : metrics.recent_events) || []).slice(0, 15).map(
+                (ev, idx) => h(
+                  "tr",
+                  {
+                    key: `${ev.ts}-${idx}`,
+                    style: { borderBottom: "1px solid var(--border-primary, #222222)" }
+                  },
+                  h("td", { className: "nm-mono", style: { padding: "6px 8px", color: "var(--nm-muted)" } }, formatShortTime(ev.ts)),
+                  h("td", { className: "nm-mono", style: { padding: "6px 8px", color: "var(--nm-fg)" } }, ev.requested_model),
+                  h("td", { className: "nm-mono", style: { padding: "6px 8px", color: "var(--nm-fg-secondary)" } }, ev.actual_model || "—"),
+                  h("td", { className: "nm-mono", style: { padding: "6px 8px", color: "var(--nm-muted)" } }, ev.provider || "—"),
+                  h(
+                    "td",
+                    { style: { padding: "6px 8px" } },
+                    h(
+                      "span",
+                      {
+                        className: "nm-pill nm-mono",
+                        "data-tone": ev.hop > 0 ? "warn" : "ok",
+                        style: { fontSize: "10px" }
+                      },
+                      ev.sticky_attempt && ev.sticky_attempt > 0 ? `sticky #${ev.sticky_attempt}` : `hop ${ev.hop}`
+                    )
+                  ),
+                  h(
+                    "td",
+                    { style: { padding: "6px 8px" } },
+                    h(
+                      "span",
+                      {
+                        className: "nm-pill nm-mono",
+                        "data-tone": ev.status === 200 ? "ok" : "err",
+                        style: { fontSize: "10px" }
+                      },
+                      String(ev.status)
+                    )
+                  ),
+                  h(
+                    "td",
+                    { className: "nm-mono nm-num", style: { padding: "6px 8px", color: "var(--nm-muted)" } },
+                    `${ev.latency_ms}ms`
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    );
+  };
+}
 const NEXUSMIND_THEME_CSS = `
 [data-nexusmind-root="true"] {
   --nm-bg: var(--bg-app, var(--surface-base, #101010));
@@ -5434,6 +6256,10 @@ function apply(ctx) {
       () => createModelRankingTabComponent(ctx, CANONICAL_GROUPS),
       []
     );
+    const LocalRouterTab = React.useMemo(
+      () => createLocalRouterTabComponent(ctx),
+      []
+    );
     const NexusMindAgentsTab = React.useMemo(
       () => createNexusMindAgentsTabComponent(ctx, CANONICAL_GROUPS),
       []
@@ -6379,6 +7205,8 @@ print("SYNC_SUCCESS")
             args: [pythonSyncScript]
           });
           await proc.exited;
+          await registerRouterProviderViaPlugin(ctx).catch(() => {
+          });
         }
         const now = (/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR", {
           hour: "2-digit",
@@ -6778,6 +7606,7 @@ print("SYNC_SUCCESS")
               [
                 { id: "catalog", label: "Modelos" },
                 { id: "ranking", label: "Ranking & Roteamento" },
+                { id: "router", label: "Roteador Local" },
                 {
                   id: "autopilot",
                   label: Object.keys(quarantines).length > 0 ? `Autopiloto (${Object.keys(quarantines).length})` : "Autopiloto & VIP"
@@ -6903,6 +7732,8 @@ print("SYNC_SUCCESS")
           qualityBench,
           onUpdateQualityBench: setQualityBench,
           quarantines
+        }) : activeSection === "router" ? h(LocalRouterTab, {
+          onNotify: setStatusMessage
         }) : activeSection === "autopilot" ? h(AutopilotFailoverTab, {
           models,
           disabledModels,
@@ -8517,7 +9348,32 @@ Use nexusmind_model_ranking, nexusmind_best_model ou nexusmind_apply_best_model 
           return JSON.stringify(pol, null, 2);
         }
       });
-      console.log("[NEXUSMIND] 8 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
+      ctx.agents.addTool({
+        name: "nexusmind_router_status",
+        description: "Consulta saúde, métricas reais (taxa de sucesso, hops, latência p50, circuitos abertos) ou reseta os Circuit Breakers do Roteador Local NexusMind (porta 4199).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              enum: ["status", "metrics", "reset_circuits"],
+              description: "Ação desejada (default: 'status')"
+            }
+          }
+        },
+        call: async (_client, _context, args) => {
+          const action = String((args == null ? void 0 : args.action) || "status");
+          if (action === "reset_circuits") {
+            return JSON.stringify(await resetRouterCircuits(ctx), null, 2);
+          }
+          if (action === "metrics") {
+            return JSON.stringify(await getRouterMetrics(ctx), null, 2);
+          }
+          const [health, metrics] = await Promise.all([getRouterHealth(ctx), getRouterMetrics(ctx)]);
+          return JSON.stringify({ health, metrics }, null, 2);
+        }
+      });
+      console.log("[NEXUSMIND] 9 agentTools + DecisionProvider registrados com sucesso no harness do Buzz.");
     } catch (err) {
       console.warn("[NEXUSMIND] Falha ao registrar agentTools:", err);
     }

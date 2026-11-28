@@ -18,13 +18,16 @@
   "host": {
     "networkOrigins": [
       "https://api.nexusmind.digital",
-      "https://nexusmind.digital"
+      "https://nexusmind.digital",
+      "http://127.0.0.1:4199"
     ],
     "commands": [
       {
         "id": "sync-models",
         "program": "python3",
-        "args": ["-c"],
+        "args": [
+          "-c"
+        ],
         "maxInputBytes": 65536,
         "maxOutputBytes": 65536
       }
@@ -33,12 +36,16 @@
       {
         "id": "bash",
         "program": "bash",
-        "args": ["-c"]
+        "args": [
+          "-c"
+        ]
       },
       {
         "id": "python",
         "program": "python3",
-        "args": ["-c"]
+        "args": [
+          "-c"
+        ]
       },
       {
         "id": "open",
