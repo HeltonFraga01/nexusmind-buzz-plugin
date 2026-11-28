@@ -135,17 +135,17 @@ assert.equal(dec.answers.tier.choice, "tier2_balanced");
 const rankingSnap = nmMod.buildModelRankingSnapshot({
   catalogModels: [
     { id: "qwen/qwen3:free", primaryGroup: "nexusmind_openai" },
-    { id: "gemini-3.8-flash-medium", primaryGroup: "nexusmind_antigravity" },
+    { id: "gemini-2.5-flash", primaryGroup: "nexusmind_antigravity" },
     { id: "claude-sonnet-4-6", primaryGroup: "nexusmind_anthropic" },
   ],
   groups,
   usageByModel: {
-    "gemini-3.8-flash-medium": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
+    "gemini-2.5-flash": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
     "claude-sonnet-4-6": { calls: 159, avgDurationMs: 6760, avgFirstTokenMs: 900, totalCostUsd: 4.0, avgCostUsd: 0.025, cacheHitPct: 91.0, lastSeenAt: "2026-11-24T18:00:00Z" },
   },
   usageSampleSize: 1517,
   liveProbes: {
-    "gemini-3.8-flash-medium": { status: "ok", latency: 650 },
+    "gemini-2.5-flash": { status: "ok", latency: 650 },
     "claude-sonnet-4-6": { status: "ok", latency: 820 },
   },
   tier: "geral",
@@ -153,19 +153,19 @@ const rankingSnap = nmMod.buildModelRankingSnapshot({
 });
 assert.equal(rankingSnap.source, "gateway_usage+live_probe");
 assert.ok(rankingSnap.bestByTier.geral && !rankingSnap.bestByTier.geral.model.includes(":free"));
-assert.ok(rankingSnap.bestByTier.tier1_fast?.model === "gemini-3.8-flash-medium");
+assert.ok(rankingSnap.bestByTier.tier1_fast?.model === "gemini-2.5-flash");
 
 // 5. Testar política de roteamento: autoAssignBlocked e forceFree
 const snapBlocked = nmMod.buildModelRankingSnapshot({
   catalogModels: [
     { id: "qwen/qwen3:free", primaryGroup: "nexusmind_openai" },
-    { id: "gemini-3.8-flash-medium", primaryGroup: "nexusmind_antigravity" },
-    { id: "claude-opus-5-5", primaryGroup: "nexusmind_anthropic" },
+    { id: "gemini-2.5-flash", primaryGroup: "nexusmind_antigravity" },
+    { id: "claude-opus-4-6-thinking", primaryGroup: "nexusmind_anthropic" },
   ],
   groups,
   usageByModel: {
-    "claude-opus-5-5": { calls: 402, avgDurationMs: 9000, avgFirstTokenMs: 1100, totalCostUsd: 120, avgCostUsd: 0.30, cacheHitPct: 80, lastSeenAt: "2026-11-24T18:00:00Z" },
-    "gemini-3.8-flash-medium": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
+    "claude-opus-4-6-thinking": { calls: 402, avgDurationMs: 9000, avgFirstTokenMs: 1100, totalCostUsd: 120, avgCostUsd: 0.30, cacheHitPct: 80, lastSeenAt: "2026-11-24T18:00:00Z" },
+    "gemini-2.5-flash": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
   },
   usageSampleSize: 1760,
   tier: "tier3_frontier",
@@ -173,23 +173,23 @@ const snapBlocked = nmMod.buildModelRankingSnapshot({
     strategy: "balanced",
     forceFree: false,
     maxCostPerReqUsd: null,
-    autoAssignBlocked: ["claude-opus-5-5"],
+    autoAssignBlocked: ["claude-opus-4-6-thinking"],
     tierPins: {},
   },
 });
-const opusRow = snapBlocked.models.find((m) => m.model === "claude-opus-5-5");
+const opusRow = snapBlocked.models.find((m) => m.model === "claude-opus-4-6-thinking");
 assert.ok(opusRow, "modelo bloqueado continua visível na tabela para uso manual");
 assert.equal(opusRow.eligibleForAuto, false, "modelo em autoAssignBlocked deve ter eligibleForAuto=false");
-assert.notEqual(snapBlocked.bestByTier.tier3_frontier?.model, "claude-opus-5-5", "modelo bloqueado não pode ser eleito automaticamente");
+assert.notEqual(snapBlocked.bestByTier.tier3_frontier?.model, "claude-opus-4-6-thinking", "modelo bloqueado não pode ser eleito automaticamente");
 
 const snapForceFree = nmMod.buildModelRankingSnapshot({
   catalogModels: [
     { id: "qwen/qwen3:free", primaryGroup: "nexusmind_openai" },
-    { id: "gemini-3.8-flash-medium", primaryGroup: "nexusmind_antigravity" },
+    { id: "gemini-2.5-flash", primaryGroup: "nexusmind_antigravity" },
   ],
   groups,
   usageByModel: {
-    "gemini-3.8-flash-medium": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
+    "gemini-2.5-flash": { calls: 1358, avgDurationMs: 12000, avgFirstTokenMs: 1200, totalCostUsd: 29.4, avgCostUsd: 0.021, cacheHitPct: 88.5, lastSeenAt: "2026-11-24T18:00:00Z" },
   },
   usageSampleSize: 1358,
   tier: "geral",
@@ -319,7 +319,7 @@ assert.equal(nmMod.classifyGatewayError("Resource not found (404)", 404), "not_f
 const v3Groups = {
   nexusmind_openai: { id: "nexusmind_openai", platformKey: "openai", groupName: "Saldo OpenAI", displayName: "NexusMind OpenAI", defaultKey: "sk-test", defaultModel: "mistralai/mistral-large-4-1t-a52b", defaultCtx: 131072, defaultOut: 8192 },
   nexusmind_anthropic: { id: "nexusmind_anthropic", platformKey: "anthropic", groupName: "Saldo Claude", displayName: "NexusMind Anthropic", defaultKey: "sk-test", defaultModel: "claude-sonnet-4-6", defaultCtx: 200000, defaultOut: 8192 },
-  nexusmind_antigravity: { id: "nexusmind_antigravity", platformKey: "antigravity", groupName: "Antigravity", displayName: "NexusMind Anti-Gravity", defaultKey: "sk-test", defaultModel: "gemini-3.8-flash-medium", defaultCtx: 1048576, defaultOut: 65536 },
+  nexusmind_antigravity: { id: "nexusmind_antigravity", platformKey: "antigravity", groupName: "Antigravity", displayName: "NexusMind Anti-Gravity", defaultKey: "sk-test", defaultModel: "gemini-2.5-flash", defaultCtx: 1048576, defaultOut: 65536 },
 };
 
 let vipPol = nmMod.loadVipPolicy();
@@ -328,7 +328,7 @@ assert.equal(nmMod.isVipAgent("Conselho COO", vipPol), true, "Conselho COO deve 
 assert.equal(nmMod.isVipAgent("OrgFy Atlas", vipPol), false, "OrgFy Atlas deve ser worker (Pool Auto)");
 assert.equal(nmMod.getModelAccessMode("gpt-6.1-terra", "nexusmind_openai", vipPol), "vip", "gpt-6.1-terra deve ser VIP");
 assert.equal(nmMod.getModelAccessMode("claude-sonnet-4-6", "nexusmind_anthropic", vipPol), "vip", "Anthropic deve ser VIP");
-assert.equal(nmMod.getModelAccessMode("gemini-3.8-flash-medium", "nexusmind_antigravity", vipPol), "auto", "gemini-3.8-flash-medium deve ser Auto");
+assert.equal(nmMod.getModelAccessMode("gemini-2.5-flash", "nexusmind_antigravity", vipPol), "auto", "gemini-2.5-flash deve ser Auto");
 
 vipPol = nmMod.setModelAccessMode(vipPol, "nex-n2-pro", "blocked");
 assert.equal(nmMod.getModelAccessMode("nex-n2-pro", "nexusmind_openai", vipPol), "blocked", "Bloqueio 1-clique deve marcar modelo como blocked");
@@ -338,13 +338,13 @@ const v3Ranking = nmMod.buildModelRankingSnapshot({
     { id: "claude-sonnet-4-6", primaryGroup: "nexusmind_anthropic" },
     { id: "gpt-6.1-terra", primaryGroup: "nexusmind_openai" },
     { id: "nex-n2-pro", primaryGroup: "nexusmind_openai" },
-    { id: "gemini-3.8-flash-medium", primaryGroup: "nexusmind_antigravity" },
+    { id: "gemini-2.5-flash", primaryGroup: "nexusmind_antigravity" },
     { id: "mistralai/mistral-large-4-1t-a52b", primaryGroup: "nexusmind_openai" },
   ],
   groups: v3Groups,
   usageByModel: {
     "claude-sonnet-4-6": { calls: 900, avgDurationMs: 4000, avgFirstTokenMs: 600, totalCostUsd: 25, avgCostUsd: 0.02, cacheHitPct: 90, lastSeenAt: "2026-11-26T10:00:00Z" },
-    "gemini-3.8-flash-medium": { calls: 800, avgDurationMs: 5000, avgFirstTokenMs: 700, totalCostUsd: 8, avgCostUsd: 0.01, cacheHitPct: 85, lastSeenAt: "2026-11-26T10:00:00Z" },
+    "gemini-2.5-flash": { calls: 800, avgDurationMs: 5000, avgFirstTokenMs: 700, totalCostUsd: 8, avgCostUsd: 0.01, cacheHitPct: 85, lastSeenAt: "2026-11-26T10:00:00Z" },
   },
   usageSampleSize: 1700,
   vipPolicy: vipPol,
@@ -362,7 +362,7 @@ assert.equal(workerPick.ok, true);
 assert.equal(workerPick.isVip, false);
 assert.notEqual(workerPick.model, "claude-sonnet-4-6", "Worker NUNCA deve receber modelo VIP Anthropic");
 assert.notEqual(workerPick.model, "gpt-6.1-terra", "Worker NUNCA deve receber modelo VIP gpt-6.1-terra");
-assert.equal(workerPick.model, "gemini-3.8-flash-medium", "Worker deve receber melhor modelo Auto saudável");
+assert.equal(workerPick.model, "gemini-2.5-flash", "Worker deve receber melhor modelo Auto saudável");
 
 // VIP Iris falhando em gpt-6.1-terra deve ir estritamente para cadeia VIP (claude-sonnet-4-6)
 const vipPick = nmMod.pickFailoverCandidate({
@@ -401,7 +401,7 @@ const qMockCtx = {
     },
   },
 };
-const qOk = await nmMod.runModelQualityProbe(qMockCtx, "gemini-3.8-flash-medium", v3Groups.nexusmind_antigravity);
+const qOk = await nmMod.runModelQualityProbe(qMockCtx, "gemini-2.5-flash", v3Groups.nexusmind_antigravity);
 assert.equal(qOk.online, true);
 assert.equal(qOk.toolCallOk, true);
 assert.ok(qOk.qualityScore >= 75, "Modelo com tool_call válido deve pontuar >= 75");
@@ -431,7 +431,7 @@ const foEvt = await nmMod.executeAgentFailover(foCtx, v3Groups, {
 });
 assert.equal(foEvt.applied, true);
 assert.equal(foEvt.wokeAgent, true);
-assert.equal(foEvt.toModel, "gemini-3.8-flash-medium");
+assert.equal(foEvt.toModel, "gemini-2.5-flash");
 assert.equal(foSaved.length, 1);
 assert.equal(foWoken.length, 1);
 assert.ok(nmMod.loadQuarantines()["mistralai/mistral-large-4-1t-a52b"], "Modelo que falhou deve entrar em quarentena");
