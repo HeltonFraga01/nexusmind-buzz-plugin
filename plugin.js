@@ -203,13 +203,13 @@ function toggleVipAgent(cfg, agentName) {
   };
 }
 function isFreeModel$1(modelId) {
-  const m = String(modelId || "").toLowerCase();
-  return m.includes(":free") || m.includes("-free") || m.includes("/free") || m.endsWith("free");
+  const m = String(modelId || "").trim().toLowerCase();
+  return m.includes(":free") || m.includes("-free") || m.includes("/free") || m.endsWith("free") || m.startsWith("pol/") || m.startsWith("pollinations/");
 }
 function isUnsupportedAgentModel(modelId) {
   const m = String(modelId || "").trim().toLowerCase();
   if (!m) return true;
-  return m.includes("pol/community/") || m.includes("pollinations/community/") || m.includes("gemini-3-pro-low") || m.includes("gemini-3-pro-high") || m.startsWith("auto/") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("dall-e") || m.includes("moderation");
+  return m.startsWith("pol/") || m.startsWith("pollinations/") || m.includes("pol/community/") || m.includes("pollinations/community/") || m.includes("gemini-3.8-flash-medium") || m.includes("mistral-large-4-1t-a52b") || m.includes("gemini-3-pro-low") || m.includes("gemini-3-pro-high") || m.startsWith("auto/") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("dall-e") || m.includes("moderation");
 }
 function scoreModelForTier(modelId, tier) {
   const m = String(modelId || "").toLowerCase();
@@ -3237,7 +3237,8 @@ function pickFailoverCandidate(input) {
       const grp = r.group || ((_a2 = inferCanonicalGroupForModel(mid, input.groups)) == null ? void 0 : _a2.id);
       if (getModelAccessMode(mid, grp, vipPolicy, disabledModels) === "blocked") return false;
       const q = qualityBench[mid];
-      if (q && q.toolCallOk === false) return false;
+      const evalOk = Boolean(r.evalApproved === true || r.toolCallOk === true || q && q.online && q.toolCallOk === true);
+      if (!evalOk) return false;
       return true;
     }).sort((a, b) => (b.score || 0) - (a.score || 0));
     if (paidRanking.length > 0) {

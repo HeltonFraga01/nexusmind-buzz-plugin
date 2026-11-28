@@ -58,16 +58,27 @@ export interface BestModelResult {
 }
 
 export function isFreeModel(modelId: string): boolean {
-  const m = String(modelId || "").toLowerCase();
-  return m.includes(":free") || m.includes("-free") || m.includes("/free") || m.endsWith("free");
+  const m = String(modelId || "").trim().toLowerCase();
+  return (
+    m.includes(":free") ||
+    m.includes("-free") ||
+    m.includes("/free") ||
+    m.endsWith("free") ||
+    m.startsWith("pol/") ||
+    m.startsWith("pollinations/")
+  );
 }
 
 export function isUnsupportedAgentModel(modelId: string): boolean {
   const m = String(modelId || "").trim().toLowerCase();
   if (!m) return true;
   return (
+    m.startsWith("pol/") ||
+    m.startsWith("pollinations/") ||
     m.includes("pol/community/") ||
     m.includes("pollinations/community/") ||
+    m.includes("gemini-3.8-flash-medium") ||
+    m.includes("mistral-large-4-1t-a52b") ||
     m.includes("gemini-3-pro-low") ||
     m.includes("gemini-3-pro-high") ||
     m.startsWith("auto/") ||

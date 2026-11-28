@@ -290,7 +290,7 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
       };
     }
 
-    // Fallback para outros modelos PAGOS validados no ranking antes de cogitar qualquer :free
+    // Fallback para outros modelos PAGOS e APROVADOS NO EVAL (Hard Gate: nunca aceita modelo não testado como pol/*)
     const paidRanking = (input.rankingSnapshot?.models || [])
       .filter((r) => {
         const mid = String(r?.model || "").trim();
@@ -299,7 +299,8 @@ export function pickFailoverCandidate(input: PickFailoverInput): PickFailoverRes
         const grp = r.group || inferCanonicalGroupForModel(mid, input.groups)?.id;
         if (getModelAccessMode(mid, grp, vipPolicy, disabledModels) === "blocked") return false;
         const q = qualityBench[mid];
-        if (q && q.toolCallOk === false) return false;
+        const evalOk = Boolean((r as any).evalApproved === true || (r as any).toolCallOk === true || (q && q.online && q.toolCallOk === true));
+        if (!evalOk) return false;
         return true;
       })
       .sort((a, b) => (b.score || 0) - (a.score || 0));
