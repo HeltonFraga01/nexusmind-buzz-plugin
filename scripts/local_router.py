@@ -702,7 +702,7 @@ def make_handler(state: RouterState):
                     {
                         "ok": True,
                         "service": "nexusmind-local-router",
-                        "version": "2.1.0",
+                        "version": "2.1.1",
                         "pid": os.getpid(),
                         "uptime_sec": round(time.time() - state.started_at, 1),
                         "stats": state.stats,
@@ -1117,21 +1117,112 @@ def _pid_file(buzz_dir: Path | None = None) -> Path:
     return bdir / ".scratch" / "local-router.pid"
 
 
-def stop_daemon(buzz_dir: Path | None = None) -> dict[str, Any]:
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def _pids_listening_on_port(port: int) -> list[int]:
+    pids: list[int] = []
+    try:
+        res = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if res.returncode == 0:
+            for line in (res.stdout or "").splitlines():
+                s = line.strip()
+                if s.isdigit():
+                    pid = int(s)
+                    if pid != os.getpid() and pid not in pids:
+                        pids.append(pid)
+    except Exception:
+        pass
+    return pids
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def stop_daemon(buzz_dir: Path | None = None, port: int = DEFAULT_PORT) -> dict[str, Any]:
     pfile = _pid_file(buzz_dir)
-    stopped_pid = None
+    target_pids: list[int] = []
     if pfile.exists():
         try:
             pid = int(pfile.read_text(encoding="utf-8").strip())
-            os.kill(pid, signal.SIGTERM)
-            stopped_pid = pid
+            if pid != os.getpid():
+                target_pids.append(pid)
         except Exception:
             pass
+    for lpid in _pids_listening_on_port(port):
+        if lpid not in target_pids:
+            target_pids.append(lpid)
+
+    stopped_pids: list[int] = []
+    for pid in target_pids:
         try:
-            pfile.unlink(missing_ok=True)
+            os.kill(pid, signal.SIGTERM)
+            stopped_pids.append(pid)
         except Exception:
             pass
-    return {"ok": True, "stopped_pid": stopped_pid}
+
+    if stopped_pids:
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            alive = [p for p in stopped_pids if _pid_is_alive(p)]
+            if not alive:
+                break
+            time.sleep(0.1)
+        for pid in [p for p in stopped_pids if _pid_is_alive(p)]:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+        time.sleep(0.15)
+
+    try:
+        pfile.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "stopped_pid": stopped_pids[0] if stopped_pids else None,
+        "stopped_pids": stopped_pids,
+    }
+
+
+def _try_launchd_kickstart() -> bool:
+    uid = os.getuid()
+    target = f"gui/{uid}/{LAUNCHAGENT_LABEL}"
+    try:
+        chk = subprocess.run(
+            ["launchctl", "print", target],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if chk.returncode != 0:
+            return False
+        res = subprocess.run(
+            ["launchctl", "kickstart", "-k", target],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
 
 
 def start_daemon(
@@ -1140,25 +1231,48 @@ def start_daemon(
     buzz_dir: Path | None = None,
 ) -> dict[str, Any]:
     bdir = buzz_dir or _resolve_buzz_dir()
-    stop_daemon(bdir)
-    time.sleep(0.3)
     log_path = bdir / ".scratch" / "local-router.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    script = Path(__file__).resolve()
-    env = dict(os.environ)
-    env["ORGFY_BUZZ_DIR"] = str(bdir)
-    env["PYTHONUNBUFFERED"] = "1"
-    with log_path.open("a", encoding="utf-8") as logf:
-        proc = subprocess.Popen(
-            [sys.executable, str(script), "--host", host, "--port", str(port)],
-            stdout=logf,
-            stderr=logf,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            env=env,
-        )
-    _pid_file(bdir).write_text(f"{proc.pid}\n", encoding="utf-8")
-    return {"ok": True, "pid": proc.pid, "log_path": str(log_path)}
+    started_via = "daemon"
+    launched_pid: int | None = None
+
+    if _try_launchd_kickstart():
+        started_via = "launchd"
+    else:
+        stop_daemon(bdir, port=port)
+        script = Path(__file__).resolve()
+        env = dict(os.environ)
+        env["ORGFY_BUZZ_DIR"] = str(bdir)
+        env["PYTHONUNBUFFERED"] = "1"
+        with log_path.open("a", encoding="utf-8") as logf:
+            proc = subprocess.Popen(
+                [sys.executable, str(script), "--host", host, "--port", str(port)],
+                stdout=logf,
+                stderr=logf,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=env,
+            )
+        launched_pid = proc.pid
+        _pid_file(bdir).write_text(f"{proc.pid}\n", encoding="utf-8")
+
+    health_body: dict[str, Any] = {}
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        h = _local_http_call(host, port, "/health", "GET", timeout=1.0)
+        if h.get("ok") and isinstance(h.get("body"), dict):
+            health_body = h["body"]
+            break
+        time.sleep(0.15)
+
+    live_pid = health_body.get("pid") or launched_pid
+    return {
+        "ok": bool(health_body.get("ok")) or bool(live_pid),
+        "pid": live_pid,
+        "version": health_body.get("version"),
+        "started_via": started_via,
+        "log_path": str(log_path),
+    }
 
 
 def create_server(
@@ -1167,7 +1281,7 @@ def create_server(
     state: RouterState | None = None,
 ) -> ThreadingHTTPServer:
     st = state or RouterState()
-    return ThreadingHTTPServer((host, port), make_handler(st))
+    return ReusableThreadingHTTPServer((host, port), make_handler(st))
 
 
 def _local_http_call(
@@ -1251,7 +1365,7 @@ def main() -> int:
         return 0
 
     if args.stop_daemon:
-        res = stop_daemon()
+        res = stop_daemon(port=args.port)
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0
 
