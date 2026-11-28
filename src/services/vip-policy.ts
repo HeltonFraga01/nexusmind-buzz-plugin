@@ -135,7 +135,11 @@ export function loadVipPolicy(): VipPolicyConfig {
   }
 }
 
-export async function saveVipPolicy(ctx: Context | null | undefined, cfg: VipPolicyConfig): Promise<void> {
+export async function saveVipPolicy(
+  ctx: Context | null | undefined,
+  cfg: VipPolicyConfig,
+  disabledModels?: string[]
+): Promise<void> {
   const clean: VipPolicyConfig = {
     version: 1,
     vipModels: uniqueStrings(cfg.vipModels || []),
@@ -146,25 +150,52 @@ export async function saveVipPolicy(ctx: Context | null | undefined, cfg: VipPol
     explicitAutoOverrides: uniqueStrings(cfg.explicitAutoOverrides || []),
   };
 
+  let resolvedDisabled: string[] = Array.isArray(disabledModels) ? uniqueStrings(disabledModels) : [];
+  if (!Array.isArray(disabledModels)) {
+    try {
+      const rawDis = (globalThis as any)?.localStorage?.getItem?.("nexusmind_disabled_models");
+      if (rawDis) {
+        const parsedDis = JSON.parse(rawDis);
+        if (Array.isArray(parsedDis)) resolvedDisabled = uniqueStrings(parsedDis.map(String));
+      }
+    } catch {}
+  }
+
   try {
     (globalThis as any)?.localStorage?.setItem?.(LOCAL_STORAGE_VIP_POLICY_KEY, JSON.stringify(clean));
   } catch {}
 
-  // Sincroniza também para o arquivo compartilhado lido pela OrgFy / scripts
+  const payloadObj = {
+    updatedAt: new Date().toISOString(),
+    vipModels: clean.vipModels,
+    blockedModels: uniqueStrings([...clean.blockedModels, ...resolvedDisabled]),
+    disabledModels: resolvedDisabled,
+    vipPolicy: clean,
+  };
+  const serialized = JSON.stringify(payloadObj, null, 2) + "\n";
+
+  // Sincroniza para ~/.buzz/.scratch/nexusmind-routing-policy.json (lido ao vivo pelo local_router.py)
   const host = (ctx as any)?.host;
+  let wrote = false;
   if (typeof host?.writeFile === "function") {
     try {
-      await host.writeFile(
-        SHARED_ROUTING_POLICY_PATH,
-        JSON.stringify(
-          {
-            updatedAt: new Date().toISOString(),
-            vipPolicy: clean,
-          },
-          null,
-          2
-        )
-      );
+      await host.writeFile(SHARED_ROUTING_POLICY_PATH, serialized);
+      wrote = true;
+    } catch {}
+  }
+  if (!wrote && typeof host?.spawn === "function") {
+    try {
+      const pyScript = [
+        "import os",
+        "path = os.path.expanduser('~/.buzz/.scratch/nexusmind-routing-policy.json')",
+        "os.makedirs(os.path.dirname(path), exist_ok=True)",
+        `data = ${JSON.stringify(serialized)}`,
+        "tmp = path + '.tmp'",
+        "with open(tmp, 'w', encoding='utf-8') as f: f.write(data)",
+        "os.replace(tmp, path)",
+      ].join("\n");
+      const proc = await host.spawn("python", { args: [pyScript] });
+      await proc.exited;
     } catch {}
   }
 }

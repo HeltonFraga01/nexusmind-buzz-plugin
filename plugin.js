@@ -85,8 +85,8 @@ function loadVipPolicy() {
     return { ...DEFAULT_VIP_POLICY };
   }
 }
-async function saveVipPolicy(ctx, cfg) {
-  var _a, _b;
+async function saveVipPolicy(ctx, cfg, disabledModels) {
+  var _a, _b, _c, _d;
   const clean = {
     version: 1,
     vipModels: uniqueStrings(cfg.vipModels || []),
@@ -96,24 +96,51 @@ async function saveVipPolicy(ctx, cfg) {
     autoProtectAnthropic: cfg.autoProtectAnthropic !== false,
     explicitAutoOverrides: uniqueStrings(cfg.explicitAutoOverrides || [])
   };
+  let resolvedDisabled = Array.isArray(disabledModels) ? uniqueStrings(disabledModels) : [];
+  if (!Array.isArray(disabledModels)) {
+    try {
+      const rawDis = (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.getItem) == null ? void 0 : _b.call(_a, "nexusmind_disabled_models");
+      if (rawDis) {
+        const parsedDis = JSON.parse(rawDis);
+        if (Array.isArray(parsedDis)) resolvedDisabled = uniqueStrings(parsedDis.map(String));
+      }
+    } catch {
+    }
+  }
   try {
-    (_b = (_a = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _a.setItem) == null ? void 0 : _b.call(_a, LOCAL_STORAGE_VIP_POLICY_KEY, JSON.stringify(clean));
+    (_d = (_c = globalThis == null ? void 0 : globalThis.localStorage) == null ? void 0 : _c.setItem) == null ? void 0 : _d.call(_c, LOCAL_STORAGE_VIP_POLICY_KEY, JSON.stringify(clean));
   } catch {
   }
+  const payloadObj = {
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    vipModels: clean.vipModels,
+    blockedModels: uniqueStrings([...clean.blockedModels, ...resolvedDisabled]),
+    disabledModels: resolvedDisabled,
+    vipPolicy: clean
+  };
+  const serialized = JSON.stringify(payloadObj, null, 2) + "\n";
   const host = ctx == null ? void 0 : ctx.host;
+  let wrote = false;
   if (typeof (host == null ? void 0 : host.writeFile) === "function") {
     try {
-      await host.writeFile(
-        SHARED_ROUTING_POLICY_PATH,
-        JSON.stringify(
-          {
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-            vipPolicy: clean
-          },
-          null,
-          2
-        )
-      );
+      await host.writeFile(SHARED_ROUTING_POLICY_PATH, serialized);
+      wrote = true;
+    } catch {
+    }
+  }
+  if (!wrote && typeof (host == null ? void 0 : host.spawn) === "function") {
+    try {
+      const pyScript = [
+        "import os",
+        "path = os.path.expanduser('~/.buzz/.scratch/nexusmind-routing-policy.json')",
+        "os.makedirs(os.path.dirname(path), exist_ok=True)",
+        `data = ${JSON.stringify(serialized)}`,
+        "tmp = path + '.tmp'",
+        "with open(tmp, 'w', encoding='utf-8') as f: f.write(data)",
+        "os.replace(tmp, path)"
+      ].join("\n");
+      const proc = await host.spawn("python", { args: [pyScript] });
+      await proc.exited;
     } catch {
     }
   }
@@ -4640,12 +4667,12 @@ async function testRouterTier(ctx, tierId) {
   }
 }
 const TIER_DISPLAY = [
-  { alias: "tier/vip-iris", groupKey: "group/vip-iris", label: "VIP Iris (CEO)", badge: "Sticky Retry 2×5s" },
-  { alias: "tier/diretoria", groupKey: "group/vip-leadership", label: "Diretoria & Conselho" },
-  { alias: "tier/frontier", groupKey: "group/frontier", label: "Frontier / Arquitetura" },
-  { alias: "tier/reasoning", groupKey: "group/reasoning", label: "Raciocínio / QA" },
-  { alias: "tier/code", groupKey: "group/code", label: "Código / Dev" },
-  { alias: "tier/fast", groupKey: "group/fast", label: "Rápido / Operações" }
+  { alias: "tier/vip-iris", groupKey: "group/vip-iris", label: "VIP Iris (CEO)", badge: "VIP · Sticky Retry 2×5s" },
+  { alias: "tier/diretoria", groupKey: "group/vip-leadership", label: "Diretoria & Conselho", badge: "VIP" },
+  { alias: "tier/frontier", groupKey: "group/frontier", label: "Frontier / Arquitetura (Pool Auto)" },
+  { alias: "tier/reasoning", groupKey: "group/reasoning", label: "Raciocínio / QA (Pool Auto)" },
+  { alias: "tier/code", groupKey: "group/code", label: "Código / Dev (Pool Auto)" },
+  { alias: "tier/fast", groupKey: "group/fast", label: "Rápido / Operações (Pool Auto)" }
 ];
 function formatUptime(sec) {
   if (!sec || sec < 0) return "—";
@@ -6235,8 +6262,11 @@ function apply(ctx) {
     }, [models, usageByModelCache, usageSampleSizeCache, modelTests, disabledModels, vipPolicy, qualityBench, quarantines]);
     const handleUpdateVipPolicy = (next) => {
       setVipPolicy(next);
-      void saveVipPolicy(ctx, next);
+      void saveVipPolicy(ctx, next, disabledModels);
     };
+    React.useEffect(() => {
+      void saveVipPolicy(ctx, vipPolicy, disabledModels);
+    }, [disabledModels]);
     const handleSetModelAccessMode = (modelId, mode) => {
       const next = setModelAccessMode(vipPolicy, modelId, mode);
       handleUpdateVipPolicy(next);

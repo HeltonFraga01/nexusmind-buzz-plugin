@@ -15,12 +15,12 @@ import {
 } from "../services/local-router";
 
 const TIER_DISPLAY: Array<{ alias: string; groupKey: string; label: string; badge?: string }> = [
-  { alias: "tier/vip-iris", groupKey: "group/vip-iris", label: "VIP Iris (CEO)", badge: "Sticky Retry 2×5s" },
-  { alias: "tier/diretoria", groupKey: "group/vip-leadership", label: "Diretoria & Conselho" },
-  { alias: "tier/frontier", groupKey: "group/frontier", label: "Frontier / Arquitetura" },
-  { alias: "tier/reasoning", groupKey: "group/reasoning", label: "Raciocínio / QA" },
-  { alias: "tier/code", groupKey: "group/code", label: "Código / Dev" },
-  { alias: "tier/fast", groupKey: "group/fast", label: "Rápido / Operações" },
+  { alias: "tier/vip-iris", groupKey: "group/vip-iris", label: "VIP Iris (CEO)", badge: "VIP · Sticky Retry 2×5s" },
+  { alias: "tier/diretoria", groupKey: "group/vip-leadership", label: "Diretoria & Conselho", badge: "VIP" },
+  { alias: "tier/frontier", groupKey: "group/frontier", label: "Frontier / Arquitetura (Pool Auto)" },
+  { alias: "tier/reasoning", groupKey: "group/reasoning", label: "Raciocínio / QA (Pool Auto)" },
+  { alias: "tier/code", groupKey: "group/code", label: "Código / Dev (Pool Auto)" },
+  { alias: "tier/fast", groupKey: "group/fast", label: "Rápido / Operações (Pool Auto)" },
 ];
 
 function formatUptime(sec?: number): string {

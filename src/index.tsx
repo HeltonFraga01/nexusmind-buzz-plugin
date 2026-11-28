@@ -858,8 +858,13 @@ export function apply(ctx: Context) {
 
     const handleUpdateVipPolicy = (next: VipPolicyConfig) => {
       setVipPolicy(next);
-      void saveVipPolicy(ctx, next);
+      void saveVipPolicy(ctx, next, disabledModels);
     };
+
+    // Mantém ~/.buzz/.scratch/nexusmind-routing-policy.json sincronizado sempre que disabledModels ou vipPolicy mudar
+    React.useEffect(() => {
+      void saveVipPolicy(ctx, vipPolicy, disabledModels);
+    }, [disabledModels]);
 
     const handleSetModelAccessMode = (modelId: string, mode: ModelAccessMode) => {
       const next = setModelAccessMode(vipPolicy, modelId, mode);

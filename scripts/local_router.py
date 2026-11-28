@@ -188,6 +188,7 @@ class RouterState:
         self.buzz_dir = buzz_dir or _resolve_buzz_dir()
         self.scratch_dir = self.buzz_dir / ".scratch"
         self.control_plane_path = self.scratch_dir / "model-control-plane.json"
+        self.routing_policy_path = self.scratch_dir / "nexusmind-routing-policy.json"
         self.telemetry_path = self.scratch_dir / "router-telemetry.jsonl"
         self.upstream_base = upstream_base.rstrip("/")
         self.circuit_ttl_sec = circuit_ttl_sec
@@ -202,6 +203,8 @@ class RouterState:
         self._lock = threading.Lock()
         self._cp_mtime: float = 0.0
         self._cp_cache: dict[str, Any] = {}
+        self._policy_mtime: float = 0.0
+        self._policy_cache: dict[str, Any] = {}
         self._circuit_open_until: dict[str, float] = {}
         self._circuit_reasons: dict[str, str] = {}
         self._provider_open_until: dict[str, float] = {}
@@ -228,6 +231,90 @@ class RouterState:
                 return self._cp_cache
         except Exception:
             return self._cp_cache
+
+    def get_routing_policy(self) -> dict[str, Any]:
+        if not self.routing_policy_path.exists():
+            return {}
+        try:
+            mtime = self.routing_policy_path.stat().st_mtime
+            with self._lock:
+                if mtime != self._policy_mtime or not self._policy_cache:
+                    self._policy_cache = json.loads(self.routing_policy_path.read_text(encoding="utf-8"))
+                    self._policy_mtime = mtime
+                return self._policy_cache
+        except Exception:
+            return self._policy_cache
+
+    def _extract_policy_sets(self) -> tuple[set[str], set[str], set[str], bool]:
+        """Retorna (blocked_or_disabled, vip_models, explicit_auto_overrides, auto_protect_anthropic)."""
+        pol = self.get_routing_policy()
+        vp = pol.get("vipPolicy") if isinstance(pol.get("vipPolicy"), dict) else {}
+        blocked: set[str] = set()
+        for arr in (pol.get("blockedModels"), pol.get("disabledModels"), vp.get("blockedModels")):
+            if isinstance(arr, list):
+                for x in arr:
+                    s = str(x or "").strip().lower()
+                    if s:
+                        blocked.add(s)
+        vip: set[str] = set()
+        for arr in (pol.get("vipModels"), vp.get("vipModels")):
+            if isinstance(arr, list):
+                for x in arr:
+                    s = str(x or "").strip().lower()
+                    if s:
+                        vip.add(s)
+        auto_overrides: set[str] = set()
+        for arr in (pol.get("explicitAutoOverrides"), vp.get("explicitAutoOverrides")):
+            if isinstance(arr, list):
+                for x in arr:
+                    s = str(x or "").strip().lower()
+                    if s:
+                        auto_overrides.add(s)
+        auto_protect_anthropic = vp.get("autoProtectAnthropic", True) is not False
+        return blocked, vip, auto_overrides, auto_protect_anthropic
+
+    def _is_model_allowed_in_group(self, model_id: str, provider_id: str, group_key: str) -> bool:
+        ml = model_id.strip().lower()
+        if not ml:
+            return False
+        is_iris = group_key == "group/vip-iris"
+        is_vip_group = group_key in ("group/vip-iris", "group/vip-leadership")
+        if not is_iris and ml == "gpt-6.1-terra":
+            return False
+        blocked, vip, auto_overrides, auto_protect_anthropic = self._extract_policy_sets()
+        # Modelos desativados ou bloqueados nunca entram em nenhum tier
+        if ml in blocked:
+            return False
+        # Em tiers de workers (Pool Auto), exclui modelos marcados como VIP
+        if not is_vip_group:
+            if ml in vip and ml not in auto_overrides:
+                return False
+            if auto_protect_anthropic and provider_id == "nexusmind_anthropic" and ml not in auto_overrides:
+                return False
+        return True
+
+    def get_effective_tier_groups(self) -> dict[str, list[dict[str, Any]]]:
+        """Retorna tierFallbackGroups já filtrados ao vivo por blockedModels, disabledModels e vipModels."""
+        cp = self.get_control_plane()
+        raw_groups = cp.get("tierFallbackGroups") or {}
+        out: dict[str, list[dict[str, Any]]] = {}
+        for gkey, entries in raw_groups.items():
+            if not isinstance(entries, list):
+                continue
+            filtered: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for entry in entries:
+                m = str(entry.get("model") or "").strip()
+                p = str(entry.get("provider") or infer_provider(m)).strip()
+                ml = m.lower()
+                if not m or ml in seen:
+                    continue
+                if not self._is_model_allowed_in_group(m, p, gkey):
+                    continue
+                seen.add(ml)
+                filtered.append(entry)
+            out[gkey] = filtered
+        return out
 
     def is_circuit_open(self, model_id: str, now: float | None = None) -> bool:
         now_t = time.time() if now is None else now
@@ -335,12 +422,12 @@ class RouterState:
         return out
 
     def resolve_candidates(self, requested_model: str) -> list[dict[str, str]]:
-        """Retorna lista ordenada de candidatos [{model, provider}] respeitando VIP e Circuit Breakers."""
+        """Retorna lista ordenada de candidatos [{model, provider}] respeitando VIP, bloqueios ao vivo e Circuit Breakers."""
         req = (requested_model or "").strip()
         req_low = req.lower()
-        cp = self.get_control_plane()
-        groups = cp.get("tierFallbackGroups") or {}
+        groups = self.get_effective_tier_groups()
         is_iris_req = req_low in ("tier/vip-iris", "group/vip-iris", "gpt-6.1-terra")
+        effective_group = TIER_ALIAS_TO_GROUP.get(req_low) or ("group/vip-iris" if is_iris_req else "group/code")
 
         raw_ladder: list[dict[str, str]] = []
         group_key = TIER_ALIAS_TO_GROUP.get(req_low)
@@ -370,17 +457,17 @@ class RouterState:
                 raw_ladder = [
                     {"model": "codex-auto-review", "provider": "nexusmind_openai"},
                     {"model": "gemini-2.5-flash", "provider": "nexusmind_antigravity"},
-                    {"model": "gpt-6.2-sol", "provider": "nexusmind_openai"},
+                    {"model": "gemini-4-hydrogen-high", "provider": "nexusmind_antigravity"},
                 ]
 
-        # Regra VIP soberana: gpt-6.1-terra nunca vaza para tiers que não sejam Iris
+        # Filtra rigorosamente contra VIP, blockedModels e disabledModels ao vivo
         filtered: list[dict[str, str]] = []
         seen: set[str] = set()
         for c in raw_ladder:
             ml = c["model"].lower()
             if ml in seen:
                 continue
-            if not is_iris_req and ml == "gpt-6.1-terra":
+            if not self._is_model_allowed_in_group(c["model"], c["provider"], effective_group):
                 continue
             seen.add(ml)
             filtered.append(c)
@@ -564,7 +651,6 @@ def make_handler(state: RouterState):
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
             if path in ("/health", "/v1/health"):
-                cp = state.get_control_plane()
                 self._send_json(
                     200,
                     {
@@ -581,7 +667,7 @@ def make_handler(state: RouterState):
                             "retries": state.vip_sticky_retries,
                             "delay_sec": state.vip_sticky_delay_sec,
                         },
-                        "tierFallbackGroups": cp.get("tierFallbackGroups") or {},
+                        "tierFallbackGroups": state.get_effective_tier_groups(),
                     },
                 )
                 return
