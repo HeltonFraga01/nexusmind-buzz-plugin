@@ -587,23 +587,37 @@ def _stream_with_keepalive(
     wfile: Any,
     keepalive_sec: float = 15.0,
 ) -> bool:
-    """Repassa SSE do upstream enviando `: keepalive\\n\\n` se o TTFT ficar silencioso.
+    """Repassa SSE do upstream em fronteiras completas de evento (`\\n\\n`), enviando `: keepalive\\n\\n`
+    apenas entre eventos completos (nunca no meio de um chunk JSON parcial).
 
     Retorna True se terminou normalmente, False se o cliente desconectou (abortando o upstream).
     """
-    q: queue.Queue[bytes | None | Exception] = queue.Queue(maxsize=32)
+    q: queue.Queue[bytes | None | Exception] = queue.Queue(maxsize=64)
     stop_evt = threading.Event()
 
     def _reader() -> None:
+        buf: list[bytes] = []
         try:
             while not stop_evt.is_set():
-                chunk = upstream_resp.read(4096)
-                if not chunk:
+                line = upstream_resp.readline()
+                if not line:
+                    if buf:
+                        q.put(b"".join(buf))
+                        buf.clear()
                     q.put(None)
                     return
-                q.put(chunk)
+                buf.append(line)
+                # Emite somente em fronteira completa de evento SSE (linha vazia)
+                if line in (b"\n", b"\r\n"):
+                    q.put(b"".join(buf))
+                    buf.clear()
         except Exception as exc:
             if not stop_evt.is_set():
+                if buf:
+                    try:
+                        q.put(b"".join(buf))
+                    except Exception:
+                        pass
                 q.put(exc)
 
     t = threading.Thread(target=_reader, daemon=True)
