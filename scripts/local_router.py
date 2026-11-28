@@ -1037,6 +1037,55 @@ def create_server(
     return ThreadingHTTPServer((host, port), make_handler(st))
 
 
+def _local_http_call(
+    host: str,
+    port: int,
+    path: str,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    url = f"http://{host}:{port}{path}"
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+        headers["Authorization"] = "Bearer local-router-key"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw)
+            except Exception:
+                body = raw
+            return {
+                "ok": True,
+                "status": int(resp.status),
+                "latency_ms": int((time.time() - t0) * 1000),
+                "headers": {k.lower(): v for k, v in resp.headers.items()},
+                "body": body,
+            }
+    except urllib.error.HTTPError as err:
+        raw = err.read().decode("utf-8", errors="replace") if hasattr(err, "read") else ""
+        return {
+            "ok": False,
+            "status": int(err.code),
+            "latency_ms": int((time.time() - t0) * 1000),
+            "headers": {},
+            "error": raw[:200] or f"HTTP {err.code}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": 0,
+            "latency_ms": int((time.time() - t0) * 1000),
+            "headers": {},
+            "error": str(exc)[:200],
+        }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="NexusMind Local LLM Router (porta 4199)")
     parser.add_argument("--host", default=DEFAULT_HOST)
@@ -1049,6 +1098,10 @@ def main() -> int:
     parser.add_argument("--install-launchagent", action="store_true", help="Instala e carrega o LaunchAgent do macOS e encerra")
     parser.add_argument("--start-daemon", action="store_true", help="Inicia ou reinicia o roteador em background via PID file")
     parser.add_argument("--stop-daemon", action="store_true", help="Para o roteador em background via PID file")
+    parser.add_argument("--health-json", action="store_true", help="Consulta /health do roteador local e imprime JSON")
+    parser.add_argument("--metrics-json", action="store_true", help="Consulta /metrics do roteador local e imprime JSON")
+    parser.add_argument("--reset-circuits", action="store_true", help="Reseta circuitos via POST /circuits/reset e imprime JSON")
+    parser.add_argument("--probe-tier", default="", help="Envia probe de 4 tokens para o tier informado e imprime JSON")
     args = parser.parse_args()
 
     if args.register_provider:
@@ -1069,6 +1122,37 @@ def main() -> int:
     if args.start_daemon:
         res = start_daemon(host=args.host, port=args.port)
         print(json.dumps(res, indent=2, ensure_ascii=False))
+        return 0
+
+    if args.health_json:
+        res = _local_http_call(args.host, args.port, "/health", "GET", timeout=3.0)
+        print(json.dumps(res, ensure_ascii=False))
+        return 0
+
+    if args.metrics_json:
+        res = _local_http_call(args.host, args.port, "/metrics", "GET", timeout=4.0)
+        print(json.dumps(res, ensure_ascii=False))
+        return 0
+
+    if args.reset_circuits:
+        res = _local_http_call(args.host, args.port, "/circuits/reset", "POST", payload={}, timeout=4.0)
+        print(json.dumps(res, ensure_ascii=False))
+        return 0
+
+    if args.probe_tier:
+        res = _local_http_call(
+            args.host,
+            args.port,
+            "/v1/chat/completions",
+            "POST",
+            payload={
+                "model": args.probe_tier,
+                "messages": [{"role": "user", "content": "Responda apenas OK"}],
+                "max_tokens": 4,
+            },
+            timeout=25.0,
+        )
+        print(json.dumps(res, ensure_ascii=False))
         return 0
 
     state = RouterState(

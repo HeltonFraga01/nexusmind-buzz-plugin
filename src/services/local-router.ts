@@ -1,6 +1,8 @@
 /**
  * Serviço de controle e observabilidade do NexusMind Local Router (porta 4199).
- * 100% compatível com CSP do Buzz Desktop (usa ctx.host.request / spawn("python") / readFile).
+ * 100% compatível com o manifest HTTPS-only do Buzz Desktop:
+ * toda comunicação local usa ctx.host.spawn("python") + scripts/local_router.py CLI,
+ * sem precisar declarar origens HTTP não-HTTPS em networkOrigins.
  */
 
 export const LOCAL_ROUTER_HOST = "127.0.0.1";
@@ -93,14 +95,15 @@ function parseJsonSafe(raw: string | undefined | null): any {
   }
 }
 
-async function runRouterCliFlag(ctx: any, flag: string): Promise<{ code: number; stdout: string }> {
+async function runRouterCliArgs(ctx: any, cliArgs: string[]): Promise<{ code: number; stdout: string }> {
   if (!ctx?.host?.spawn) {
     throw new Error("ctx.host.spawn indisponível neste runtime.");
   }
   const pyCode = [
     "import os, sys, subprocess",
     "script = os.path.expanduser('~/.buzz/REPOS/nexusmind-buzz-plugin/scripts/local_router.py')",
-    `res = subprocess.run([sys.executable, script, ${JSON.stringify(flag)}], capture_output=True, text=True)`,
+    `cmd = [sys.executable, script] + ${JSON.stringify(cliArgs)}`,
+    "res = subprocess.run(cmd, capture_output=True, text=True)",
     "print(res.stdout or res.stderr)",
     "sys.exit(res.returncode)",
   ].join("\n");
@@ -117,28 +120,15 @@ async function runRouterCliFlag(ctx: any, flag: string): Promise<{ code: number;
 }
 
 export async function getRouterHealth(ctx: any): Promise<RouterHealthResponse> {
-  if (!ctx?.host?.request) {
-    return {
-      online: false,
-      open_circuits: {},
-      open_provider_circuits: {},
-      tierFallbackGroups: {},
-      error: "ctx.host.request indisponível",
-    };
-  }
   try {
-    const res = await ctx.host.request({
-      url: `${LOCAL_ROUTER_BASE_URL}/health`,
-      method: "GET",
-      headers: { Accept: "application/json" },
-      timeoutMs: 3000,
-    });
-    const data = parseJsonSafe(res.body);
-    if (res.status === 200 && data?.ok) {
+    const { stdout } = await runRouterCliArgs(ctx, ["--health-json"]);
+    const wrap = parseJsonSafe(stdout);
+    const data = wrap?.body;
+    if (wrap?.ok && wrap?.status === 200 && data?.ok) {
       return {
         online: true,
         service: data.service,
-        version: data.version || "1.x",
+        version: data.version || "2.0",
         pid: data.pid,
         uptime_sec: data.uptime_sec,
         stats: data.stats,
@@ -153,7 +143,7 @@ export async function getRouterHealth(ctx: any): Promise<RouterHealthResponse> {
       open_circuits: {},
       open_provider_circuits: {},
       tierFallbackGroups: {},
-      error: `HTTP ${res.status}`,
+      error: wrap?.error || "Roteador local offline na porta 4199",
     };
   } catch (err: any) {
     return {
@@ -167,34 +157,28 @@ export async function getRouterHealth(ctx: any): Promise<RouterHealthResponse> {
 }
 
 export async function getRouterMetrics(ctx: any): Promise<RouterMetricsResponse> {
-  if (ctx?.host?.request) {
-    try {
-      const res = await ctx.host.request({
-        url: `${LOCAL_ROUTER_BASE_URL}/metrics`,
-        method: "GET",
-        headers: { Accept: "application/json" },
-        timeoutMs: 4000,
-      });
-      const data = parseJsonSafe(res.body);
-      if (res.status === 200 && data?.ok) {
-        return {
-          online: true,
-          window_size: Number(data.window_size || 0),
-          ok_count: Number(data.ok_count || 0),
-          failed_count: Number(data.failed_count || 0),
-          success_rate_pct: Number(data.success_rate_pct ?? 100),
-          hops_recovered: Number(data.hops_recovered || 0),
-          p50_latency_ms: Number(data.p50_latency_ms || 0),
-          by_tier: data.by_tier || {},
-          by_model: data.by_model || {},
-          absorbed_errors: data.absorbed_errors || {},
-          open_circuits: data.open_circuits || {},
-          open_provider_circuits: data.open_provider_circuits || {},
-          recent_events: Array.isArray(data.recent_events) ? data.recent_events : [],
-        };
-      }
-    } catch {}
-  }
+  try {
+    const { stdout } = await runRouterCliArgs(ctx, ["--metrics-json"]);
+    const wrap = parseJsonSafe(stdout);
+    const data = wrap?.body;
+    if (wrap?.ok && wrap?.status === 200 && data?.ok) {
+      return {
+        online: true,
+        window_size: Number(data.window_size || 0),
+        ok_count: Number(data.ok_count || 0),
+        failed_count: Number(data.failed_count || 0),
+        success_rate_pct: Number(data.success_rate_pct ?? 100),
+        hops_recovered: Number(data.hops_recovered || 0),
+        p50_latency_ms: Number(data.p50_latency_ms || 0),
+        by_tier: data.by_tier || {},
+        by_model: data.by_model || {},
+        absorbed_errors: data.absorbed_errors || {},
+        open_circuits: data.open_circuits || {},
+        open_provider_circuits: data.open_provider_circuits || {},
+        recent_events: Array.isArray(data.recent_events) ? data.recent_events : [],
+      };
+    }
+  } catch {}
 
   // Fallback offline: lê ~/.buzz/.scratch/router-telemetry.jsonl diretamente via host.readFile
   if (typeof ctx?.host?.readFile === "function") {
@@ -268,25 +252,17 @@ export async function getRouterMetrics(ctx: any): Promise<RouterMetricsResponse>
 }
 
 export async function resetRouterCircuits(ctx: any): Promise<{ ok: boolean; message: string }> {
-  if (!ctx?.host?.request) {
-    return { ok: false, message: "ctx.host.request indisponível." };
-  }
   try {
-    const res = await ctx.host.request({
-      url: `${LOCAL_ROUTER_BASE_URL}/circuits/reset`,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-      timeoutMs: 4000,
-    });
-    const data = parseJsonSafe(res.body);
-    if (res.status === 200 && data?.ok) {
+    const { stdout } = await runRouterCliArgs(ctx, ["--reset-circuits"]);
+    const wrap = parseJsonSafe(stdout);
+    const data = wrap?.body;
+    if (wrap?.ok && wrap?.status === 200 && data?.ok) {
       return {
         ok: true,
         message: `Circuitos limpos: ${data.models_cleared ?? 0} modelo(s) e ${data.providers_cleared ?? 0} provedor(es).`,
       };
     }
-    return { ok: false, message: `Falha ao limpar circuitos (HTTP ${res.status}).` };
+    return { ok: false, message: wrap?.error || "Falha ao limpar circuitos." };
   } catch (err: any) {
     return { ok: false, message: err?.message || "Roteador local não respondeu." };
   }
@@ -294,7 +270,7 @@ export async function resetRouterCircuits(ctx: any): Promise<{ ok: boolean; mess
 
 export async function startOrRestartLocalRouter(ctx: any): Promise<{ ok: boolean; message: string }> {
   try {
-    const { code } = await runRouterCliFlag(ctx, "--start-daemon");
+    const { code } = await runRouterCliArgs(ctx, ["--start-daemon"]);
     if (code !== 0) {
       return { ok: false, message: `Falha ao iniciar roteador (exit ${code}).` };
     }
@@ -317,7 +293,7 @@ export async function startOrRestartLocalRouter(ctx: any): Promise<{ ok: boolean
 
 export async function stopLocalRouter(ctx: any): Promise<{ ok: boolean; message: string }> {
   try {
-    const { code } = await runRouterCliFlag(ctx, "--stop-daemon");
+    const { code } = await runRouterCliArgs(ctx, ["--stop-daemon"]);
     return code === 0
       ? { ok: true, message: "Roteador local parado." }
       : { ok: false, message: `Falha ao parar roteador (exit ${code}).` };
@@ -328,7 +304,7 @@ export async function stopLocalRouter(ctx: any): Promise<{ ok: boolean; message:
 
 export async function registerRouterProviderViaPlugin(ctx: any): Promise<{ ok: boolean; message: string }> {
   try {
-    const { code, stdout } = await runRouterCliFlag(ctx, "--register-provider");
+    const { code, stdout } = await runRouterCliArgs(ctx, ["--register-provider"]);
     if (code === 0) {
       return { ok: true, message: "Provedor nexusmind_router registrado no Goose e no Pi." };
     }
@@ -340,7 +316,7 @@ export async function registerRouterProviderViaPlugin(ctx: any): Promise<{ ok: b
 
 export async function installRouterLaunchAgent(ctx: any): Promise<{ ok: boolean; message: string }> {
   try {
-    const { code, stdout } = await runRouterCliFlag(ctx, "--install-launchagent");
+    const { code, stdout } = await runRouterCliArgs(ctx, ["--install-launchagent"]);
     const parsed = parseJsonSafe(stdout);
     if (code === 0 && parsed?.ok) {
       return {
@@ -358,47 +334,19 @@ export async function installRouterLaunchAgent(ctx: any): Promise<{ ok: boolean;
 
 export async function testRouterTier(ctx: any, tierId: string): Promise<TierProbeResult> {
   const t0 = Date.now();
-  if (!ctx?.host?.request) {
-    return {
-      tier: tierId,
-      ok: false,
-      status: 0,
-      actualModel: null,
-      provider: null,
-      hop: 0,
-      latencyMs: 0,
-      error: "ctx.host.request indisponível",
-    };
-  }
   try {
-    const res = await ctx.host.request({
-      url: `${LOCAL_ROUTER_BASE_URL}/v1/chat/completions`,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer local-router-key",
-      },
-      body: JSON.stringify({
-        model: tierId,
-        messages: [{ role: "user", content: "Responda apenas OK" }],
-        max_tokens: 4,
-      }),
-      timeoutMs: 25000,
-    });
-    const latencyMs = Date.now() - t0;
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(res.headers || {})) {
-      headers[k.toLowerCase()] = String(v);
-    }
+    const { stdout } = await runRouterCliArgs(ctx, ["--probe-tier", tierId]);
+    const wrap = parseJsonSafe(stdout);
+    const headers = wrap?.headers || {};
     return {
       tier: tierId,
-      ok: res.status === 200,
-      status: res.status,
+      ok: Boolean(wrap?.ok && wrap?.status === 200),
+      status: Number(wrap?.status || 0),
       actualModel: headers["x-nexusmind-actual-model"] || null,
       provider: headers["x-nexusmind-provider"] || null,
       hop: Number(headers["x-nexusmind-fallback-hop"] || 0),
-      latencyMs,
-      error: res.status === 200 ? undefined : String(res.body || `HTTP ${res.status}`).slice(0, 140),
+      latencyMs: Number(wrap?.latency_ms || Date.now() - t0),
+      error: wrap?.ok ? undefined : String(wrap?.error || `HTTP ${wrap?.status || "ERR"}`).slice(0, 140),
     };
   } catch (err: any) {
     return {
@@ -409,7 +357,7 @@ export async function testRouterTier(ctx: any, tierId: string): Promise<TierProb
       provider: null,
       hop: 0,
       latencyMs: Date.now() - t0,
-      error: err?.message || "Falha de rede",
+      error: err?.message || "Falha de comunicação com roteador local",
     };
   }
 }

@@ -4385,7 +4385,7 @@ function parseJsonSafe(raw) {
     return null;
   }
 }
-async function runRouterCliFlag(ctx, flag) {
+async function runRouterCliArgs(ctx, cliArgs) {
   var _a;
   if (!((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.spawn)) {
     throw new Error("ctx.host.spawn indisponível neste runtime.");
@@ -4393,7 +4393,8 @@ async function runRouterCliFlag(ctx, flag) {
   const pyCode = [
     "import os, sys, subprocess",
     "script = os.path.expanduser('~/.buzz/REPOS/nexusmind-buzz-plugin/scripts/local_router.py')",
-    `res = subprocess.run([sys.executable, script, ${JSON.stringify(flag)}], capture_output=True, text=True)`,
+    `cmd = [sys.executable, script] + ${JSON.stringify(cliArgs)}`,
+    "res = subprocess.run(cmd, capture_output=True, text=True)",
     "print(res.stdout or res.stderr)",
     "sys.exit(res.returncode)"
   ].join("\n");
@@ -4408,29 +4409,15 @@ async function runRouterCliFlag(ctx, flag) {
   return { code, stdout: stdout.trim() };
 }
 async function getRouterHealth(ctx) {
-  var _a;
-  if (!((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request)) {
-    return {
-      online: false,
-      open_circuits: {},
-      open_provider_circuits: {},
-      tierFallbackGroups: {},
-      error: "ctx.host.request indisponível"
-    };
-  }
   try {
-    const res = await ctx.host.request({
-      url: `${LOCAL_ROUTER_BASE_URL}/health`,
-      method: "GET",
-      headers: { Accept: "application/json" },
-      timeoutMs: 3e3
-    });
-    const data = parseJsonSafe(res.body);
-    if (res.status === 200 && (data == null ? void 0 : data.ok)) {
+    const { stdout } = await runRouterCliArgs(ctx, ["--health-json"]);
+    const wrap = parseJsonSafe(stdout);
+    const data = wrap == null ? void 0 : wrap.body;
+    if ((wrap == null ? void 0 : wrap.ok) && (wrap == null ? void 0 : wrap.status) === 200 && (data == null ? void 0 : data.ok)) {
       return {
         online: true,
         service: data.service,
-        version: data.version || "1.x",
+        version: data.version || "2.0",
         pid: data.pid,
         uptime_sec: data.uptime_sec,
         stats: data.stats,
@@ -4445,7 +4432,7 @@ async function getRouterHealth(ctx) {
       open_circuits: {},
       open_provider_circuits: {},
       tierFallbackGroups: {},
-      error: `HTTP ${res.status}`
+      error: (wrap == null ? void 0 : wrap.error) || "Roteador local offline na porta 4199"
     };
   } catch (err) {
     return {
@@ -4458,37 +4445,31 @@ async function getRouterHealth(ctx) {
   }
 }
 async function getRouterMetrics(ctx) {
-  var _a, _b;
-  if ((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request) {
-    try {
-      const res = await ctx.host.request({
-        url: `${LOCAL_ROUTER_BASE_URL}/metrics`,
-        method: "GET",
-        headers: { Accept: "application/json" },
-        timeoutMs: 4e3
-      });
-      const data = parseJsonSafe(res.body);
-      if (res.status === 200 && (data == null ? void 0 : data.ok)) {
-        return {
-          online: true,
-          window_size: Number(data.window_size || 0),
-          ok_count: Number(data.ok_count || 0),
-          failed_count: Number(data.failed_count || 0),
-          success_rate_pct: Number(data.success_rate_pct ?? 100),
-          hops_recovered: Number(data.hops_recovered || 0),
-          p50_latency_ms: Number(data.p50_latency_ms || 0),
-          by_tier: data.by_tier || {},
-          by_model: data.by_model || {},
-          absorbed_errors: data.absorbed_errors || {},
-          open_circuits: data.open_circuits || {},
-          open_provider_circuits: data.open_provider_circuits || {},
-          recent_events: Array.isArray(data.recent_events) ? data.recent_events : []
-        };
-      }
-    } catch {
+  var _a;
+  try {
+    const { stdout } = await runRouterCliArgs(ctx, ["--metrics-json"]);
+    const wrap = parseJsonSafe(stdout);
+    const data = wrap == null ? void 0 : wrap.body;
+    if ((wrap == null ? void 0 : wrap.ok) && (wrap == null ? void 0 : wrap.status) === 200 && (data == null ? void 0 : data.ok)) {
+      return {
+        online: true,
+        window_size: Number(data.window_size || 0),
+        ok_count: Number(data.ok_count || 0),
+        failed_count: Number(data.failed_count || 0),
+        success_rate_pct: Number(data.success_rate_pct ?? 100),
+        hops_recovered: Number(data.hops_recovered || 0),
+        p50_latency_ms: Number(data.p50_latency_ms || 0),
+        by_tier: data.by_tier || {},
+        by_model: data.by_model || {},
+        absorbed_errors: data.absorbed_errors || {},
+        open_circuits: data.open_circuits || {},
+        open_provider_circuits: data.open_provider_circuits || {},
+        recent_events: Array.isArray(data.recent_events) ? data.recent_events : []
+      };
     }
+  } catch {
   }
-  if (typeof ((_b = ctx == null ? void 0 : ctx.host) == null ? void 0 : _b.readFile) === "function") {
+  if (typeof ((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.readFile) === "function") {
     for (const p of [
       LOCAL_ROUTER_TELEMETRY_PATH,
       "/Users/heltonfraga/.buzz/.scratch/router-telemetry.jsonl"
@@ -4558,33 +4539,24 @@ async function getRouterMetrics(ctx) {
   };
 }
 async function resetRouterCircuits(ctx) {
-  var _a;
-  if (!((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request)) {
-    return { ok: false, message: "ctx.host.request indisponível." };
-  }
   try {
-    const res = await ctx.host.request({
-      url: `${LOCAL_ROUTER_BASE_URL}/circuits/reset`,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-      timeoutMs: 4e3
-    });
-    const data = parseJsonSafe(res.body);
-    if (res.status === 200 && (data == null ? void 0 : data.ok)) {
+    const { stdout } = await runRouterCliArgs(ctx, ["--reset-circuits"]);
+    const wrap = parseJsonSafe(stdout);
+    const data = wrap == null ? void 0 : wrap.body;
+    if ((wrap == null ? void 0 : wrap.ok) && (wrap == null ? void 0 : wrap.status) === 200 && (data == null ? void 0 : data.ok)) {
       return {
         ok: true,
         message: `Circuitos limpos: ${data.models_cleared ?? 0} modelo(s) e ${data.providers_cleared ?? 0} provedor(es).`
       };
     }
-    return { ok: false, message: `Falha ao limpar circuitos (HTTP ${res.status}).` };
+    return { ok: false, message: (wrap == null ? void 0 : wrap.error) || "Falha ao limpar circuitos." };
   } catch (err) {
     return { ok: false, message: (err == null ? void 0 : err.message) || "Roteador local não respondeu." };
   }
 }
 async function startOrRestartLocalRouter(ctx) {
   try {
-    const { code } = await runRouterCliFlag(ctx, "--start-daemon");
+    const { code } = await runRouterCliArgs(ctx, ["--start-daemon"]);
     if (code !== 0) {
       return { ok: false, message: `Falha ao iniciar roteador (exit ${code}).` };
     }
@@ -4606,7 +4578,7 @@ async function startOrRestartLocalRouter(ctx) {
 }
 async function stopLocalRouter(ctx) {
   try {
-    const { code } = await runRouterCliFlag(ctx, "--stop-daemon");
+    const { code } = await runRouterCliArgs(ctx, ["--stop-daemon"]);
     return code === 0 ? { ok: true, message: "Roteador local parado." } : { ok: false, message: `Falha ao parar roteador (exit ${code}).` };
   } catch (err) {
     return { ok: false, message: `Erro ao parar roteador: ${(err == null ? void 0 : err.message) || String(err)}` };
@@ -4614,7 +4586,7 @@ async function stopLocalRouter(ctx) {
 }
 async function registerRouterProviderViaPlugin(ctx) {
   try {
-    const { code, stdout } = await runRouterCliFlag(ctx, "--register-provider");
+    const { code, stdout } = await runRouterCliArgs(ctx, ["--register-provider"]);
     if (code === 0) {
       return { ok: true, message: "Provedor nexusmind_router registrado no Goose e no Pi." };
     }
@@ -4625,7 +4597,7 @@ async function registerRouterProviderViaPlugin(ctx) {
 }
 async function installRouterLaunchAgent(ctx) {
   try {
-    const { code, stdout } = await runRouterCliFlag(ctx, "--install-launchagent");
+    const { code, stdout } = await runRouterCliArgs(ctx, ["--install-launchagent"]);
     const parsed = parseJsonSafe(stdout);
     if (code === 0 && (parsed == null ? void 0 : parsed.ok)) {
       return {
@@ -4639,49 +4611,20 @@ async function installRouterLaunchAgent(ctx) {
   }
 }
 async function testRouterTier(ctx, tierId) {
-  var _a;
   const t0 = Date.now();
-  if (!((_a = ctx == null ? void 0 : ctx.host) == null ? void 0 : _a.request)) {
-    return {
-      tier: tierId,
-      ok: false,
-      status: 0,
-      actualModel: null,
-      provider: null,
-      hop: 0,
-      latencyMs: 0,
-      error: "ctx.host.request indisponível"
-    };
-  }
   try {
-    const res = await ctx.host.request({
-      url: `${LOCAL_ROUTER_BASE_URL}/v1/chat/completions`,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer local-router-key"
-      },
-      body: JSON.stringify({
-        model: tierId,
-        messages: [{ role: "user", content: "Responda apenas OK" }],
-        max_tokens: 4
-      }),
-      timeoutMs: 25e3
-    });
-    const latencyMs = Date.now() - t0;
-    const headers = {};
-    for (const [k, v] of Object.entries(res.headers || {})) {
-      headers[k.toLowerCase()] = String(v);
-    }
+    const { stdout } = await runRouterCliArgs(ctx, ["--probe-tier", tierId]);
+    const wrap = parseJsonSafe(stdout);
+    const headers = (wrap == null ? void 0 : wrap.headers) || {};
     return {
       tier: tierId,
-      ok: res.status === 200,
-      status: res.status,
+      ok: Boolean((wrap == null ? void 0 : wrap.ok) && (wrap == null ? void 0 : wrap.status) === 200),
+      status: Number((wrap == null ? void 0 : wrap.status) || 0),
       actualModel: headers["x-nexusmind-actual-model"] || null,
       provider: headers["x-nexusmind-provider"] || null,
       hop: Number(headers["x-nexusmind-fallback-hop"] || 0),
-      latencyMs,
-      error: res.status === 200 ? void 0 : String(res.body || `HTTP ${res.status}`).slice(0, 140)
+      latencyMs: Number((wrap == null ? void 0 : wrap.latency_ms) || Date.now() - t0),
+      error: (wrap == null ? void 0 : wrap.ok) ? void 0 : String((wrap == null ? void 0 : wrap.error) || `HTTP ${(wrap == null ? void 0 : wrap.status) || "ERR"}`).slice(0, 140)
     };
   } catch (err) {
     return {
@@ -4692,7 +4635,7 @@ async function testRouterTier(ctx, tierId) {
       provider: null,
       hop: 0,
       latencyMs: Date.now() - t0,
-      error: (err == null ? void 0 : err.message) || "Falha de rede"
+      error: (err == null ? void 0 : err.message) || "Falha de comunicação com roteador local"
     };
   }
 }

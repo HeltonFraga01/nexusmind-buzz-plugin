@@ -18,8 +18,7 @@
   "host": {
     "networkOrigins": [
       "https://api.nexusmind.digital",
-      "https://nexusmind.digital",
-      "http://127.0.0.1:4199"
+      "https://nexusmind.digital"
     ],
     "commands": [
       {
