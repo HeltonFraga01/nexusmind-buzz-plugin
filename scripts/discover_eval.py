@@ -653,18 +653,48 @@ def run_discover_and_eval(
     vip_non_iris = [r for r in vip_pool if r["model"].lower() != "gpt-6.1-terra"]
 
     # Escadas intercaladas por provedor (garante redundância multi-provedor real!)
+    frontier_ladder = _interleave_by_provider(auto_pool, "tier3_frontier", 5)
+
+    def _vip_first_with_auto_backfill(
+        vip_rows: list[dict[str, Any]],
+        fallback_rows: list[dict[str, Any]],
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for r in vip_rows:
+            ml = r["model"].lower()
+            if ml in seen:
+                continue
+            seen.add(ml)
+            out.append({"model": r["model"], "provider": r["provider"], "score": r.get("evalScore", 0)})
+            if len(out) >= limit:
+                return out
+        for entry in fallback_rows:
+            ml = str(entry["model"]).lower()
+            if ml in seen or ml == "gpt-6.1-terra":
+                continue
+            seen.add(ml)
+            out.append(entry)
+            if len(out) >= limit:
+                break
+        return out
+
     iris_sorted = sorted(
         vip_pool,
         key=lambda r: (1 if r["model"].lower() == "gpt-6.1-terra" else 0, float(r.get("evalScore") or 0)),
         reverse=True,
     )
+    vip_leadership_sorted = _interleave_by_provider(vip_non_iris, "tier3_frontier", 5)
+    vip_leadership_rows = [
+        {"model": x["model"], "provider": x["provider"], "evalScore": x.get("score", 0)}
+        for x in vip_leadership_sorted
+    ]
+
     tier_groups = {
-        "group/vip-iris": [
-            {"model": r["model"], "provider": r["provider"], "score": r.get("evalScore", 0)}
-            for r in iris_sorted[:5]
-        ],
-        "group/vip-leadership": _interleave_by_provider(vip_non_iris or auto_pool, "tier3_frontier", 5),
-        "group/frontier": _interleave_by_provider(auto_pool, "tier3_frontier", 5),
+        "group/vip-iris": _vip_first_with_auto_backfill(iris_sorted, frontier_ladder, 5),
+        "group/vip-leadership": _vip_first_with_auto_backfill(vip_leadership_rows, frontier_ladder, 5),
+        "group/frontier": frontier_ladder,
         "group/reasoning": _interleave_by_provider(auto_pool, "reasoning", 5),
         "group/code": _interleave_by_provider(auto_pool, "tier2_balanced", 5),
         "group/fast": _interleave_by_provider(auto_pool, "tier1_fast", 5),

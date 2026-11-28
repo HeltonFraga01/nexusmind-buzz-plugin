@@ -294,7 +294,12 @@ class RouterState:
         return True
 
     def get_effective_tier_groups(self) -> dict[str, list[dict[str, Any]]]:
-        """Retorna tierFallbackGroups já filtrados ao vivo por blockedModels, disabledModels e vipModels."""
+        """Retorna tierFallbackGroups já filtrados ao vivo por blockedModels, disabledModels e vipModels.
+
+        Para tiers VIP (`group/vip-iris` e `group/vip-leadership`), mantém VIPs no topo com prioridade
+        absoluta e completa até 5 slots com os melhores modelos `group/frontier` aprovados caso haja
+        poucos VIPs online (evita ficar com apenas 1 modelo).
+        """
         cp = self.get_control_plane()
         raw_groups = cp.get("tierFallbackGroups") or {}
         out: dict[str, list[dict[str, Any]]] = {}
@@ -314,6 +319,26 @@ class RouterState:
                 seen.add(ml)
                 filtered.append(entry)
             out[gkey] = filtered
+
+        # Backfill de segurança nos tiers VIP: VIP primeiro, mas completa até 5 com top frontier/code se faltar VIP
+        safety_pool = (out.get("group/frontier") or []) + (out.get("group/code") or [])
+        for vip_key in ("group/vip-leadership", "group/vip-iris"):
+            cur = out.get(vip_key)
+            if isinstance(cur, list) and len(cur) < 5:
+                seen_v = {str(x.get("model") or "").strip().lower() for x in cur}
+                for cand in safety_pool:
+                    cm = str(cand.get("model") or "").strip()
+                    cpv = str(cand.get("provider") or infer_provider(cm)).strip()
+                    cl = cm.lower()
+                    if not cm or cl in seen_v or cl == "gpt-6.1-terra":
+                        continue
+                    if not self._is_model_allowed_in_group(cm, cpv, vip_key):
+                        continue
+                    seen_v.add(cl)
+                    cur.append(cand)
+                    if len(cur) >= 5:
+                        break
+                out[vip_key] = cur
         return out
 
     def is_circuit_open(self, model_id: str, now: float | None = None) -> bool:
