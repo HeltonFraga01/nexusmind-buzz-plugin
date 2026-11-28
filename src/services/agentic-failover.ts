@@ -496,6 +496,31 @@ export async function executeAgentFailover(
   const vip = isVipAgent(agentName, vipPolicy);
   const errorKind = params.errorText ? classifyGatewayError(params.errorText, params.httpStatus) : "unknown";
 
+  // Proteção do Roteador Local: nunca sobrescrever agentes em nexusmind_router / tier/*
+  if (
+    String(fromGroup || "").toLowerCase() === "nexusmind_router" ||
+    String(fromModel || "").toLowerCase().startsWith("tier/")
+  ) {
+    const protectedEvt: FailoverEvent = {
+      id: `fo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: new Date().toISOString(),
+      agentKey,
+      agentName,
+      isVip: vip,
+      fromModel,
+      toModel: fromModel,
+      toGroup: "nexusmind_router",
+      reason: params.errorText || "Roteador local ativo",
+      errorKind,
+      trigger: params.trigger,
+      applied: false,
+      wokeAgent: false,
+      note: `${agentName} já está protegido pelo Roteador Local (nexusmind_router/${fromModel}); failover tratado in-flight.`,
+    };
+    await appendFailoverLog(ctx, protectedEvt);
+    return protectedEvt;
+  }
+
   // Coloca o modelo que falhou em quarentena (se houve erro real)
   if (fromModel && params.errorText) {
     quarantineModel(fromModel, fromGroup, params.errorText, params.httpStatus, agentName);
