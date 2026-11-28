@@ -651,12 +651,19 @@ def make_handler(state: RouterState):
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
             if path in ("/health", "/v1/health"):
+                disc_report = None
+                rep_path = state.scratch_dir / "router-discovery-report.json"
+                if rep_path.exists():
+                    try:
+                        disc_report = json.loads(rep_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        disc_report = None
                 self._send_json(
                     200,
                     {
                         "ok": True,
                         "service": "nexusmind-local-router",
-                        "version": "2.0.0",
+                        "version": "2.1.0",
                         "pid": os.getpid(),
                         "uptime_sec": round(time.time() - state.started_at, 1),
                         "stats": state.stats,
@@ -667,6 +674,7 @@ def make_handler(state: RouterState):
                             "retries": state.vip_sticky_retries,
                             "delay_sec": state.vip_sticky_delay_sec,
                         },
+                        "discovery_report": disc_report,
                         "tierFallbackGroups": state.get_effective_tier_groups(),
                     },
                 )
@@ -1188,6 +1196,9 @@ def main() -> int:
     parser.add_argument("--metrics-json", action="store_true", help="Consulta /metrics do roteador local e imprime JSON")
     parser.add_argument("--reset-circuits", action="store_true", help="Reseta circuitos via POST /circuits/reset e imprime JSON")
     parser.add_argument("--probe-tier", default="", help="Envia probe de 4 tokens para o tier informado e imprime JSON")
+    parser.add_argument("--discover-and-eval", action="store_true", help="Descobre todos os modelos ativos nas 4 APIs, roda Eval de tool-calling e atualiza escadas")
+    parser.add_argument("--max-models", type=int, default=80, help="Limite de modelos no --discover-and-eval (0 = todos)")
+    parser.add_argument("--force", action="store_true", help="Força reteste ignorando cache de 6h no --discover-and-eval")
     args = parser.parse_args()
 
     if args.register_provider:
@@ -1238,6 +1249,13 @@ def main() -> int:
             },
             timeout=25.0,
         )
+        print(json.dumps(res, ensure_ascii=False))
+        return 0
+
+    if args.discover_and_eval:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import discover_eval  # type: ignore
+        res = discover_eval.run_discover_and_eval(max_models=args.max_models, force=args.force)
         print(json.dumps(res, ensure_ascii=False))
         return 0
 
