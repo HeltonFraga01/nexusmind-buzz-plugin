@@ -36,6 +36,16 @@ export interface RouterHealthResponse {
     retries: number;
     delay_sec: number;
   };
+  discovery_report?: {
+    updatedAt?: string;
+    totalCatalog4Apis?: number;
+    activeCandidates?: number;
+    testedNow?: number;
+    approvedCount?: number;
+    autoApprovedCount?: number;
+    vipApprovedCount?: number;
+    apis?: Array<{ provider: string; platform: string; online: boolean; rawCount: number; approvedCount?: number }>;
+  } | null;
   tierFallbackGroups: Record<string, Array<{ model: string; provider: string; score?: number }>>;
   error?: string;
 }
@@ -135,6 +145,7 @@ export async function getRouterHealth(ctx: any): Promise<RouterHealthResponse> {
         open_circuits: data.open_circuits || {},
         open_provider_circuits: data.open_provider_circuits || {},
         vip_sticky_policy: data.vip_sticky_policy,
+        discovery_report: data.discovery_report || null,
         tierFallbackGroups: data.tierFallbackGroups || {},
       };
     }
@@ -311,6 +322,28 @@ export async function registerRouterProviderViaPlugin(ctx: any): Promise<{ ok: b
     return { ok: false, message: `Falha ao registrar provedor (exit ${code}): ${stdout.slice(0, 140)}` };
   } catch (err: any) {
     return { ok: false, message: `Erro ao registrar provedor: ${err?.message || String(err)}` };
+  }
+}
+
+export async function runRouterDiscoveryEval(
+  ctx: any,
+  options: { maxModels?: number; force?: boolean } = {}
+): Promise<{ ok: boolean; message: string; report?: any }> {
+  try {
+    const cliArgs = ["--discover-and-eval", "--max-models", String(options.maxModels ?? 80)];
+    if (options.force) cliArgs.push("--force");
+    const { code, stdout } = await runRouterCliArgs(ctx, cliArgs);
+    const parsed = parseJsonSafe(stdout);
+    if (code === 0 && parsed?.ok) {
+      return {
+        ok: true,
+        report: parsed,
+        message: `Descoberta 4 APIs concluída: ${parsed.totalCatalog4Apis ?? 0} modelos no catálogo, ${parsed.activeCandidates ?? 0} ativos, ${parsed.approvedCount ?? 0} aprovados (${parsed.autoApprovedCount ?? 0} Auto · ${parsed.vipApprovedCount ?? 0} VIP).`,
+      };
+    }
+    return { ok: false, message: `Falha na descoberta/eval (exit ${code}): ${stdout.slice(0, 140)}` };
+  } catch (err: any) {
+    return { ok: false, message: `Erro ao descobrir/testar modelos: ${err?.message || String(err)}` };
   }
 }
 

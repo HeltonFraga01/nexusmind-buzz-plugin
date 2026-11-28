@@ -9,6 +9,7 @@ import {
   installRouterLaunchAgent,
   registerRouterProviderViaPlugin,
   resetRouterCircuits,
+  runRouterDiscoveryEval,
   startOrRestartLocalRouter,
   stopLocalRouter,
   testRouterTier,
@@ -204,6 +205,16 @@ export function createLocalRouterTabComponent(ctx: Context) {
               type: "button",
               className: "nm-btn",
               disabled: busyAction !== null,
+              onClick: () => runAction("discover", () => runRouterDiscoveryEval(ctx, { maxModels: 80 })),
+            },
+            busyAction === "discover" ? "Testando 4 APIs..." : "Descobrir & Testar (4 APIs)"
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              disabled: busyAction !== null,
               onClick: () => runAction("launchagent", () => installRouterLaunchAgent(ctx)),
             },
             busyAction === "launchagent" ? "Instalando..." : "Auto-Start macOS"
@@ -325,6 +336,46 @@ export function createLocalRouterTabComponent(ctx: Context) {
                 `${mod} · ${Math.round(info.remaining_sec)}s`
               )
             )
+          )
+        ),
+
+      // 3.5 Cobertura das 4 APIs (última varredura dinâmica)
+      health?.discovery_report &&
+        h(
+          "div",
+          {
+            className: "nm-surface",
+            style: {
+              padding: "10px 14px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "8px",
+              fontSize: "11.5px",
+            },
+          },
+          h(
+            "div",
+            { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+            h("span", { style: { fontWeight: 600, color: "var(--nm-fg)" } }, "Cobertura 4 APIs:"),
+            ...(health.discovery_report.apis || []).map((a) =>
+              h(
+                "span",
+                {
+                  key: a.provider,
+                  className: "nm-pill nm-mono",
+                  "data-tone": (a.approvedCount || 0) > 0 ? "ok" : a.online ? undefined : "err",
+                  style: { fontSize: "10.5px" },
+                },
+                `${a.platform}: ${a.approvedCount ?? 0} aprov. / ${a.rawCount} cat.`
+              )
+            )
+          ),
+          h(
+            "span",
+            { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } },
+            `${health.discovery_report.autoApprovedCount ?? 0} Auto · ${health.discovery_report.vipApprovedCount ?? 0} VIP · ${formatShortTime(health.discovery_report.updatedAt)}`
           )
         ),
 

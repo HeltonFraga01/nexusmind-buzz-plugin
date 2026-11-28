@@ -4451,6 +4451,7 @@ async function getRouterHealth(ctx) {
         open_circuits: data.open_circuits || {},
         open_provider_circuits: data.open_provider_circuits || {},
         vip_sticky_policy: data.vip_sticky_policy,
+        discovery_report: data.discovery_report || null,
         tierFallbackGroups: data.tierFallbackGroups || {}
       };
     }
@@ -4620,6 +4621,24 @@ async function registerRouterProviderViaPlugin(ctx) {
     return { ok: false, message: `Falha ao registrar provedor (exit ${code}): ${stdout.slice(0, 140)}` };
   } catch (err) {
     return { ok: false, message: `Erro ao registrar provedor: ${(err == null ? void 0 : err.message) || String(err)}` };
+  }
+}
+async function runRouterDiscoveryEval(ctx, options = {}) {
+  try {
+    const cliArgs = ["--discover-and-eval", "--max-models", String(options.maxModels ?? 80)];
+    if (options.force) cliArgs.push("--force");
+    const { code, stdout } = await runRouterCliArgs(ctx, cliArgs);
+    const parsed = parseJsonSafe(stdout);
+    if (code === 0 && (parsed == null ? void 0 : parsed.ok)) {
+      return {
+        ok: true,
+        report: parsed,
+        message: `Descoberta 4 APIs concluída: ${parsed.totalCatalog4Apis ?? 0} modelos no catálogo, ${parsed.activeCandidates ?? 0} ativos, ${parsed.approvedCount ?? 0} aprovados (${parsed.autoApprovedCount ?? 0} Auto · ${parsed.vipApprovedCount ?? 0} VIP).`
+      };
+    }
+    return { ok: false, message: `Falha na descoberta/eval (exit ${code}): ${stdout.slice(0, 140)}` };
+  } catch (err) {
+    return { ok: false, message: `Erro ao descobrir/testar modelos: ${(err == null ? void 0 : err.message) || String(err)}` };
   }
 }
 async function installRouterLaunchAgent(ctx) {
@@ -4837,6 +4856,16 @@ function createLocalRouterTabComponent(ctx) {
               type: "button",
               className: "nm-btn",
               disabled: busyAction !== null,
+              onClick: () => runAction("discover", () => runRouterDiscoveryEval(ctx, { maxModels: 80 }))
+            },
+            busyAction === "discover" ? "Testando 4 APIs..." : "Descobrir & Testar (4 APIs)"
+          ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              disabled: busyAction !== null,
               onClick: () => runAction("launchagent", () => installRouterLaunchAgent(ctx))
             },
             busyAction === "launchagent" ? "Instalando..." : "Auto-Start macOS"
@@ -4955,6 +4984,44 @@ function createLocalRouterTabComponent(ctx) {
               `${mod} · ${Math.round(info.remaining_sec)}s`
             )
           )
+        )
+      ),
+      // 3.5 Cobertura das 4 APIs (última varredura dinâmica)
+      (health == null ? void 0 : health.discovery_report) && h(
+        "div",
+        {
+          className: "nm-surface",
+          style: {
+            padding: "10px 14px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "8px",
+            fontSize: "11.5px"
+          }
+        },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+          h("span", { style: { fontWeight: 600, color: "var(--nm-fg)" } }, "Cobertura 4 APIs:"),
+          ...(health.discovery_report.apis || []).map(
+            (a) => h(
+              "span",
+              {
+                key: a.provider,
+                className: "nm-pill nm-mono",
+                "data-tone": (a.approvedCount || 0) > 0 ? "ok" : a.online ? void 0 : "err",
+                style: { fontSize: "10.5px" }
+              },
+              `${a.platform}: ${a.approvedCount ?? 0} aprov. / ${a.rawCount} cat.`
+            )
+          )
+        ),
+        h(
+          "span",
+          { className: "nm-mono", style: { fontSize: "11px", color: "var(--nm-muted)" } },
+          `${health.discovery_report.autoApprovedCount ?? 0} Auto · ${health.discovery_report.vipApprovedCount ?? 0} VIP · ${formatShortTime(health.discovery_report.updatedAt)}`
         )
       ),
       // 4. Escadas Ativas por Tier (Top-5 do Control Plane)
