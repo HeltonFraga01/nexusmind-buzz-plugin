@@ -188,14 +188,75 @@ export function createNexusMindAgentsTabComponent(
       [agents]
     );
 
+    const ROUTER_TIER_OPTIONS = [
+      { id: "tier/vip-iris", group: "nexusmind_router", label: "tier/vip-iris (VIP Iris · Sticky Retry)" },
+      { id: "tier/diretoria", group: "nexusmind_router", label: "tier/diretoria (Diretoria & Conselho)" },
+      { id: "tier/frontier", group: "nexusmind_router", label: "tier/frontier (Frontier / Arquitetura)" },
+      { id: "tier/reasoning", group: "nexusmind_router", label: "tier/reasoning (Raciocínio / QA)" },
+      { id: "tier/code", group: "nexusmind_router", label: "tier/code (Código / Dev)" },
+      { id: "tier/fast", group: "nexusmind_router", label: "tier/fast (Rápido / PO / Ops)" },
+    ];
+
+    const resolveDefaultTierForAgent = (agentName: string): string => {
+      const low = String(agentName || "").toLowerCase();
+      if (/\biris\b/.test(low)) return "tier/vip-iris";
+      if (/(\bbento\b(?!\s*arquit)|conselho|board|\bcoo\b|\bceo\b|\bcfo\b|\bcto\b|\bcro\b|\bcpo\b|\bcgo\b|lara)/.test(low) && !/arquit/.test(low)) {
+        return "tier/diretoria";
+      }
+      if (/(arquit|teo|vera|hugo|revis|\bqa\b|segur|secur)/.test(low)) return "tier/reasoning";
+      if (/(\bpo\b|or[aá]culo|scout|cron|pesquisa|\bsol\b)/.test(low)) return "tier/fast";
+      return "tier/code";
+    };
+
     const resolveGroupForModel = (modelId: string): string => {
+      const low = String(modelId || "").toLowerCase();
+      if (low.startsWith("tier/")) return "nexusmind_router";
       const found = activeCatalogOptions.find((o) => o.id === modelId);
       if (found) return found.group;
-      const low = modelId.toLowerCase();
       if (low.includes("grok")) return "nexusmind_grok";
       if (low.includes("gemini") || low.includes("thinking")) return "nexusmind_antigravity";
       if (low.includes("claude")) return "nexusmind_anthropic";
       return "nexusmind_openai";
+    };
+
+    const [applyingAllTiers, setApplyingAllTiers] = React.useState<boolean>(false);
+
+    const handleApplyTiersToAll = async () => {
+      const agentsApi = (ctx as any)?.agents;
+      if (typeof agentsApi?.save !== "function") {
+        onNotify({ type: "error", text: "API ctx.agents.save() indisponível neste runtime." });
+        return;
+      }
+      setApplyingAllTiers(true);
+      let updated = 0;
+      try {
+        const currentList = readBuzzAgents(ctx);
+        for (const ag of currentList) {
+          const targetTier = resolveDefaultTierForAgent(ag.name);
+          const alreadyOnTier =
+            ag.provider.toLowerCase() === "nexusmind_router" &&
+            ag.model.toLowerCase() === targetTier;
+          if (alreadyOnTier) continue;
+          const nextCfg = {
+            ...(ag.config && typeof ag.config === "object" ? ag.config : {}),
+            provider: "nexusmind_router",
+            model: targetTier,
+          };
+          try {
+            await agentsApi.save(ag.key, { config: nextCfg });
+            updated += 1;
+          } catch {}
+        }
+        refreshAgents();
+        onNotify({
+          type: "success",
+          text: updated > 0
+            ? `${updated} agente(s) migrado(s) para nexusmind_router / tier/* com sucesso.`
+            : "Todos os agentes já estão padronizados no Roteador Local (tier/*).",
+        });
+      } finally {
+        setApplyingAllTiers(false);
+      }
     };
 
     const handleSaveAgentModel = async (agent: BuzzAgentRow, targetModel: string, targetGroup?: string) => {
@@ -325,6 +386,19 @@ export function createNexusMindAgentsTabComponent(
               }),
               "Só :free"
             ),
+          h(
+            "button",
+            {
+              type: "button",
+              className: "nm-btn",
+              "data-variant": "primary",
+              disabled: applyingAllTiers,
+              onClick: handleApplyTiersToAll,
+              title: "Padroniza todos os agentes (incluindo OrgFy Iris) no Roteador Local (nexusmind_router / tier/*)",
+              style: { padding: "5px 10px", fontSize: "11.5px" },
+            },
+            applyingAllTiers ? "Aplicando Tiers..." : "Aplicar Tiers em Todos"
+          ),
           h(
             "button",
             {
@@ -531,13 +605,25 @@ export function createNexusMindAgentsTabComponent(
                             maxWidth: "220px",
                           },
                         },
-                        !activeCatalogOptions.some((o) => o.id === agent.model) &&
+                        !ROUTER_TIER_OPTIONS.some((o) => o.id === agent.model) &&
+                          !activeCatalogOptions.some((o) => o.id === agent.model) &&
                           h("option", { key: "__current", value: agent.model }, agent.model),
-                        activeCatalogOptions.slice(0, 80).map((opt) =>
-                          h(
-                            "option",
-                            { key: opt.id, value: opt.id },
-                            `${opt.id} (${opt.group.replace("nexusmind_", "")})`
+                        h(
+                          "optgroup",
+                          { key: "__tiers", label: "Roteador Local (Auto-Fallback)" },
+                          ROUTER_TIER_OPTIONS.map((opt) =>
+                            h("option", { key: opt.id, value: opt.id }, opt.label)
+                          )
+                        ),
+                        h(
+                          "optgroup",
+                          { key: "__models", label: "Modelos Diretos (Catalogo)" },
+                          activeCatalogOptions.slice(0, 80).map((opt) =>
+                            h(
+                              "option",
+                              { key: opt.id, value: opt.id },
+                              `${opt.id} (${opt.group.replace("nexusmind_", "")})`
+                            )
                           )
                         )
                       )
