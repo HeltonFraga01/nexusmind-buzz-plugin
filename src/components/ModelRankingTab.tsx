@@ -188,8 +188,9 @@ export function createModelRankingTabComponent(
         vipPolicy,
         qualityBench,
         quarantines,
+        controlPlaneModels: Array.isArray(controlPlane?.models) ? controlPlane.models : undefined,
       });
-    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy, vipPolicy, qualityBench, quarantines]);
+    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy, vipPolicy, qualityBench, quarantines, controlPlane]);
 
     React.useEffect(() => {
       if (snapshot.models.length === 0) return;
@@ -894,6 +895,7 @@ export function createModelRankingTabComponent(
                           "Testar"
                         ),
                         agentsList.length > 0 &&
+                          row.accessMode !== "blocked" &&
                           h(
                             "button",
                             {

@@ -73,15 +73,25 @@ export function isUnsupportedAgentModel(modelId: string): boolean {
   const m = String(modelId || "").trim().toLowerCase();
   if (!m) return true;
   return (
+    m === "haiku" ||
+    m === "flash" ||
+    m === "nex-n2-pro" ||
+    m === "grok-4.5" ||
+    m === "grok-4.5-latest" ||
     m.startsWith("pol/") ||
     m.startsWith("pollinations/") ||
     m.includes("pol/community/") ||
     m.includes("pollinations/community/") ||
     m.includes("gemini-3.8-flash-medium") ||
+    m.includes("gemini-4-hydrogen-medium") ||
     m.includes("mistral-large-4-1t-a52b") ||
     m.includes("gemini-3-pro-low") ||
     m.includes("gemini-3-pro-high") ||
+    m.includes("claude-sonnet-5-5") ||
+    m.includes("claude-opus-5-5") ||
+    m.includes("minimax-m3.1-flash") ||
     m.startsWith("auto/") ||
+    m.includes("tab_flash") ||
     m.includes("tab_jump") ||
     m.includes("autocomplete") ||
     m.includes("fim-") ||
@@ -90,8 +100,11 @@ export function isUnsupportedAgentModel(modelId: string): boolean {
     m.includes("whisper") ||
     m.includes("tts") ||
     m.includes("imagen") ||
+    m.includes("-image") ||
     m.includes("dall-e") ||
-    m.includes("moderation")
+    m.includes("moderation") ||
+    m.includes("safety-guard") ||
+    m.endsWith(":batch")
   );
 }
 

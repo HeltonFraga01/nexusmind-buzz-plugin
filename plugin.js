@@ -209,7 +209,7 @@ function isFreeModel$1(modelId) {
 function isUnsupportedAgentModel(modelId) {
   const m = String(modelId || "").trim().toLowerCase();
   if (!m) return true;
-  return m.startsWith("pol/") || m.startsWith("pollinations/") || m.includes("pol/community/") || m.includes("pollinations/community/") || m.includes("gemini-3.8-flash-medium") || m.includes("mistral-large-4-1t-a52b") || m.includes("gemini-3-pro-low") || m.includes("gemini-3-pro-high") || m.startsWith("auto/") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("dall-e") || m.includes("moderation");
+  return m === "haiku" || m === "flash" || m === "nex-n2-pro" || m === "grok-4.5" || m === "grok-4.5-latest" || m.startsWith("pol/") || m.startsWith("pollinations/") || m.includes("pol/community/") || m.includes("pollinations/community/") || m.includes("gemini-3.8-flash-medium") || m.includes("gemini-4-hydrogen-medium") || m.includes("mistral-large-4-1t-a52b") || m.includes("gemini-3-pro-low") || m.includes("gemini-3-pro-high") || m.includes("claude-sonnet-5-5") || m.includes("claude-opus-5-5") || m.includes("minimax-m3.1-flash") || m.startsWith("auto/") || m.includes("tab_flash") || m.includes("tab_jump") || m.includes("autocomplete") || m.includes("fim-") || m.includes("embedding") || m.includes("rerank") || m.includes("whisper") || m.includes("tts") || m.includes("imagen") || m.includes("-image") || m.includes("dall-e") || m.includes("moderation") || m.includes("safety-guard") || m.endsWith(":batch");
 }
 function scoreModelForTier(modelId, tier) {
   const m = String(modelId || "").toLowerCase();
@@ -1162,48 +1162,72 @@ function buildModelRankingSnapshot(params) {
   const liveProbes = params.liveProbes || {};
   const qualityBench = params.qualityBench || {};
   const quarantines = params.quarantines || {};
+  const cpByModel = /* @__PURE__ */ new Map();
+  for (const cm of params.controlPlaneModels || []) {
+    const mid = String((cm == null ? void 0 : cm.model) || "").trim();
+    if (mid) cpByModel.set(mid.toLowerCase(), cm);
+  }
   const pool = /* @__PURE__ */ new Map();
+  for (const cm of params.controlPlaneModels || []) {
+    const mid = String((cm == null ? void 0 : cm.model) || "").trim();
+    if (!mid || isUnsupportedAgentModel(mid)) continue;
+    const grp = cm.provider && params.groups[cm.provider] || inferCanonicalGroupForModel(mid, params.groups);
+    pool.set(mid, { id: mid, group: grp });
+  }
   for (const m of params.catalogModels || []) {
     const mid = String((m == null ? void 0 : m.id) || "").trim();
-    if (!mid) continue;
+    if (!mid || isUnsupportedAgentModel(mid) || pool.has(mid)) continue;
     const grp = m.primaryGroup && params.groups[m.primaryGroup] || Array.isArray(m.groups) && m.groups[0] && params.groups[m.groups[0]] || inferCanonicalGroupForModel(mid, params.groups);
     pool.set(mid, { id: mid, group: grp });
   }
   for (const mid of Object.keys(params.usageByModel || {})) {
-    if (!pool.has(mid)) {
+    if (!isUnsupportedAgentModel(mid) && !pool.has(mid)) {
       pool.set(mid, { id: mid, group: inferCanonicalGroupForModel(mid, params.groups) });
     }
   }
   for (const grp of Object.values(params.groups)) {
-    if (grp.defaultModel && !pool.has(grp.defaultModel)) {
+    if (grp.defaultModel && !isUnsupportedAgentModel(grp.defaultModel) && !pool.has(grp.defaultModel)) {
       pool.set(grp.defaultModel, { id: grp.defaultModel, group: grp });
     }
   }
   const rankForTier = (targetTier) => {
+    var _a2;
     const rows = [];
     for (const item of pool.values()) {
       const usage = params.usageByModel[item.id];
       const probe = liveProbes[item.id];
       const qBench = qualityBench[item.id];
+      const cpRow = cpByModel.get(item.id.toLowerCase());
       const qEntry = quarantines[item.id];
       const isDisabled = disabledSet.has(item.id);
       const unsupported = isUnsupportedAgentModel(item.id);
-      const accessMode = params.vipPolicy ? getModelAccessMode(item.id, item.group.id, params.vipPolicy, params.disabledModels) : isDisabled || blockedSet.has(item.id.toLowerCase()) ? "blocked" : "auto";
-      const isBlocked = unsupported || blockedSet.has(item.id.toLowerCase()) || accessMode !== "auto";
+      if (unsupported) continue;
+      const cpPolicyBlocked = (cpRow == null ? void 0 : cpRow.policyState) === "blocked";
+      const accessMode = params.vipPolicy ? getModelAccessMode(item.id, item.group.id, params.vipPolicy, params.disabledModels) : isDisabled || cpPolicyBlocked || blockedSet.has(item.id.toLowerCase()) ? "blocked" : (cpRow == null ? void 0 : cpRow.policyState) === "vip" ? "vip" : "auto";
+      const isBlocked = unsupported || cpPolicyBlocked || blockedSet.has(item.id.toLowerCase()) || accessMode !== "auto";
       const quarantined = Boolean(qEntry);
       const free = isFreeModel$1(item.id);
-      const avgCost = (usage == null ? void 0 : usage.avgCostUsd) ?? 0;
+      const avgCost = (usage == null ? void 0 : usage.avgCostUsd) ?? (cpRow == null ? void 0 : cpRow.avgCostUsd) ?? 0;
       const exceedsCostCap = policy.maxCostPerReqUsd !== null && avgCost > 0 && avgCost > policy.maxCostPerReqUsd;
       const freeMismatch = policy.forceFree ? !free : false;
-      const effectiveOnline = (probe == null ? void 0 : probe.status) === "ok" ? true : (probe == null ? void 0 : probe.status) === "error" ? false : qBench ? qBench.online : null;
-      const eligibleForAuto = !isDisabled && !isBlocked && !quarantined && effectiveOnline !== false && !exceedsCostCap && !freeMismatch;
+      const effectiveOnline = (probe == null ? void 0 : probe.status) === "ok" ? true : (probe == null ? void 0 : probe.status) === "error" ? false : typeof (cpRow == null ? void 0 : cpRow.online) === "boolean" ? cpRow.online : qBench ? qBench.online : null;
+      const effectiveToolCallOk = typeof (cpRow == null ? void 0 : cpRow.toolCallOk) === "boolean" ? cpRow.toolCallOk : qBench ? qBench.toolCallOk : null;
+      const eligibleForAuto = !isDisabled && !isBlocked && !quarantined && effectiveOnline !== false && effectiveToolCallOk !== false && !exceedsCostCap && !freeMismatch;
       const scored = computeModelRowScore(item.id, targetTier, usage, probe, policy);
       let blendedScore = scored.score;
-      if (qBench) {
+      if (cpRow && typeof cpRow.evalScore === "number") {
+        const tierSpecific = (_a2 = cpRow.tierScores) == null ? void 0 : _a2[targetTier];
+        blendedScore = Number(
+          Math.max(0, Math.min(100, typeof tierSpecific === "number" ? tierSpecific : cpRow.evalScore)).toFixed(1)
+        );
+      } else if (qBench) {
         blendedScore = qBench.online ? Number(Math.max(0, Math.min(100, scored.score * 0.55 + qBench.qualityScore * 0.45 + (qBench.toolCallOk ? 6 : -10))).toFixed(1)) : Math.max(0, Number((scored.score - 50).toFixed(1)));
       }
       if (quarantined) {
         blendedScore = Math.max(0, Number((blendedScore - 45).toFixed(1)));
+      }
+      if (accessMode === "blocked") {
+        blendedScore = 0;
       }
       rows.push({
         rank: 0,
@@ -1216,8 +1240,8 @@ function buildModelRankingSnapshot(params) {
         accessMode,
         quarantined,
         quarantineReason: qEntry == null ? void 0 : qEntry.reason,
-        qualityScore: qBench ? qBench.qualityScore : null,
-        toolCallOk: qBench ? qBench.toolCallOk : null,
+        qualityScore: typeof (cpRow == null ? void 0 : cpRow.qualityScore) === "number" ? cpRow.qualityScore : qBench ? qBench.qualityScore : null,
+        toolCallOk: effectiveToolCallOk,
         eligibleForAuto,
         score: isDisabled ? -1 : blendedScore,
         capabilityScore: scored.capabilityScore,
@@ -1225,9 +1249,9 @@ function buildModelRankingSnapshot(params) {
         adoptionScore: scored.adoptionScore,
         speedScore: scored.speedScore,
         online: effectiveOnline,
-        pingLatencyMs: typeof (probe == null ? void 0 : probe.latency) === "number" ? probe.latency : (qBench == null ? void 0 : qBench.latencyMs) ?? null,
+        pingLatencyMs: typeof (probe == null ? void 0 : probe.latency) === "number" ? probe.latency : (cpRow == null ? void 0 : cpRow.latencyMs) ?? (qBench == null ? void 0 : qBench.latencyMs) ?? null,
         pingError: (probe == null ? void 0 : probe.errorMsg) || (!(qBench == null ? void 0 : qBench.online) ? qBench == null ? void 0 : qBench.errorMsg : void 0),
-        calls: (usage == null ? void 0 : usage.calls) ?? 0,
+        calls: (usage == null ? void 0 : usage.calls) ?? (cpRow == null ? void 0 : cpRow.calls) ?? 0,
         avgDurationMs: (usage == null ? void 0 : usage.avgDurationMs) ?? null,
         avgFirstTokenMs: (usage == null ? void 0 : usage.avgFirstTokenMs) ?? null,
         cacheHitPct: (usage == null ? void 0 : usage.cacheHitPct) ?? null,
@@ -1237,7 +1261,13 @@ function buildModelRankingSnapshot(params) {
     }
     rows.sort((a, b) => {
       if (a.isDisabled !== b.isDisabled) return a.isDisabled ? 1 : -1;
+      const aBlocked = a.accessMode === "blocked";
+      const bBlocked = b.accessMode === "blocked";
+      if (aBlocked !== bBlocked) return aBlocked ? 1 : -1;
       if (a.online === false !== (b.online === false)) return a.online === false ? 1 : -1;
+      const aEvaluated = a.toolCallOk === true;
+      const bEvaluated = b.toolCallOk === true;
+      if (aEvaluated !== bEvaluated) return aEvaluated ? -1 : 1;
       if (b.score !== a.score) return b.score - a.score;
       if (b.calls !== a.calls) return b.calls - a.calls;
       return (a.pingLatencyMs ?? 999999) - (b.pingLatencyMs ?? 999999);
@@ -1820,9 +1850,10 @@ function createModelRankingTabComponent(ctx, groups) {
         policy,
         vipPolicy,
         qualityBench,
-        quarantines
+        quarantines,
+        controlPlaneModels: Array.isArray(controlPlane == null ? void 0 : controlPlane.models) ? controlPlane.models : void 0
       });
-    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy, vipPolicy, qualityBench, quarantines]);
+    }, [models, usageByModel, usageSampleSize, modelTests, disabledModels, selectedTier, policy, vipPolicy, qualityBench, quarantines, controlPlane]);
     React.useEffect(() => {
       if (snapshot.models.length === 0) return;
       persistModelRankingSnapshot(ctx, snapshot);
@@ -2480,7 +2511,7 @@ function createModelRankingTabComponent(ctx, groups) {
                       },
                       "Testar"
                     ),
-                    agentsList.length > 0 && h(
+                    agentsList.length > 0 && row.accessMode !== "blocked" && h(
                       "button",
                       {
                         onClick: () => handleApplyModel(row.model, row.group),
